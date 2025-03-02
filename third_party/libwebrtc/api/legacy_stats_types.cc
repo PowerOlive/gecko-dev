@@ -12,10 +12,13 @@
 
 #include <string.h>
 
+#include <cstdint>
+#include <string>
 #include <utility>
 
 #include "absl/algorithm/container.h"
 #include "api/make_ref_counted.h"
+#include "api/sequence_checker.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/string_encode.h"
 
@@ -360,6 +363,11 @@ const std::string& StatsReport::Value::string_val() const {
 bool StatsReport::Value::bool_val() const {
   RTC_DCHECK_EQ(type_, kBool);
   return value_.bool_;
+}
+
+const StatsReport::Id& StatsReport::Value::id_val() const {
+  RTC_DCHECK_EQ(type_, kId);
+  return *value_.id_;
 }
 
 const char* StatsReport::Value::display_name() const {

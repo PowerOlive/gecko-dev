@@ -1,5 +1,3 @@
-// |jit-test| skip-if: !wasmTailCallsEnabled()
-
 // Loop implemented using tail calls - the call passes as many arguments as
 // the function receives, of the same types.
 //
@@ -16,8 +14,8 @@ for ( let ballast=1; ballast < TailCallBallast; ballast++ ) {
 (module
   (func $loop (export "loop") (param $n i32) (param $q i32) (param ${ps}) (result i32)
     (if (result i32) (i32.eqz (local.get $n))
-        (return (i32.add (local.get $q) ${sum}))
-        (return_call $loop (i32.sub (local.get $n) (i32.const 1)) (i32.add (local.get $q) (i32.const 1)) ${es}))))
+        (then (return (i32.add (local.get $q) ${sum})))
+        (else (return_call $loop (i32.sub (local.get $n) (i32.const 1)) (i32.add (local.get $q) (i32.const 1)) ${es})))))
 `;
     let ins = wasmEvalText(text);
     assertEq(ins.exports.loop(TailCallIterations, ...vals), TailCallIterations + sumv);

@@ -17,6 +17,7 @@
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/Sprintf.h"
 #include "mozilla/StaticMutex.h"
+#include "mozilla/Try.h"
 #include "nsThreadManager.h"
 #include "nsThreadUtils.h"
 #include "pratom.h"
@@ -43,7 +44,7 @@ using mozilla::TimeStamp;
 // the timer thread.
 class TimerThreadWrapper {
  public:
-  constexpr TimerThreadWrapper() : mThread(nullptr){};
+  constexpr TimerThreadWrapper() : mThread(nullptr) {};
   ~TimerThreadWrapper() = default;
 
   nsresult Init();

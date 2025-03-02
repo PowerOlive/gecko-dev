@@ -13,15 +13,18 @@ const { PromiseTestUtils } = ChromeUtils.importESModule(
 const searchService = Services.search.wrappedJSObject;
 
 add_setup(async function setup() {
-  searchService.willThrowErrorDuringInitInTest = true;
+  UrlbarPrefs.set("suggest.quickactions", false);
+
+  searchService.errorToThrowInTest.type = "Settings";
 
   // When search service fails, we want the promise rejection to be uncaught
-  // so we can continue running the test. 2147500037 is the exception message
-  // for Cr.NS_ERROR_FAILURE.
-  PromiseTestUtils.expectUncaughtRejection(/2147500037/);
+  // so we can continue running the test.
+  PromiseTestUtils.expectUncaughtRejection(
+    /Fake Settings error during search service initialization./
+  );
 
   registerCleanupFunction(async () => {
-    searchService.willThrowErrorDuringInitInTest = false;
+    searchService.errorToThrowInTest.type = null;
     await cleanupPlaces();
   });
 });
@@ -53,7 +56,7 @@ add_task(
           uri: "http://cat/",
           heuristic: true,
           source: UrlbarUtils.RESULT_SOURCE.OTHER_LOCAL,
-          fallbackTitle: "http://cat/",
+          fallbackTitle: "cat/",
         }),
         makeBookmarkResult(context, {
           title: "cat",
@@ -74,6 +77,7 @@ add_task(
       false,
       "Search Service should have failed to initialize."
     );
+    await cleanupPlaces();
   }
 );
 

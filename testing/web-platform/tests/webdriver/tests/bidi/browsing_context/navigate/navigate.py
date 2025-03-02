@@ -1,11 +1,15 @@
 import asyncio
 
 import pytest
+import webdriver.bidi.error as error
+from webdriver.bidi.modules.script import ContextTarget
 
 from . import navigate_and_assert
 from ... import any_string
 
 pytestmark = pytest.mark.asyncio
+
+USER_PROMPT_OPENED_EVENT = "browsingContext.userPromptOpened"
 
 
 async def test_payload(bidi_session, inline, new_tab):
@@ -18,7 +22,7 @@ async def test_payload(bidi_session, inline, new_tab):
     assert result["url"] == url
 
 
-async def test_interactive_simultaneous_navigation(bidi_session, inline, new_tab):
+async def test_interactive_simultaneous_navigation(bidi_session, wait_for_future_safe, inline, new_tab):
     frame1_start_url = inline("frame1")
     frame2_start_url = inline("frame2")
 
@@ -61,7 +65,7 @@ async def test_interactive_simultaneous_navigation(bidi_session, inline, new_tab
     assert frame2_result["url"] == frame2_url
 
     # The "interactive" navigation should resolve before the 5 seconds timeout.
-    await asyncio.wait_for(frame1_task, timeout=5)
+    await wait_for_future_safe(frame1_task, timeout=5)
 
     frame1_result = frame1_task.result()
     assert frame1_result["url"] == frame1_url
@@ -80,9 +84,27 @@ async def test_relative_url(bidi_session, new_tab, url):
         "/webdriver/tests/bidi/browsing_context/support/empty.html"
     )
 
-    # Navigate to page1 with wait=interactive to make sure the document's base URI
-    # was updated.
-    await navigate_and_assert(bidi_session, new_tab, url_before, "interactive")
+    await navigate_and_assert(bidi_session, new_tab, url_before, "none")
 
     url_after = url_before.replace("empty.html", "other.html")
-    await navigate_and_assert(bidi_session, new_tab, url_after, "interactive")
+    await navigate_and_assert(bidi_session, new_tab, url_after, "none")
+
+
+async def test_same_document_navigation_in_before_unload(bidi_session, new_tab, url):
+    url_before = url(
+        "/webdriver/tests/bidi/browsing_context/support/empty.html"
+    )
+
+    await navigate_and_assert(bidi_session, new_tab, url_before, "complete")
+
+    await bidi_session.script.evaluate(
+        expression="""window.addEventListener(
+          'beforeunload',
+          () => history.replaceState(null, 'initial', window.location.href),
+          false
+        );""",
+        target=ContextTarget(new_tab["context"]),
+        await_promise=False)
+
+    url_after = url_before.replace("empty.html", "other.html")
+    await navigate_and_assert(bidi_session, new_tab, url_after, "complete")

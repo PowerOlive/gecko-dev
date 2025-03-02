@@ -96,11 +96,15 @@ gfxDWriteFont::gfxDWriteFont(const RefPtr<UnscaledFontDWrite>& aUnscaledFont,
       case 0:  // never use the DWrite simulation
         mApplySyntheticBold = true;
         break;
-      case 1:  // use DWrite simulation for installed fonts but not webfonts
-        mApplySyntheticBold = aFontEntry->mIsDataUserFont;
+      case 1:  // use DWrite simulation for installed fonts except COLR fonts,
+               // but not webfonts
+        mApplySyntheticBold =
+            aFontEntry->mIsDataUserFont ||
+            aFontEntry->HasFontTable(TRUETYPE_TAG('C', 'O', 'L', 'R'));
         break;
-      default:  // always use DWrite bold simulation
-        // the flag is initialized to false in gfxFont
+      default:  // always use DWrite bold simulation, except for COLR fonts
+        mApplySyntheticBold =
+            aFontEntry->HasFontTable(TRUETYPE_TAG('C', 'O', 'L', 'R'));
         break;
     }
   }
@@ -135,6 +139,10 @@ bool gfxDWriteFont::InitDWriteSupport() {
 void gfxDWriteFont::UpdateSystemTextVars() {
   MOZ_ASSERT(XRE_IsParentProcess());
 
+  if (!gfxVars::IsInitialized()) {
+    return;
+  }
+
   BYTE newQuality = GetSystemTextQuality();
   if (gfxVars::SystemTextQuality() != newQuality) {
     gfxVars::SetSystemTextQuality(newQuality);
@@ -154,7 +162,7 @@ void gfxDWriteFont::SystemTextQualityChanged() {
   // flush cached stuff that depended on the old setting, and force
   // reflow everywhere to ensure we are using correct glyph metrics.
   gfxPlatform::FlushFontAndWordCaches();
-  gfxPlatform::ForceGlobalReflow(gfxPlatform::NeedsReframe::No);
+  gfxPlatform::ForceGlobalReflow(gfxPlatform::GlobalReflowFlags::None);
 }
 
 mozilla::Atomic<bool> gfxDWriteFont::sForceGDIClassicEnabled{true};
@@ -268,12 +276,14 @@ void gfxDWriteFont::UpdateClearTypeVars() {
     gfxVars::SetSystemTextRenderingMode(renderingMode);
   }
 
+#if 0
   // Set cairo dwrite params in the parent process where it might still be
   // needed for printing. We use the validated pref int directly for rendering
   // mode, because a negative (i.e. not set) rendering mode is also used for
   // deciding on forcing GDI in cairo.
   cairo_dwrite_set_cleartype_params(gamma, enhancedContrast, clearTypeLevel,
                                     pixelGeometry, renderingModePref);
+#endif
 }
 
 gfxFont* gfxDWriteFont::CopyWithAntialiasOption(
@@ -675,7 +685,7 @@ int32_t gfxDWriteFont::GetGlyphWidth(uint16_t aGID) {
 }
 
 bool gfxDWriteFont::GetForceGDIClassic() const {
-  return sForceGDIClassicEnabled &&
+  return sForceGDIClassicEnabled && mStyle.allowForceGDIClassic &&
          static_cast<gfxDWriteFontEntry*>(mFontEntry.get())
              ->GetForceGDIClassic() &&
          GetAdjustedSize() <= gfxDWriteFontList::PlatformFontList()

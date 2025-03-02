@@ -68,8 +68,8 @@ class MOZ_STACK_CLASS ContentEventHandler {
 
     bool IsPositioned() const { return mStart.IsSet() && mEnd.IsSet(); }
     bool Collapsed() const { return mStart == mEnd && IsPositioned(); }
-    nsINode* GetStartContainer() const { return mStart.Container(); }
-    nsINode* GetEndContainer() const { return mEnd.Container(); }
+    nsINode* GetStartContainer() const { return mStart.GetContainer(); }
+    nsINode* GetEndContainer() const { return mEnd.GetContainer(); }
     uint32_t StartOffset() const {
       return *mStart.Offset(
           RangeBoundaryType::OffsetFilter::kValidOrInvalidOffsets);
@@ -164,6 +164,9 @@ class MOZ_STACK_CLASS ContentEventHandler {
   // eQueryDOMWidgetHittest event handler
   MOZ_CAN_RUN_SCRIPT nsresult
   OnQueryDOMWidgetHittest(WidgetQueryContentEvent* aEvent);
+  // eQueryDropTargetHittest event handler
+  MOZ_CAN_RUN_SCRIPT nsresult
+  OnQueryDropTargetHittest(WidgetQueryContentEvent* aEvent);
 
   // NS_SELECTION_* event
   MOZ_CAN_RUN_SCRIPT nsresult OnSelectionEvent(WidgetSelectionEvent* aEvent);
@@ -212,11 +215,65 @@ class MOZ_STACK_CLASS ContentEventHandler {
     bool mAfterOpenTag = true;
 
     RawNodePosition() = default;
-    explicit RawNodePosition(const RawNodePosition& aOther)
+    MOZ_IMPLICIT RawNodePosition(const RawNodePosition& aOther)
         : RawRangeBoundary(aOther),
           mAfterOpenTag(aOther.mAfterOpenTag)
     // Don't use the copy constructor of mAssertNoGC.
     {}
+
+    /**
+     * Factory method returning a RawNodePosition object which points start of
+     * first content of aContainer (first child or first character in the data).
+     * I.e., if aContainer is an element node, the result points before the
+     * first child but after the open tag, e.g., <div>{}abc</div> if aContainer
+     * is the <div>.  This is important to understand the difference with the
+     * result of Before().
+     */
+    static RawNodePosition BeforeFirstContentOf(const nsINode& aContainer) {
+      return RawNodePosition(const_cast<nsINode*>(&aContainer), 0u);
+    }
+
+    /**
+     * Factory method returning a RawNodePosition object which points after
+     * aContent.  I.e., if aContent is an element node, the result points after
+     * its close tag, e.g., `<div>abc</div>{}` if aContent is the <div>.
+     */
+    static RawNodePosition After(const nsIContent& aContent) {
+      RawNodePosition it(aContent.GetParentNode(),
+                         const_cast<nsIContent*>(&aContent));
+      it.mAfterOpenTag = false;
+      return it;
+    }
+
+    /**
+     * Factory method returning a RawNodePosition object which points end of
+     * aContainer.  If aContainer is an element node, the result points before
+     * its close tag, e.g., `<div>abc{}</div>` if aContainer is the <div>.
+     */
+    static RawNodePosition AtEndOf(const nsINode& aContainer) {
+      return RawNodePosition(const_cast<nsINode*>(&aContainer),
+                             aContainer.IsText()
+                                 ? aContainer.AsText()->TextDataLength()
+                                 : aContainer.GetChildCount());
+    }
+
+    /**
+     * Factory method returning a RawNodePosition object which points before
+     * aContent.  I.e., if aContent is an element node, the result points
+     * before its open tag, e.g., `{}<div>abc</div>` if aContent is the <div>.
+     * Note that this sets different containers whether aContent is being
+     * removed or not.  If aContent is being removed, i.e., this is used in
+     * nsIMutationObserver::ContentRemoved(), aContent is already not a child
+     * of its ex-parent.  Therefore, the container becomes aContent, but
+     * indicates that it points before the container with mAfterOpenTag.
+     * On the other hand, if it's not being removed, the container is set to
+     * the parent node of aContent.  So, in this case, it points after the
+     * previous sibling of aContent actually.
+     */
+    static RawNodePosition Before(const nsIContent& aContent) {
+      return RawNodePosition(aContent.GetParentNode(),
+                             aContent.GetPreviousSibling());
+    }
 
     RawNodePosition(nsINode* aContainer, uint32_t aOffset)
         : RawRangeBoundary(aContainer, aOffset) {}
@@ -232,16 +289,24 @@ class MOZ_STACK_CLASS ContentEventHandler {
 #endif  // #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
 
    public:
+    const RawNodePosition& operator=(const RawNodePosition& aOther) {
+      if (this != &aOther) {
+        RawRangeBoundary::operator=(aOther);
+        mAfterOpenTag = aOther.mAfterOpenTag;
+      }
+      return *this;
+    }
+
     bool operator==(const RawNodePosition& aOther) const {
       return RawRangeBoundary::operator==(aOther) &&
              mAfterOpenTag == aOther.mAfterOpenTag;
     }
 
     bool IsBeforeOpenTag() const {
-      return IsSet() && Container()->IsElement() && !Ref() && !mAfterOpenTag;
+      return IsSet() && GetContainer()->IsElement() && !Ref() && !mAfterOpenTag;
     }
     bool IsImmediatelyAfterOpenTag() const {
-      return IsSet() && Container()->IsElement() && !Ref() && mAfterOpenTag;
+      return IsSet() && GetContainer()->IsElement() && !Ref() && mAfterOpenTag;
     }
 
 #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
@@ -251,44 +316,42 @@ class MOZ_STACK_CLASS ContentEventHandler {
 #endif  // #ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
   };
 
-  // RawNodePositionBefore isn't good name if Container() isn't an element node
-  // nor Offset() is not 0, though, when Container() is an element node and
-  // mOffset is 0, this is treated as before the open tag of Container().
-  struct MOZ_STACK_CLASS RawNodePositionBefore final : public RawNodePosition {
-    RawNodePositionBefore(nsINode* aContainer, uint32_t aOffset)
-        : RawNodePosition(aContainer, aOffset) {
-      mAfterOpenTag = false;
-    }
-
-    RawNodePositionBefore(nsINode* aContainer, nsIContent* aRef)
-        : RawNodePosition(aContainer, aRef) {
-      mAfterOpenTag = false;
-    }
-  };
-
-  // Get the flatten text length in the range.
-  // @param aStartPosition      Start node and offset in the node of the range.
-  // @param aEndPosition        End node and offset in the node of the range.
-  // @param aRootElement        The root element of the editor or document.
-  //                            aRootElement won't cause any text including
-  //                            line breaks.
-  // @param aLength             The result of the flatten text length of the
-  //                            range.
-  // @param aLineBreakType      Whether this computes flatten text length with
-  //                            native line breakers on the platform or
-  //                            with XP line breaker (\n).
-  // @param aIsRemovingNode     Should be true only when this is called from
-  //                            nsIMutationObserver::ContentRemoved().
-  //                            When this is true, aStartPosition.mNode should
-  //                            be the root node of removing nodes and mOffset
-  //                            should be 0 and aEndPosition.mNode should be
-  //                            same as aStartPosition.mNode and mOffset should
-  //                            be number of the children of mNode.
+  /**
+   * Get the flatten text length in the range.
+   * @param aStartPosition      Start node and offset in the node of the range.
+   *                            If the container is an element node, it's
+   *                            important to start from before or after its open
+   *                            tag because open tag of some elements causes a
+   *                            line break in the result.  If you need the line
+   *                            break, you need to use
+   *                            RawNodePosition::Before().
+   * @param aEndPosition        End node and offset in the node of the range.
+   *                            If you don't want to include line break which is
+   *                            caused by the open tag of the container when
+   *                            you specify start of an element node, you need
+   *                            to use RawNodePosition::Before().
+   * @param aRootElement        The root element of the editor or document.
+   *                            aRootElement won't cause any text including
+   *                            line breaks.
+   * @param aLength             The result of the flatten text length of the
+   *                            range.
+   * @param aLineBreakType      Whether this computes flatten text length with
+   *                            native line breakers on the platform or
+   *                            with XP line breaker (\n).
+   * @param aIsRemovingNode     Should be true only when this is called from
+   *                            nsIMutationObserver::ContentRemoved().
+   *                            When this is true, the container of
+   *                            aStartPosition should be the removing node and
+   *                            points start of it and the container of
+   *                            aEndPosition must be same as the container of
+   *                            aStartPosition and points end of the container.
+   */
   static nsresult GetFlatTextLengthInRange(
       const RawNodePosition& aStartPosition,
       const RawNodePosition& aEndPosition, const Element* aRootElement,
       uint32_t* aLength, LineBreakType aLineBreakType,
       bool aIsRemovingNode = false);
+
   // Computes the native text length between aStartOffset and aEndOffset of
   // aTextNode.
   static uint32_t GetNativeTextLength(const dom::Text& aTextNode,
@@ -299,6 +362,14 @@ class MOZ_STACK_CLASS ContentEventHandler {
                                       uint32_t aMaxLength = UINT32_MAX);
 
   static uint32_t GetNativeTextLength(const nsAString& aText);
+
+  // Get the range between start offset and end offset
+  MOZ_CAN_RUN_SCRIPT
+  already_AddRefed<nsRange> GetRangeFromFlatTextOffset(
+      WidgetContentCommandEvent* aEvent, uint32_t aOffset, uint32_t aLength);
+
+  // Get the contents of aRange as plain text.
+  nsresult GenerateFlatTextContent(const nsRange* aRange, nsString& aString);
 
  protected:
   // Get the text length of aTextNode.
@@ -319,9 +390,10 @@ class MOZ_STACK_CLASS ContentEventHandler {
   nsresult GenerateFlatTextContent(const Element* aElement, nsString& aString,
                                    LineBreakType aLineBreakType);
   // Get the contents of aRange as plain text.
-  nsresult GenerateFlatTextContent(const UnsafeSimpleRange& aSimpleRange,
-                                   nsString& aString,
-                                   LineBreakType aLineBreakType);
+  template <typename NodeType, typename RangeBoundaryType>
+  nsresult GenerateFlatTextContent(
+      const SimpleRangeBase<NodeType, RangeBoundaryType>& aSimpleRange,
+      nsString& aString, LineBreakType aLineBreakType);
   // Get offset of start of aRange.  Note that the result includes the length
   // of line breaker caused by the start of aContent because aRange never
   // includes the line breaker caused by its start node.
@@ -344,7 +416,8 @@ class MOZ_STACK_CLASS ContentEventHandler {
   nsresult QueryContentRect(nsIContent* aContent,
                             WidgetQueryContentEvent* aEvent);
 
-  struct MOZ_STACK_CLASS DOMRangeAndAdjustedOffsetInFlattenedText {
+  template <typename RangeType, typename TextNodeType>
+  struct MOZ_STACK_CLASS DOMRangeAndAdjustedOffsetInFlattenedTextBase {
     bool RangeStartsFromLastTextNode() const {
       return mLastTextNode && mRange.GetStartContainer() == mLastTextNode;
     }
@@ -358,7 +431,7 @@ class MOZ_STACK_CLASS ContentEventHandler {
     }
 
     // The range in the DOM tree.
-    UnsafeSimpleRange mRange;
+    RangeType mRange;
     // Actual start offset of the range in the flattened text.  If aOffset
     // of ConvertFlatTextOffsetToDOMRange() is middle of a surrogate pair,
     // a CRLF or a complex character of some languages, this may be set to
@@ -367,16 +440,43 @@ class MOZ_STACK_CLASS ContentEventHandler {
     // The last text node which is found while walking the tree.
     // If the range ends in a text node, this is the text node.  Otherwise,
     // the last found text node before the end container of mRange.
-    dom::Text* mLastTextNode = nullptr;
+    TextNodeType mLastTextNode = nullptr;
   };
+  using DOMRangeAndAdjustedOffsetInFlattenedText =
+      DOMRangeAndAdjustedOffsetInFlattenedTextBase<SimpleRange,
+                                                   RefPtr<dom::Text>>;
+  using UnsafeDOMRangeAndAdjustedOffsetInFlattenedText =
+      DOMRangeAndAdjustedOffsetInFlattenedTextBase<UnsafeSimpleRange,
+                                                   dom::Text*>;
+
   /**
    * Scans the DOM tree and set mRange as same as from aOffset to aOffset +
    * aLength in the flattened text.
+   * NOTE: Use ConvertFlatTextOffsetToDOMRange() or
+   * ConvertFlatTextOffsetToUnsafeDOMRange() instead of
+   * ConvertFlatTextOffsetToDOMRangeBase<RangeType, TextNodeType>().
    */
-  Result<DOMRangeAndAdjustedOffsetInFlattenedText, nsresult>
+  template <typename RangeType, typename TextNodeType>
+  Result<DOMRangeAndAdjustedOffsetInFlattenedTextBase<RangeType, TextNodeType>,
+         nsresult>
+  ConvertFlatTextOffsetToDOMRangeBase(uint32_t aOffset, uint32_t aLength,
+                                      LineBreakType aLineBreakType,
+                                      bool aExpandToClusterBoundaries);
+  MOZ_ALWAYS_INLINE Result<DOMRangeAndAdjustedOffsetInFlattenedText, nsresult>
   ConvertFlatTextOffsetToDOMRange(uint32_t aOffset, uint32_t aLength,
                                   LineBreakType aLineBreakType,
-                                  bool aExpandToClusterBoundaries);
+                                  bool aExpandToClusterBoundaries) {
+    return ConvertFlatTextOffsetToDOMRangeBase<SimpleRange, RefPtr<dom::Text>>(
+        aOffset, aLength, aLineBreakType, aExpandToClusterBoundaries);
+  }
+  MOZ_ALWAYS_INLINE
+  Result<UnsafeDOMRangeAndAdjustedOffsetInFlattenedText, nsresult>
+  ConvertFlatTextOffsetToUnsafeDOMRange(uint32_t aOffset, uint32_t aLength,
+                                        LineBreakType aLineBreakType,
+                                        bool aExpandToClusterBoundaries) {
+    return ConvertFlatTextOffsetToDOMRangeBase<UnsafeSimpleRange, dom::Text*>(
+        aOffset, aLength, aLineBreakType, aExpandToClusterBoundaries);
+  }
 
   // If the aSimpleRange isn't in text node but next to a text node,
   // this method modifies it in the text node.  Otherwise, not modified.
@@ -430,15 +530,17 @@ class MOZ_STACK_CLASS ContentEventHandler {
   // This returns invalid FrameAndNodeOffset if there is no content which
   // should affect to computing text rect in the range.  mOffsetInNode is start
   // offset in the frame.
+  template <typename NodeType, typename RangeBoundaryType>
   FrameAndNodeOffset GetFirstFrameInRangeForTextRect(
-      const UnsafeSimpleRange& aSimpleRange);
+      const SimpleRangeBase<NodeType, RangeBoundaryType>& aSimpleRange);
 
   // Get last frame before the end of the given range for computing text rect.
   // This returns invalid FrameAndNodeOffset if there is no content which
   // should affect to computing text rect in the range.  mOffsetInNode is end
   // offset in the frame.
+  template <typename NodeType, typename RangeBoundaryType>
   FrameAndNodeOffset GetLastFrameInRangeForTextRect(
-      const UnsafeSimpleRange& aSimpleRange);
+      const SimpleRangeBase<NodeType, RangeBoundaryType>& aSimpleRange);
 
   struct MOZ_STACK_CLASS FrameRelativeRect final {
     // mRect is relative to the mBaseFrame's position.
@@ -507,6 +609,10 @@ class MOZ_STACK_CLASS ContentEventHandler {
   static nsRect GetCaretRectAfter(nsPresContext& aPresContext,
                                   const nsRect& aCharRect,
                                   const WritingMode& aWritingMode);
+
+  nsresult QueryHittestImpl(WidgetQueryContentEvent* aEvent, bool aFlushLayout,
+                            bool aPerformRetargeting,
+                            Element** aContentUnderMouse);
 };
 
 }  // namespace mozilla

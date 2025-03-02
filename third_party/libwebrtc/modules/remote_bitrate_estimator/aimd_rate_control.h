@@ -13,7 +13,8 @@
 
 #include <stdint.h>
 
-#include "absl/types/optional.h"
+#include <optional>
+
 #include "api/field_trials_view.h"
 #include "api/transport/network_types.h"
 #include "api/units/data_rate.h"
@@ -57,7 +58,7 @@ class AimdRateControl {
   void SetInApplicationLimitedRegion(bool in_alr);
   void SetEstimate(DataRate bitrate, Timestamp at_time);
   void SetNetworkStateEstimate(
-      const absl::optional<NetworkStateEstimate>& estimate);
+      const std::optional<NetworkStateEstimate>& estimate);
 
   // Returns the increase rate when used bandwidth is near the link capacity.
   double GetNearMaxIncreaseRateBpsPerSecond() const;
@@ -90,7 +91,7 @@ class AimdRateControl {
   DataRate current_bitrate_;
   DataRate latest_estimated_throughput_;
   LinkCapacityEstimator link_capacity_;
-  absl::optional<NetworkStateEstimate> network_estimate_;
+  std::optional<NetworkStateEstimate> network_estimate_;
   RateControlState rate_control_state_;
   Timestamp time_last_bitrate_change_;
   Timestamp time_last_bitrate_decrease_;
@@ -105,9 +106,9 @@ class AimdRateControl {
   const bool no_bitrate_increase_in_alr_;
   // If "Disabled",  estimated link capacity is not used as upper bound.
   FieldTrialFlag disable_estimate_bounded_increase_{"Disabled"};
-  absl::optional<DataRate> last_decrease_;
-  FieldTrialOptional<TimeDelta> initial_backoff_interval_;
-  FieldTrialFlag link_capacity_fix_;
+  FieldTrialParameter<bool> use_current_estimate_as_min_upper_bound_{"c_upper",
+                                                                     true};
+  std::optional<DataRate> last_decrease_;
 };
 }  // namespace webrtc
 

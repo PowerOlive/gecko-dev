@@ -47,25 +47,11 @@ const SPOOFED_APPVERSION = {
   other: "5.0 (X11)",
 };
 
-let cpuArch = Services.sysinfo.get("arch");
-if (cpuArch == "x86-64") {
-  // Convert CPU arch "x86-64" to "x86_64" used in Linux and Android UAs.
-  cpuArch = "x86_64";
-}
-
 const DEFAULT_PLATFORM = {
-  linux: `Linux ${cpuArch}`,
-  win: "Win32",
-  macosx: "MacIntel",
-  android: `Linux ${cpuArch}`,
-  other: `Linux ${cpuArch}`,
-};
-
-const SPOOFED_PLATFORM = {
   linux: "Linux x86_64",
   win: "Win32",
   macosx: "MacIntel",
-  android: "Linux aarch64",
+  android: "Linux armv81",
   other: "Linux x86_64",
 };
 
@@ -75,51 +61,47 @@ const SPOOFED_PLATFORM = {
 const WindowsOscpuPromise = (async () => {
   let WindowsOscpu = null;
   if (AppConstants.platform == "win") {
+    let cpuArch = Services.sysinfo.get("arch");
     let isWin11 = WindowsVersionInfo.get().buildNumber >= 22000;
     let isWow64 = (await Services.sysinfo.processInfo).isWow64;
     WindowsOscpu =
-      cpuArch == "x86_64" || isWow64 || (cpuArch == "aarch64" && isWin11)
-        ? `Windows NT ${osVersion}; Win64; x64`
-        : `Windows NT ${osVersion}`;
+      cpuArch == "x86-64" || isWow64 || (cpuArch == "aarch64" && isWin11)
+        ? "Windows NT 10.0; Win64; x64"
+        : "Windows NT 10.0";
   }
   return WindowsOscpu;
 })();
 
 const DEFAULT_OSCPU = {
-  linux: `Linux ${cpuArch}`,
+  linux: "Linux x86_64",
+  // `win` will be set in add_setup() by WindowsOscpuPromise.
   macosx: "Intel Mac OS X 10.15",
-  android: `Linux ${cpuArch}`,
-  other: `Linux ${cpuArch}`,
+  android: "Linux armv81",
+  other: "Linux x86_64",
 };
 
 const SPOOFED_OSCPU = {
   linux: "Linux x86_64",
   win: "Windows NT 10.0; Win64; x64",
   macosx: "Intel Mac OS X 10.15",
-  android: "Linux aarch64",
+  android: "Linux armv81",
   other: "Linux x86_64",
 };
 
 const DEFAULT_UA_OS = {
-  linux: `X11; Linux ${cpuArch}`,
+  linux: "X11; Linux x86_64",
+  // `win` will be set in add_setup() by WindowsOscpuPromise.
   macosx: "Macintosh; Intel Mac OS X 10.15",
   android: `Android ${osVersion}; Mobile`,
-  other: `X11; Linux ${cpuArch}`,
+  other: "X11; Linux x86_64",
 };
 
-const SPOOFED_UA_NAVIGATOR_OS = {
+const SPOOFED_UA_OS = {
   linux: "X11; Linux x86_64",
   win: "Windows NT 10.0; Win64; x64",
   macosx: "Macintosh; Intel Mac OS X 10.15",
   android: "Android 10; Mobile",
   other: "X11; Linux x86_64",
-};
-const SPOOFED_UA_HTTPHEADER_OS = {
-  linux: "Windows NT 10.0",
-  win: "Windows NT 10.0",
-  macosx: "Windows NT 10.0",
-  android: "Android 10; Mobile",
-  other: "Windows NT 10.0",
 };
 const SPOOFED_HW_CONCURRENCY = 2;
 
@@ -131,11 +113,6 @@ const CONST_VENDOR = "";
 const CONST_VENDORSUB = "";
 
 const appVersion = parseInt(Services.appinfo.version);
-const rvVersion =
-  parseInt(
-    Services.prefs.getIntPref("network.http.useragent.forceRVOnly", 0),
-    0
-  ) || appVersion;
 const spoofedVersion = AppConstants.platform == "android" ? "115" : appVersion;
 
 const LEGACY_UA_GECKO_TRAIL = "20100101";
@@ -176,12 +153,12 @@ async function testNavigator(result, expectedResults, extraData) {
   );
   is(
     result.userAgent,
-    expectedResults.userAgentNavigator,
+    expectedResults.userAgent,
     `Checking ${testDesc} navigator.userAgent.`
   );
   is(
     result.userAgentHTTPHeader,
-    expectedResults.userAgentHTTPHeader,
+    expectedResults.userAgent,
     `Checking ${testDesc} userAgentHTTPHeader.`
   );
   is(
@@ -258,7 +235,7 @@ async function testNavigator(result, expectedResults, extraData) {
   );
   is(
     result.worker_userAgent,
-    expectedResults.userAgentNavigator,
+    expectedResults.userAgent,
     `Checking ${testDesc} worker navigator.userAgent.`
   );
   is(
@@ -285,8 +262,7 @@ async function testNavigator(result, expectedResults, extraData) {
 }
 
 let defaultUserAgent;
-let spoofedUserAgentNavigator;
-let spoofedUserAgentHeader;
+let spoofedUserAgent;
 let allNotSpoofed;
 let allSpoofed;
 
@@ -294,19 +270,13 @@ add_setup(async () => {
   DEFAULT_OSCPU.win = DEFAULT_UA_OS.win = await WindowsOscpuPromise;
   defaultUserAgent = `Mozilla/5.0 (${
     DEFAULT_UA_OS[AppConstants.platform]
-  }; rv:${rvVersion}.0) Gecko/${
+  }; rv:${appVersion}.0) Gecko/${
     DEFAULT_UA_GECKO_TRAIL[AppConstants.platform]
   } Firefox/${appVersion}.0`;
 
-  spoofedUserAgentNavigator = `Mozilla/5.0 (${
-    SPOOFED_UA_NAVIGATOR_OS[AppConstants.platform]
-  }; rv:${rvVersion}.0) Gecko/${
-    SPOOFED_UA_GECKO_TRAIL[AppConstants.platform]
-  } Firefox/${appVersion}.0`;
-
-  spoofedUserAgentHeader = `Mozilla/5.0 (${
-    SPOOFED_UA_HTTPHEADER_OS[AppConstants.platform]
-  }; rv:${rvVersion}.0) Gecko/${
+  spoofedUserAgent = `Mozilla/5.0 (${
+    SPOOFED_UA_OS[AppConstants.platform]
+  }; rv:${appVersion}.0) Gecko/${
     SPOOFED_UA_GECKO_TRAIL[AppConstants.platform]
   } Firefox/${appVersion}.0`;
 
@@ -321,8 +291,7 @@ add_setup(async () => {
     oscpu: DEFAULT_OSCPU[AppConstants.platform],
     platform: DEFAULT_PLATFORM[AppConstants.platform],
     pluginsLength: 5,
-    userAgentNavigator: defaultUserAgent,
-    userAgentHTTPHeader: defaultUserAgent,
+    userAgent: defaultUserAgent,
     framer_crossOrigin_userAgentHTTPHeader: defaultUserAgent,
     framee_crossOrigin_userAgentHTTPHeader: defaultUserAgent,
   };
@@ -331,12 +300,11 @@ add_setup(async () => {
     hardwareConcurrency: SPOOFED_HW_CONCURRENCY,
     mimeTypesLength: 2,
     oscpu: SPOOFED_OSCPU[AppConstants.platform],
-    platform: SPOOFED_PLATFORM[AppConstants.platform],
+    platform: DEFAULT_PLATFORM[AppConstants.platform],
     pluginsLength: 5,
-    userAgentNavigator: spoofedUserAgentNavigator,
-    userAgentHTTPHeader: spoofedUserAgentHeader,
-    framer_crossOrigin_userAgentHTTPHeader: spoofedUserAgentHeader,
-    framee_crossOrigin_userAgentHTTPHeader: spoofedUserAgentHeader,
+    userAgent: spoofedUserAgent,
+    framer_crossOrigin_userAgentHTTPHeader: spoofedUserAgent,
+    framee_crossOrigin_userAgentHTTPHeader: spoofedUserAgent,
   };
 });
 
@@ -375,8 +343,7 @@ add_task(async () => {
 add_task(async () => {
   expectedResults = structuredClone(allSpoofed);
   expectedResults.framer_crossOrigin_userAgentHTTPHeader = defaultUserAgent;
-  expectedResults.framee_crossOrigin_userAgentHTTPHeader =
-    spoofedUserAgentHeader;
+  expectedResults.framee_crossOrigin_userAgentHTTPHeader = spoofedUserAgent;
   await testC(uri, testNavigator, expectedResults);
 });
 
@@ -384,8 +351,7 @@ add_task(async () => {
 add_task(async () => {
   expectedResults = structuredClone(allSpoofed);
   expectedResults.framer_crossOrigin_userAgentHTTPHeader = defaultUserAgent;
-  expectedResults.framee_crossOrigin_userAgentHTTPHeader =
-    spoofedUserAgentHeader;
+  expectedResults.framee_crossOrigin_userAgentHTTPHeader = spoofedUserAgent;
   await testD(uri, testNavigator, expectedResults);
 });
 

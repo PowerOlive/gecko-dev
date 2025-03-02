@@ -30,15 +30,15 @@ use core::mem;
 macro_rules! tuple_ule {
     ($name:ident, $len:literal, [ $($t:ident $i:tt),+ ]) => {
         #[doc = concat!("ULE type for tuples with ", $len, " elements.")]
-        #[repr(packed)]
+        #[repr(C, packed)]
         #[allow(clippy::exhaustive_structs)] // stable
         pub struct $name<$($t),+>($(pub $t),+);
 
         // Safety (based on the safety checklist on the ULE trait):
         //  1. TupleULE does not include any uninitialized or padding bytes.
-        //     (achieved by `#[repr(packed)]` on a struct containing only ULE fields)
+        //     (achieved by `#[repr(C, packed)]` on a struct containing only ULE fields)
         //  2. TupleULE is aligned to 1 byte.
-        //     (achieved by `#[repr(packed)]` on a struct containing only ULE fields)
+        //     (achieved by `#[repr(C, packed)]` on a struct containing only ULE fields)
         //  3. The impl of validate_byte_slice() returns an error if any byte is not valid.
         //  4. The impl of validate_byte_slice() returns an error if there are extra bytes.
         //  5. The other ULE methods use the default impl.
@@ -111,10 +111,7 @@ macro_rules! tuple_ule {
 
         impl<$($t: ULE),+> Clone for $name<$($t),+> {
             fn clone(&self) -> Self {
-                // copy to the stack to avoid hitting a future incompat error
-                // https://github.com/rust-lang/rust/issues/82523#issuecomment-947900712
-                let stack = ($(self.$i),+);
-                $name($(stack.$i),+)
+                *self
             }
         }
 
@@ -147,7 +144,7 @@ fn test_pairule_validate() {
     // Test failed validation with a correctly sized but differently constrained tuple
     // Note: 1234901 is not a valid char
     let zerovec3 = ZeroVec::<(char, u32)>::parse_byte_slice(bytes);
-    assert!(matches!(zerovec3, Err(_)));
+    assert!(zerovec3.is_err());
 }
 
 #[test]
@@ -162,7 +159,7 @@ fn test_tripleule_validate() {
     // Test failed validation with a correctly sized but differently constrained tuple
     // Note: 1234901 is not a valid char
     let zerovec3 = ZeroVec::<(char, i8, u32)>::parse_byte_slice(bytes);
-    assert!(matches!(zerovec3, Err(_)));
+    assert!(zerovec3.is_err());
 }
 
 #[test]
@@ -178,5 +175,5 @@ fn test_quadule_validate() {
     // Test failed validation with a correctly sized but differently constrained tuple
     // Note: 1234901 is not a valid char
     let zerovec3 = ZeroVec::<(char, i8, u16, u32)>::parse_byte_slice(bytes);
-    assert!(matches!(zerovec3, Err(_)));
+    assert!(zerovec3.is_err());
 }

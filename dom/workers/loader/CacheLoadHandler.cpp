@@ -128,13 +128,6 @@ nsresult CacheCreator::CreateCacheStorage(nsIPrincipal* aPrincipal) {
     return NS_ERROR_FAILURE;
   }
 
-  // If we're in private browsing mode, don't even try to create the
-  // CacheStorage.  Instead, just fail immediately to terminate the
-  // ServiceWorker load.
-  if (NS_WARN_IF(mOriginAttributes.mPrivateBrowsingId > 0)) {
-    return NS_ERROR_DOM_SECURITY_ERR;
-  }
-
   // Create a CacheStorage bypassing its trusted origin checks.  The
   // ServiceWorker has already performed its own checks before getting
   // to this point.
@@ -237,13 +230,14 @@ void CacheCreator::DeleteCache(nsresult aReason) {
 CacheLoadHandler::CacheLoadHandler(ThreadSafeWorkerRef* aWorkerRef,
                                    ThreadSafeRequestHandle* aRequestHandle,
                                    bool aIsWorkerScript,
+                                   bool aOnlyExistingCachedResourcesAllowed,
                                    WorkerScriptLoader* aLoader)
     : mRequestHandle(aRequestHandle),
       mLoader(aLoader),
       mWorkerRef(aWorkerRef),
       mIsWorkerScript(aIsWorkerScript),
       mFailed(false),
-      mState(aWorkerRef->Private()->GetServiceWorkerDescriptor().State()) {
+      mOnlyExistingCachedResourcesAllowed(aOnlyExistingCachedResourcesAllowed) {
   MOZ_ASSERT(aWorkerRef);
   MOZ_ASSERT(aWorkerRef->Private()->IsServiceWorker());
   mMainThreadEventTarget = aWorkerRef->Private()->MainThreadEventTarget();
@@ -304,18 +298,15 @@ void CacheLoadHandler::Load(Cache* aCache) {
     return;
   }
 
-  nsAutoCString spec;
-  rv = uri->GetSpec(spec);
+  MOZ_ASSERT(loadContext->mFullURL.IsEmpty());
+  rv = uri->GetSpec(loadContext->mFullURL);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     Fail(rv);
     return;
   }
 
-  MOZ_ASSERT(loadContext->mFullURL.IsEmpty());
-  CopyUTF8toUTF16(spec, loadContext->mFullURL);
-
-  mozilla::dom::RequestOrUSVString request;
-  request.SetAsUSVString().ShareOrDependUpon(loadContext->mFullURL);
+  mozilla::dom::RequestOrUTF8String request;
+  request.SetAsUTF8String().ShareOrDependUpon(loadContext->mFullURL);
 
   mozilla::dom::CacheQueryOptions params;
 
@@ -373,9 +364,7 @@ void CacheLoadHandler::ResolvedCallback(JSContext* aCx,
     // storage was probably wiped without removing the service worker
     // registration.  It can also happen for exposed reasons like the
     // service worker script calling importScripts() after install.
-    if (NS_WARN_IF(mIsWorkerScript ||
-                   (mState != ServiceWorkerState::Parsed &&
-                    mState != ServiceWorkerState::Installing))) {
+    if (NS_WARN_IF(mIsWorkerScript || mOnlyExistingCachedResourcesAllowed)) {
       Fail(NS_ERROR_DOM_INVALID_STATE_ERR);
       return;
     }
@@ -558,7 +547,7 @@ nsresult CacheLoadHandler::DataReceivedFromCache(
   nsresult rv;
 
   // Set the Source type to "text" for decoding.
-  loadContext->mRequest->SetTextSource();
+  loadContext->mRequest->SetTextSource(loadContext);
 
   rv = mDecoder->DecodeRawData(loadContext->mRequest, aString, aStringLen,
                                /* aEndOfStream = */ true);

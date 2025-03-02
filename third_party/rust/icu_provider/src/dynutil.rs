@@ -108,7 +108,7 @@ macro_rules! impl_casting_upcast {
 /// icu_provider::impl_dynamic_data_provider!(HelloWorldProvider, [HelloWorldV1Marker,], AnyMarker);
 ///
 /// let req = DataRequest {
-///     locale: &icu_locid::locale!("de").into(),
+///     locale: &icu_locid::langid!("de").into(),
 ///     metadata: Default::default(),
 /// };
 ///
@@ -148,7 +148,7 @@ macro_rules! impl_casting_upcast {
 /// }, AnyMarker);
 ///
 /// let req = DataRequest {
-///     locale: &icu_locid::locale!("de").into(),
+///     locale: &icu_locid::langid!("de").into(),
 ///     metadata: Default::default(),
 /// };
 ///
@@ -192,12 +192,9 @@ macro_rules! impl_dynamic_data_provider {
                 $crate::DataResponse<$dyn_m>,
                 $crate::DataError,
             > {
-                $(
-                    const $ident: $crate::DataKeyHash = $key.hashed();
-                )+
                 match key.hashed() {
                     $(
-                        $ident => {
+                        h if h == $key.hashed() => {
                             let result: $crate::DataResponse<$struct_m> =
                                 $crate::DynamicDataProvider::<$struct_m>::load_data(self, key, req)?;
                             Ok($crate::DataResponse {
@@ -226,7 +223,7 @@ macro_rules! impl_dynamic_data_provider {
         }
 
     };
-    ($provider:ty, [ $($struct_m:ident),+, ], $dyn_m:path) => {
+    ($provider:ty, [ $($(#[$cfg:meta])? $struct_m:ty),+, ], $dyn_m:path) => {
         impl $crate::DynamicDataProvider<$dyn_m> for $provider
         {
             fn load_data(
@@ -237,14 +234,10 @@ macro_rules! impl_dynamic_data_provider {
                 $crate::DataResponse<$dyn_m>,
                 $crate::DataError,
             > {
-                #![allow(non_upper_case_globals)]
-                // Reusing the struct names as identifiers
-                $(
-                    const $struct_m: $crate::DataKeyHash = $struct_m::KEY.hashed();
-                )+
                 match key.hashed() {
                     $(
-                        $struct_m => {
+                        $(#[$cfg])?
+                        h if h == <$struct_m>::KEY.hashed() => {
                             let result: $crate::DataResponse<$struct_m> =
                                 $crate::DataProvider::load(self, req)?;
                             Ok($crate::DataResponse {

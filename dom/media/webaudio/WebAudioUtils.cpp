@@ -5,7 +5,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "WebAudioUtils.h"
-#include "AudioNodeTrack.h"
 #include "blink/HRTFDatabaseLoader.h"
 
 #include "nsComponentManagerUtils.h"
@@ -14,7 +13,6 @@
 #include "nsIScriptError.h"
 #include "nsJSUtils.h"
 #include "nsServiceManagerUtils.h"
-#include "AudioEventTimeline.h"
 
 #include "mozilla/SchedulerGroup.h"
 
@@ -23,14 +21,6 @@ namespace mozilla {
 LazyLogModule gWebAudioAPILog("WebAudioAPI");
 
 namespace dom {
-
-void WebAudioUtils::ConvertAudioTimelineEventToTicks(AudioTimelineEvent& aEvent,
-                                                     AudioNodeTrack* aDest) {
-  aEvent.SetTimeInTicks(
-      aDest->SecondsToNearestTrackTime(aEvent.Time<double>()));
-  aEvent.mTimeConstant *= aDest->mSampleRate;
-  aEvent.mDuration *= aDest->mSampleRate;
-}
 
 void WebAudioUtils::Shutdown() { WebCore::HRTFDatabaseLoader::shutdown(); }
 
@@ -79,45 +69,21 @@ void WebAudioUtils::LogToDeveloperConsole(uint64_t aWindowID,
     nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
         "dom::WebAudioUtils::LogToDeveloperConsole",
         [aWindowID, aKey] { LogToDeveloperConsole(aWindowID, aKey); });
-    SchedulerGroup::Dispatch(TaskCategory::Other, task.forget());
-    return;
-  }
-
-  nsCOMPtr<nsIConsoleService> console(
-      do_GetService("@mozilla.org/consoleservice;1"));
-  if (!console) {
-    NS_WARNING("Failed to log message to console.");
-    return;
-  }
-
-  nsAutoString spec;
-  uint32_t aLineNumber = 0, aColumnNumber = 0;
-  JSContext* cx = nsContentUtils::GetCurrentJSContext();
-  if (cx) {
-    nsJSUtils::GetCallingLocation(cx, spec, &aLineNumber, &aColumnNumber);
-  }
-
-  nsresult rv;
-  nsCOMPtr<nsIScriptError> errorObject =
-      do_CreateInstance(NS_SCRIPTERROR_CONTRACTID, &rv);
-  if (!errorObject) {
-    NS_WARNING("Failed to log message to console.");
+    SchedulerGroup::Dispatch(task.forget());
     return;
   }
 
   nsAutoString result;
-  rv = nsContentUtils::GetLocalizedString(nsContentUtils::eDOM_PROPERTIES, aKey,
-                                          result);
+  nsresult rv = nsContentUtils::GetLocalizedString(
+      nsContentUtils::eDOM_PROPERTIES, aKey, result);
 
   if (NS_FAILED(rv)) {
     NS_WARNING("Failed to log message to console.");
     return;
   }
 
-  errorObject->InitWithWindowID(result, spec, u""_ns, aLineNumber,
-                                aColumnNumber, nsIScriptError::warningFlag,
-                                "Web Audio", aWindowID);
-  console->LogMessage(errorObject);
+  nsContentUtils::ReportToConsoleByWindowID(result, nsIScriptError::warningFlag,
+                                            "Web Audio"_ns, aWindowID);
 }
 
 }  // namespace dom

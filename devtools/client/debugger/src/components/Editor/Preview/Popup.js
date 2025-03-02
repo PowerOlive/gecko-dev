@@ -2,17 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
-import { div } from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../../../utils/connect";
+import React, { Component } from "devtools/client/shared/vendor/react";
+import { div } from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 
 import Reps from "devtools/client/shared/components/reps/index";
 const {
   REPS: { Grip },
   MODE,
-  objectInspector,
 } = Reps;
+import * as objectInspector from "resource://devtools/client/shared/components/object-inspector/index.js";
 
 const { ObjectInspector, utils } = objectInspector;
 
@@ -22,10 +22,8 @@ const {
 
 import ExceptionPopup from "./ExceptionPopup";
 
-import actions from "../../../actions";
+import actions from "../../../actions/index";
 import Popover from "../../shared/Popover";
-
-import "./Popup.css";
 
 export class Popup extends Component {
   constructor(props) {
@@ -46,27 +44,39 @@ export class Popup extends Component {
   }
 
   componentDidMount() {
-    this.addHighlightToToken();
+    this.addHighlightToToken(this.props.preview.target);
   }
 
   componentWillUnmount() {
-    this.removeHighlightFromToken();
+    this.removeHighlightFromToken(this.props.preview.target);
   }
 
-  addHighlightToToken() {
+  componentDidUpdate(prevProps) {
     const { target } = this.props.preview;
-    if (target) {
-      target.classList.add("preview-token");
-      addHighlightToTargetSiblings(target, this.props);
+    if (prevProps.target == target) {
+      return;
     }
+
+    this.removeHighlightFromToken(prevProps.preview.target);
+    this.addHighlightToToken(target);
   }
 
-  removeHighlightFromToken() {
-    const { target } = this.props.preview;
-    if (target) {
-      target.classList.remove("preview-token");
-      removeHighlightForTargetSiblings(target);
+  addHighlightToToken(target) {
+    if (!target) {
+      return;
     }
+
+    target.classList.add("preview-token");
+    addHighlightToTargetSiblings(target, this.props);
+  }
+
+  removeHighlightFromToken(target) {
+    if (!target) {
+      return;
+    }
+
+    target.classList.remove("preview-token");
+    removeHighlightForTargetSiblings(target);
   }
 
   calculateMaxHeight = () => {
@@ -90,14 +100,14 @@ export class Popup extends Component {
 
   renderExceptionPreview(exception) {
     return React.createElement(ExceptionPopup, {
-      exception: exception,
-      clearPreview: this.props.clearPreview,
+      exception,
+      mouseout: this.props.clearPreview,
     });
   }
 
   renderPreview() {
     const {
-      preview: { root, exception, resultGrip },
+      preview: { root, exception, previewType },
     } = this.props;
 
     const usesCustomFormatter =
@@ -109,11 +119,21 @@ export class Popup extends Component {
 
     return div(
       {
-        className: "preview-popup",
+        className: `preview-popup preview-type-${previewType}`,
         style: {
           maxHeight: this.calculateMaxHeight(),
         },
       },
+      // Bug 1915610 - JS Tracer isn't localized yet
+      previewType == "tracer"
+        ? div({ className: "preview-tracer-header" }, "Tracer preview")
+        : null,
+      previewType == "tracer" && !nodeIsPrimitive(root)
+        ? div(
+            { className: "preview-tracer-warning" },
+            "Attribute previews on traced objects are showing the current values and not the value at execution of the selected frame."
+          )
+        : null,
       React.createElement(ObjectInspector, {
         roots: [root],
         autoExpandDepth: 1,
@@ -130,15 +150,8 @@ export class Popup extends Component {
         onDOMNodeMouseOver: grip => this.props.highlightDomElement(grip),
         onDOMNodeMouseOut: grip => this.props.unHighlightDomElement(grip),
         mayUseCustomFormatter: true,
-        onViewSourceInDebugger: () => {
-          return (
-            resultGrip.location &&
-            this.props.selectSourceURL(resultGrip.location.url, {
-              line: resultGrip.location.line,
-              column: resultGrip.location.column,
-            })
-          );
-        },
+        onViewSourceInDebugger: ({ url, line, column }) =>
+          this.props.selectSourceURL(url, { line, column }),
       })
     );
   }
@@ -172,8 +185,8 @@ export class Popup extends Component {
       Popover,
       {
         targetPosition: cursorPos,
-        type: type,
-        editorRef: editorRef,
+        type,
+        editorRef,
         target: this.props.preview.target,
         mouseout: this.props.clearPreview,
       },

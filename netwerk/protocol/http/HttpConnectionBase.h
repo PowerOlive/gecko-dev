@@ -33,13 +33,27 @@ class nsHttpHandler;
 class ASpdySession;
 class Http3WebTransportSession;
 
+enum class ConnectionState : uint32_t {
+  HALF_OPEN = 0,
+  INITED,
+  TLS_HANDSHAKING,
+  ZERORTT,
+  TRANSFERING,
+  CLOSED
+};
+
+enum class ConnectionExperienceState : uint32_t {
+  Not_Experienced = 0,
+  First_Request_Sent = (1 << 0),
+  First_Response_Received = (1 << 1),
+  Experienced = (1 << 2),
+};
+
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(ConnectionExperienceState);
+
 // 1dcc863e-db90-4652-a1fe-13fea0b54e46
-#define HTTPCONNECTIONBASE_IID                       \
-  {                                                  \
-    0x437e7d26, 0xa2fd, 0x49f2, {                    \
-      0xb3, 0x7c, 0x84, 0x23, 0xf0, 0x94, 0x72, 0x36 \
-    }                                                \
-  }
+#define HTTPCONNECTIONBASE_IID \
+  {0x437e7d26, 0xa2fd, 0x49f2, {0xb3, 0x7c, 0x84, 0x23, 0xf0, 0x94, 0x72, 0x36}}
 
 //-----------------------------------------------------------------------------
 // nsHttpConnection - represents a connection to a HTTP server (or proxy)
@@ -108,8 +122,8 @@ class HttpConnectionBase : public nsSupportsWeakReference {
   virtual bool NoClientCertAuth() const { return true; }
 
   // HTTP/2 websocket support
-  virtual WebSocketSupport GetWebSocketSupport() {
-    return WebSocketSupport::NO_SUPPORT;
+  virtual ExtendedCONNECTSupport GetExtendedCONNECTSupport() {
+    return ExtendedCONNECTSupport::NO_SUPPORT;
   }
 
   void GetConnectionInfo(nsHttpConnectionInfo** ci) {
@@ -148,6 +162,15 @@ class HttpConnectionBase : public nsSupportsWeakReference {
   virtual bool GetEchConfigUsed() = 0;
   virtual PRIntervalTime LastWriteTime() = 0;
 
+  void ChangeConnectionState(ConnectionState aState);
+  void SetCloseReason(ConnectionCloseReason aReason) {
+    if (mCloseReason == ConnectionCloseReason::UNSET) {
+      mCloseReason = aReason;
+    }
+  }
+
+  void RecordConnectionCloseTelemetry(nsresult aReason);
+
  protected:
   // The capabailities associated with the most recent transaction
   uint32_t mTransactionCaps{0};
@@ -155,6 +178,8 @@ class HttpConnectionBase : public nsSupportsWeakReference {
   RefPtr<nsHttpConnectionInfo> mConnInfo;
 
   bool mExperienced{false};
+  // Used to track whether this connection is serving the first request.
+  bool mHasFirstHttpTransaction{false};
 
   bool mBootstrappedTimingsSet{false};
   TimingStruct mBootstrappedTimings;
@@ -165,6 +190,14 @@ class HttpConnectionBase : public nsSupportsWeakReference {
   nsTArray<HttpTrafficCategory> mTrafficCategory;
   PRIntervalTime mRtt{0};
   nsresult mErrorBeforeConnect = NS_OK;
+
+  ConnectionState mConnectionState = ConnectionState::HALF_OPEN;
+
+  // Represent if the connection has served more than one request.
+  ConnectionExperienceState mExperienceState =
+      ConnectionExperienceState::Not_Experienced;
+
+  ConnectionCloseReason mCloseReason = ConnectionCloseReason::UNSET;
 };
 
 NS_DEFINE_STATIC_IID_ACCESSOR(HttpConnectionBase, HTTPCONNECTIONBASE_IID)

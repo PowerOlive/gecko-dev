@@ -15,100 +15,67 @@ const REMOTE_SETTINGS_DATA = [
         description:
           "The filter() method creates a shallow copy of a portion of a given array, filtered down to just the elements from the given array that pass the test implemented by the provided function.",
         keywords: ["array"],
-        is_top_pick: true,
+        score: 0.24,
       },
     ],
   },
 ];
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      ["browser.urlbar.quicksuggest.enabled", true],
-      ["browser.urlbar.quicksuggest.nonsponsored", true],
-      ["browser.urlbar.quicksuggest.remoteSettings.enabled", true],
-      ["browser.urlbar.bestMatch.enabled", true],
-      ["browser.urlbar.suggest.mdn", true],
-    ],
-  });
+// Avoid timeouts in verify mode. They're especially common on Mac.
+requestLongerTimeout(5);
 
+add_setup(async function () {
   await QuickSuggestTestUtils.ensureQuickSuggestInit({
-    remoteSettingsResults: REMOTE_SETTINGS_DATA,
+    remoteSettingsRecords: REMOTE_SETTINGS_DATA,
   });
 });
 
 add_task(async function basic() {
-  await SpecialPowers.pushPrefEnv({
-    set: [["browser.urlbar.mdn.featureGate", true]],
-  });
-  await waitForSuggestions();
-
-  const suggestion = REMOTE_SETTINGS_DATA[0].attachment[0];
-  await UrlbarTestUtils.promiseAutocompleteResultPopup({
-    window,
-    value: suggestion.keywords[0],
-  });
-  Assert.equal(UrlbarTestUtils.getResultCount(window), 2);
-
-  const { element, result } = await UrlbarTestUtils.getDetailsOfResultAt(
-    window,
-    1
-  );
-  Assert.equal(
-    result.providerName,
-    UrlbarProviderQuickSuggest.name,
-    "The result should be from the expected provider"
-  );
-  Assert.equal(result.payload.provider, "MDNSuggestions");
-
-  const onLoad = BrowserTestUtils.browserLoaded(
-    gBrowser.selectedBrowser,
-    false,
-    suggestion.url
-  );
-  EventUtils.synthesizeMouseAtCenter(element.row, {});
-  await onLoad;
-  Assert.ok(true, "Expected page is loaded");
-
-  await PlacesUtils.history.clear();
-  await SpecialPowers.popPrefEnv();
-});
-
-add_task(async function rowLabel() {
-  await SpecialPowers.pushPrefEnv({
-    set: [["browser.urlbar.mdn.featureGate", true]],
-  });
-
-  const testCases = [
-    {
-      bestMatch: true,
-      expected: "Recommended resource",
-    },
-    {
-      bestMatch: false,
-      expected: "Firefox Suggest",
-    },
-  ];
-
-  for (const { bestMatch, expected } of testCases) {
-    await SpecialPowers.pushPrefEnv({
-      set: [["browser.urlbar.bestMatch.enabled", bestMatch]],
-    });
-
+  await BrowserTestUtils.withNewTab("about:blank", async () => {
+    const suggestion = REMOTE_SETTINGS_DATA[0].attachment[0];
     await UrlbarTestUtils.promiseAutocompleteResultPopup({
       window,
-      value: REMOTE_SETTINGS_DATA[0].attachment[0].keywords[0],
+      value: suggestion.keywords[0],
     });
     Assert.equal(UrlbarTestUtils.getResultCount(window), 2);
 
-    const { element } = await UrlbarTestUtils.getDetailsOfResultAt(window, 1);
-    const row = element.row;
-    Assert.equal(row.getAttribute("label"), expected);
+    const { element, result } = await UrlbarTestUtils.getDetailsOfResultAt(
+      window,
+      1
+    );
+    Assert.equal(
+      result.providerName,
+      UrlbarProviderQuickSuggest.name,
+      "The result should be from the expected provider"
+    );
+    Assert.equal(result.payload.provider, "Mdn");
 
-    await SpecialPowers.popPrefEnv();
-  }
+    const onLoad = BrowserTestUtils.browserLoaded(
+      gBrowser.selectedBrowser,
+      false,
+      result.payload.url
+    );
+    EventUtils.synthesizeMouseAtCenter(element.row, {});
+    await onLoad;
+    Assert.ok(true, "Expected page is loaded");
+  });
 
-  await SpecialPowers.popPrefEnv();
+  await PlacesUtils.history.clear();
+});
+
+// Tests the row/group label.
+add_task(async function rowLabel() {
+  await UrlbarTestUtils.promiseAutocompleteResultPopup({
+    window,
+    value: REMOTE_SETTINGS_DATA[0].attachment[0].keywords[0],
+  });
+  Assert.equal(UrlbarTestUtils.getResultCount(window), 2);
+
+  const { element } = await UrlbarTestUtils.getDetailsOfResultAt(window, 1);
+  const row = element.row;
+  Assert.equal(row.getAttribute("label"), "Recommended resource");
+
+  await UrlbarTestUtils.promisePopupClose(window);
 });
 
 add_task(async function disable() {
@@ -126,6 +93,7 @@ add_task(async function disable() {
   Assert.equal(result.providerName, "HeuristicFallback");
 
   await SpecialPowers.popPrefEnv();
+  await QuickSuggestTestUtils.forceSync();
 });
 
 // Tests the "Not interested" result menu dismissal command.
@@ -141,11 +109,11 @@ add_task(async function resultMenu_notInterested() {
   // Re-enable suggestions and wait until MDNSuggestions syncs them from
   // remote settings again.
   UrlbarPrefs.set("suggest.mdn", true);
-  await waitForSuggestions();
+  await QuickSuggestTestUtils.forceSync();
 });
 
 // Tests the "Not relevant" result menu dismissal command.
-add_task(async function notRelevant() {
+add_task(async function resultMenu_notRelevant() {
   await doDismissTest("not_relevant");
 
   Assert.equal(UrlbarPrefs.get("suggest.mdn"), true);
@@ -157,12 +125,12 @@ add_task(async function notRelevant() {
   await QuickSuggest.blockedSuggestions.clear();
 });
 
-async function doDismissTest(command) {
-  await SpecialPowers.pushPrefEnv({
-    set: [["browser.urlbar.mdn.featureGate", true]],
-  });
-  await waitForSuggestions();
+// Tests the "Manage" result menu.
+add_task(async function resultMenu_manage() {
+  await doManageTest({ input: "array", index: 1 });
+});
 
+async function doDismissTest(command) {
   const keyword = REMOTE_SETTINGS_DATA[0].attachment[0].keywords[0];
   // Do a search.
   await UrlbarTestUtils.promiseAutocompleteResultPopup({
@@ -266,14 +234,4 @@ async function doDismissTest(command) {
   }
 
   await UrlbarTestUtils.promisePopupClose(window);
-  await SpecialPowers.popPrefEnv();
-}
-
-async function waitForSuggestions() {
-  const keyword = REMOTE_SETTINGS_DATA[0].attachment[0].keywords[0];
-  const feature = QuickSuggest.getFeature("MDNSuggestions");
-  await TestUtils.waitForCondition(async () => {
-    const suggestions = await feature.queryRemoteSettings(keyword);
-    return !!suggestions.length;
-  }, "Waiting for MDNSuggestions to serve remote settings suggestions");
 }

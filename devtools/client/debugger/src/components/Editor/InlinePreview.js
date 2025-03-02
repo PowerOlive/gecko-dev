@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { PureComponent } from "react";
-import { span } from "react-dom-factories";
-import PropTypes from "prop-types";
+import React, { PureComponent } from "devtools/client/shared/vendor/react";
+import { span } from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
 import Reps from "devtools/client/shared/components/reps/index";
 
 const {
@@ -22,18 +22,20 @@ class InlinePreview extends PureComponent {
       highlightDomElement: PropTypes.func.isRequired,
       openElementInInspector: PropTypes.func.isRequired,
       unHighlightDomElement: PropTypes.func.isRequired,
+      type: PropTypes.string.isRequired,
       value: PropTypes.any,
       variable: PropTypes.string.isRequired,
     };
   }
 
-  showInScopes(variable) {
+  showInScopes() {
     // TODO: focus on variable value in the scopes sidepanel
     // we will need more info from parent comp
   }
 
   render() {
     const {
+      type,
       value,
       variable,
       openElementInInspector,
@@ -49,7 +51,7 @@ class InlinePreview extends PureComponent {
       },
       span(
         {
-          className: "inline-preview-label",
+          className: `inline-preview-label ${type}`,
         },
         variable,
         ":"

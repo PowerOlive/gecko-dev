@@ -61,9 +61,7 @@ pub struct Profile {
     pub(crate) mAB: Option<Box<lutmABType>>,
     pub(crate) mBA: Option<Box<lutmABType>>,
     pub(crate) chromaticAdaption: Option<Matrix>,
-    pub(crate) output_table_r: Option<Arc<PrecacheOuput>>,
-    pub(crate) output_table_g: Option<Arc<PrecacheOuput>>,
-    pub(crate) output_table_b: Option<Arc<PrecacheOuput>>,
+    pub(crate) precache_output: Option<Arc<PrecacheOuput>>,
     is_srgb: bool,
 }
 
@@ -1160,6 +1158,13 @@ impl ColourPrimaries {
         }
         .into()
     }
+
+    fn is_usable(self) -> bool {
+        match self {
+            Self::Reserved | Self::Unspecified => false,
+            _ => true
+        }
+    }
 }
 
 /// See [Rec. ITU-T H.273 (12/2016)](https://www.itu.int/rec/T-REC-H.273-201612-I/en) Table 3
@@ -1399,6 +1404,15 @@ impl TryFrom<TransferCharacteristics> for curveType {
     }
 }
 
+impl TransferCharacteristics {
+    fn is_usable(self) -> bool {
+        match self {
+            Self::Reserved | Self::Unspecified => false,
+            _ => true
+        }
+    }
+}
+
 #[cfg(test)]
 fn check_transfer_characteristics(cicp: TransferCharacteristics, icc_path: &str) {
     let mut cicp_out = [0u8; crate::transform::PRECACHE_OUTPUT_SIZE];
@@ -1513,6 +1527,30 @@ impl Profile {
         profile
     }
 
+    pub(crate) fn new_displayP3() -> Box<Profile> {
+        let primaries = qcms_CIE_xyYTRIPLE::from(ColourPrimaries::Smpte432);
+        let white_point = qcms_white_point_sRGB();
+        let mut profile = profile_create();
+        set_rgb_colorants(&mut profile, white_point, primaries);
+
+        let curve = Box::new(curveType::Parametric(vec![
+            2.4,
+            1. / 1.055,
+            0.055 / 1.055,
+            1. / 12.92,
+            0.04045,
+        ]));
+        profile.redTRC = Some(curve.clone());
+        profile.blueTRC = Some(curve.clone());
+        profile.greenTRC = Some(curve);
+        profile.class_type = DISPLAY_DEVICE_PROFILE;
+        profile.rendering_intent = Perceptual;
+        profile.color_space = RGB_SIGNATURE;
+        profile.pcs = XYZ_TYPE;
+        profile.is_srgb = false;
+        profile
+    }
+
     /// Create a new profile with D50 adopted white and identity transform functions
     pub fn new_XYZD50() -> Box<Profile> {
         let mut profile = profile_create();
@@ -1538,6 +1576,9 @@ impl Profile {
 
     pub fn new_cicp(cp: ColourPrimaries, tc: TransferCharacteristics) -> Option<Box<Profile>> {
         let mut profile = profile_create();
+        if !cp.is_usable() || !tc.is_usable() {
+            return None;
+        }
         //XXX: should store the whitepoint
         if !set_rgb_colorants(&mut profile, cp.white_point(), qcms_CIE_xyYTRIPLE::from(cp)) {
             return None;

@@ -18,7 +18,6 @@ import org.mozilla.geckoview.ExperimentDelegate;
 import org.mozilla.geckoview.GeckoResult;
 import org.mozilla.geckoview.GeckoRuntime;
 import org.mozilla.geckoview.GeckoRuntimeSettings;
-import org.mozilla.geckoview.RuntimeTelemetry;
 import org.mozilla.geckoview.WebExtension;
 import org.mozilla.geckoview.test.TestCrashHandler;
 
@@ -34,40 +33,6 @@ public class RuntimeCreator {
   public static AtomicInteger sTestSupport = new AtomicInteger(0);
   public static WebExtension sTestSupportExtension;
 
-  // The RuntimeTelemetry.Delegate can only be set when creating the RuntimeCreator, to
-  // let tests set their own Delegate we need to create a proxy here.
-  public static class RuntimeTelemetryDelegate implements RuntimeTelemetry.Delegate {
-    public RuntimeTelemetry.Delegate delegate = null;
-
-    @Override
-    public void onHistogram(@NonNull final RuntimeTelemetry.Histogram metric) {
-      if (delegate != null) {
-        delegate.onHistogram(metric);
-      }
-    }
-
-    @Override
-    public void onBooleanScalar(@NonNull final RuntimeTelemetry.Metric<Boolean> metric) {
-      if (delegate != null) {
-        delegate.onBooleanScalar(metric);
-      }
-    }
-
-    @Override
-    public void onStringScalar(@NonNull final RuntimeTelemetry.Metric<String> metric) {
-      if (delegate != null) {
-        delegate.onStringScalar(metric);
-      }
-    }
-
-    @Override
-    public void onLongScalar(@NonNull final RuntimeTelemetry.Metric<Long> metric) {
-      if (delegate != null) {
-        delegate.onLongScalar(metric);
-      }
-    }
-  }
-
   /**
    * The ExperimentDelegate can only be set when starting the RuntimeCreator, so for testing we are
    * setting up a proxy here
@@ -80,7 +45,7 @@ public class RuntimeCreator {
       if (delegate != null) {
         return delegate.onGetExperimentFeature(feature);
       }
-      return null;
+      return ExperimentDelegate.super.onGetExperimentFeature(feature);
     }
 
     @Override
@@ -88,7 +53,7 @@ public class RuntimeCreator {
       if (delegate != null) {
         return delegate.onRecordExposureEvent(feature);
       }
-      return null;
+      return ExperimentDelegate.super.onRecordExposureEvent(feature);
     }
 
     @Override
@@ -97,7 +62,7 @@ public class RuntimeCreator {
       if (delegate != null) {
         return delegate.onRecordExperimentExposureEvent(feature, slug);
       }
-      return null;
+      return ExperimentDelegate.super.onRecordExperimentExposureEvent(feature, slug);
     }
 
     @Override
@@ -106,12 +71,9 @@ public class RuntimeCreator {
       if (delegate != null) {
         return delegate.onRecordMalformedConfigurationEvent(feature, part);
       }
-      return null;
+      return ExperimentDelegate.super.onRecordMalformedConfigurationEvent(feature, part);
     }
   }
-
-  public static final RuntimeTelemetryDelegate sRuntimeTelemetryProxy =
-      new RuntimeTelemetryDelegate();
 
   public static RuntimeExperimentDelegate sRuntimeExperimentDelegateProxy =
       new RuntimeExperimentDelegate();
@@ -163,17 +125,6 @@ public class RuntimeCreator {
   }
 
   /**
-   * Set the {@link RuntimeTelemetry.Delegate} instance for this test. Application code can only
-   * register this delegate when the {@link GeckoRuntime} is created, so we need to proxy it for
-   * test code.
-   *
-   * @param delegate the {@link RuntimeTelemetry.Delegate} for this test run.
-   */
-  public static void setTelemetryDelegate(final RuntimeTelemetry.Delegate delegate) {
-    sRuntimeTelemetryProxy.delegate = delegate;
-  }
-
-  /**
    * Set the {@link ExperimentDelegate} instance for this test. Application code can only register
    * this delegate when the {@link GeckoRuntime} is created, so we need to proxy it for test code.
    *
@@ -216,7 +167,6 @@ public class RuntimeCreator {
             .remoteDebuggingEnabled(true)
             .consoleOutput(true)
             .crashHandler(TestCrashHandler.class)
-            .telemetryDelegate(sRuntimeTelemetryProxy)
             .experimentDelegate(sRuntimeExperimentDelegateProxy)
             .build();
 

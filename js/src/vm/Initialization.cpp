@@ -158,12 +158,6 @@ JS_PUBLIC_API const char* JS::detail::InitWithFailureDiagnostic(
   js::oom::InitLargeAllocLimit();
 #endif
 
-#if defined(JS_GC_ALLOW_EXTRA_POISONING)
-  if (getenv("JSGC_EXTRA_POISONING")) {
-    js::gExtraPoisoningEnabled = true;
-  }
-#endif
-
   js::InitMallocAllocator();
 
   RETURN_IF_FAIL(js::Mutex::Init());
@@ -302,6 +296,10 @@ static void ShutdownImpl(JS::detail::FrontendOnly frontendOnly) {
   MOZ_ASSERT_IF(!JSRuntime::hasLiveRuntimes(), !js::WasmReservedBytes());
 
   js::ShutDownMallocAllocator();
+
+  if (!JSRuntime::hasLiveRuntimes()) {
+    js::gc::CheckMemorySubsystemOnShutDown();
+  }
 
   libraryInitState = InitState::ShutDown;
 }

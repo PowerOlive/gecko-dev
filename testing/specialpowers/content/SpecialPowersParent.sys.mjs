@@ -74,7 +74,7 @@ async function createWindowlessBrowser({ isPrivate = false } = {}) {
   );
 
   const system = Services.scriptSecurityManager.getSystemPrincipal();
-  chromeShell.createAboutBlankContentViewer(system, system);
+  chromeShell.createAboutBlankDocumentViewer(system, system);
   windowlessBrowser.browsingContext.useGlobalHistory = false;
   chromeShell.loadURI(
     Services.io.newURI("chrome://extensions/content/dummy.xhtml"),
@@ -247,7 +247,7 @@ export class SpecialPowersParent extends JSWindowActorParent {
     swm.removeListener(this._serviceWorkerListener);
   }
 
-  observe(aSubject, aTopic, aData) {
+  observe(aSubject, aTopic) {
     function addDumpIDToMessage(propertyName) {
       try {
         var id = aSubject.getPropertyAsAString(propertyName);
@@ -428,7 +428,7 @@ export class SpecialPowersParent extends JSWindowActorParent {
   _applyPrefs(actions) {
     let requiresRefresh = false;
     for (let pref of actions) {
-      // This logic should match PrefRequiresRefresh in reftest.jsm
+      // This logic should match PrefRequiresRefresh in reftest.sys.mjs
       requiresRefresh =
         requiresRefresh ||
         pref.name == "layout.css.prefers-color-scheme.content-override" ||
@@ -949,8 +949,8 @@ export class SpecialPowersParent extends JSWindowActorParent {
         case "Wakeup":
           return undefined;
 
-        case "EvictAllContentViewers":
-          this.browsingContext.top.sessionHistory.evictAllContentViewers();
+        case "EvictAllDocumentViewers":
+          this.browsingContext.top.sessionHistory.evictAllDocumentViewers();
           return undefined;
 
         case "getBaselinePrefs":
@@ -1145,6 +1145,7 @@ export class SpecialPowersParent extends JSWindowActorParent {
               }
             },
             actorParent: this.manager,
+            console,
           });
 
           // Evaluate the chrome script
@@ -1217,14 +1218,14 @@ export class SpecialPowersParent extends JSWindowActorParent {
         case "SPLoadExtension": {
           let id = aMessage.data.id;
           let ext = aMessage.data.ext;
-          if (AppConstants.platform === "android") {
+          if (AppConstants.MOZ_GECKOVIEW) {
             // Some extension APIs are partially implemented in Java, and the
             // interface between the JS and Java side (GeckoViewWebExtension)
             // expects extensions to be registered with the AddonManager.
             //
             // For simplicity, default to using an Addon Manager (if not null).
             if (ext.useAddonManager === undefined) {
-              ext.useAddonManager = "android-only";
+              ext.useAddonManager = "geckoview-only";
             }
           }
           // delayedStartup is only supported in xpcshell
@@ -1341,9 +1342,7 @@ export class SpecialPowersParent extends JSWindowActorParent {
           let id = aMessage.data.id;
           let extension = this._extensions.get(id);
           this._extensions.delete(id);
-          return extension.shutdown().then(() => {
-            return extension._uninstallPromise;
-          });
+          return lazy.ExtensionTestCommon.unloadTestExtension(extension);
         }
 
         case "SPExtensionTerminateBackground": {

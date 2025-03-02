@@ -23,8 +23,6 @@ const SINGLE_FEATURE_RECIPE = {
           enabled: true,
           quickSuggestEnabled: false,
           quickSuggestNonSponsoredIndex: -1,
-          quickSuggestShouldShowOnboardingDialog: true,
-          quickSuggestShowOnboardingDialogAfterNRestarts: 2,
           quickSuggestSponsoredIndex: -1,
         },
       },
@@ -39,8 +37,6 @@ const SINGLE_FEATURE_RECIPE = {
           enabled: true,
           quickSuggestEnabled: true,
           quickSuggestNonSponsoredIndex: -1,
-          quickSuggestShouldShowOnboardingDialog: false,
-          quickSuggestShowOnboardingDialogAfterNRestarts: 2,
           quickSuggestSponsoredIndex: -1,
         },
       },
@@ -76,12 +72,12 @@ const SINGLE_FEATURE_RECIPE = {
 const SYNC_DATA_PREF_BRANCH = "nimbus.syncdatastore.";
 
 add_task(async function test_TODO() {
-  let { enrollmentPromise, doExperimentCleanup } =
-    ExperimentFakes.enrollmentHelper(SINGLE_FEATURE_RECIPE);
   let sandbox = sinon.createSandbox();
   let stub = sandbox.stub(ExperimentAPI, "recordExposureEvent");
 
-  await enrollmentPromise;
+  const doExperimentCleanup = await ExperimentFakes.enrollmentHelper(
+    SINGLE_FEATURE_RECIPE
+  );
 
   Assert.ok(
     ExperimentAPI.getExperiment({ featureId: "urlbar" }),
@@ -100,14 +96,6 @@ add_task(async function test_TODO() {
     "Should store early startup variable for sync access"
   );
 
-  Assert.equal(
-    NimbusFeatures.urlbar.getVariable(
-      "quickSuggestShowOnboardingDialogAfterNRestarts"
-    ),
-    2,
-    "Should return value"
-  );
-
   NimbusFeatures.urlbar.recordExposureEvent();
 
   Assert.ok(stub.calledOnce, "Should be called once by urlbar");
@@ -122,7 +110,7 @@ add_task(async function test_TODO() {
     "Should have expected featureId"
   );
 
-  await doExperimentCleanup();
+  doExperimentCleanup();
   sandbox.restore();
   NimbusFeatures.urlbar._didSendExposureEvent = false;
 });

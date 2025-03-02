@@ -13,7 +13,7 @@ const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-t
 const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
 const {
   connect,
-} = require("resource://devtools/client/shared/redux/visibility-handler-connect.js");
+} = require("resource://devtools/client/shared/vendor/react-redux.js");
 const {
   L10N,
 } = require("resource://devtools/client/netmonitor/src/utils/l10n.js");
@@ -122,10 +122,12 @@ class HTTPCustomRequestPanel extends Component {
 
   async componentDidMount() {
     let { connector, request } = this.props;
-    const persistedCustomRequest = await asyncStorage.getItem(
-      "devtools.netmonitor.customRequest"
-    );
-    request = request || persistedCustomRequest;
+    if (!connector.currentTarget?.targetForm?.isPrivate) {
+      const persistedCustomRequest = await asyncStorage.getItem(
+        "devtools.netmonitor.customRequest"
+      );
+      request = request || persistedCustomRequest;
+    }
 
     if (!request) {
       this.setState({ _isStateDataReady: true });
@@ -191,7 +193,9 @@ class HTTPCustomRequestPanel extends Component {
   }
 
   componentWillUnmount() {
-    asyncStorage.setItem("devtools.netmonitor.customRequest", this.state);
+    if (!this.props.connector.currentTarget?.targetForm?.isPrivate) {
+      asyncStorage.setItem("devtools.netmonitor.customRequest", this.state);
+    }
   }
 
   handleChangeURL(event) {
@@ -476,12 +480,12 @@ class HTTPCustomRequestPanel extends Component {
                 url: this.state.url,
                 cause: this.props.request?.cause,
                 urlQueryParams: this.state.urlQueryParams.map(
-                  ({ checked, ...params }) => params
+                  ({ ...params }) => params
                 ),
                 requestHeaders: {
                   headers: this.state.headers
                     .filter(({ checked }) => checked)
-                    .map(({ checked, ...headersValues }) => headersValues),
+                    .map(({ ...headersValues }) => headersValues),
                 },
               };
 
@@ -504,7 +508,7 @@ class HTTPCustomRequestPanel extends Component {
 
 module.exports = connect(
   state => ({ request: getClickedRequest(state) }),
-  (dispatch, props) => ({
+  dispatch => ({
     sendCustomRequest: request =>
       dispatch(Actions.sendHTTPCustomRequest(request)),
   })

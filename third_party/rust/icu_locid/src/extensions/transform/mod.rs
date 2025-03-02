@@ -16,7 +16,7 @@
 //! use icu::locid::{LanguageIdentifier, Locale};
 //!
 //! let mut loc: Locale =
-//!     "en-US-t-es-AR-h0-hybrid".parse().expect("Parsing failed.");
+//!     "en-US-t-es-ar-h0-hybrid".parse().expect("Parsing failed.");
 //!
 //! let lang: LanguageIdentifier =
 //!     "es-AR".parse().expect("Parsing LanguageIdentifier failed.");
@@ -28,21 +28,24 @@
 //! assert!(loc.extensions.transform.fields.contains_key(&key));
 //! assert_eq!(loc.extensions.transform.fields.get(&key), Some(&value));
 //!
-//! assert_eq!(&loc.extensions.transform.to_string(), "t-es-AR-h0-hybrid");
+//! assert_eq!(&loc.extensions.transform.to_string(), "t-es-ar-h0-hybrid");
 //! ```
 mod fields;
 mod key;
 mod value;
 
+use core::cmp::Ordering;
+
 pub use fields::Fields;
-pub use key::Key;
+#[doc(inline)]
+pub use key::{key, Key};
 pub use value::Value;
 
 use crate::parser::SubtagIterator;
 use crate::parser::{parse_language_identifier_from_iter, ParserError, ParserMode};
-use crate::subtags::Language;
+use crate::shortvec::ShortBoxSlice;
+use crate::subtags::{self, Language};
 use crate::LanguageIdentifier;
-use alloc::vec;
 use litemap::LiteMap;
 
 /// A list of [`Unicode BCP47 T Extensions`] as defined in [`Unicode Locale
@@ -59,7 +62,7 @@ use litemap::LiteMap;
 /// use icu::locid::{LanguageIdentifier, Locale};
 ///
 /// let mut loc: Locale =
-///     "de-t-en-US-h0-hybrid".parse().expect("Parsing failed.");
+///     "de-t-en-us-h0-hybrid".parse().expect("Parsing failed.");
 ///
 /// let en_us: LanguageIdentifier = "en-US".parse().expect("Parsing failed.");
 ///
@@ -106,7 +109,7 @@ impl Transform {
     /// ```
     /// use icu::locid::Locale;
     ///
-    /// let mut loc: Locale = "en-US-t-es-AR".parse().expect("Parsing failed.");
+    /// let mut loc: Locale = "en-US-t-es-ar".parse().expect("Parsing failed.");
     ///
     /// assert!(!loc.extensions.transform.is_empty());
     /// ```
@@ -121,13 +124,38 @@ impl Transform {
     /// ```
     /// use icu::locid::Locale;
     ///
-    /// let mut loc: Locale = "en-US-t-es-AR".parse().unwrap();
+    /// let mut loc: Locale = "en-US-t-es-ar".parse().unwrap();
     /// loc.extensions.transform.clear();
     /// assert_eq!(loc, "en-US".parse().unwrap());
     /// ```
     pub fn clear(&mut self) {
         self.lang = None;
         self.fields.clear();
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn as_tuple(
+        &self,
+    ) -> (
+        Option<(
+            subtags::Language,
+            Option<subtags::Script>,
+            Option<subtags::Region>,
+            &subtags::Variants,
+        )>,
+        &Fields,
+    ) {
+        (self.lang.as_ref().map(|l| l.as_tuple()), &self.fields)
+    }
+
+    /// Returns an ordering suitable for use in [`BTreeSet`].
+    ///
+    /// The ordering may or may not be equivalent to string ordering, and it
+    /// may or may not be stable across ICU4X releases.
+    ///
+    /// [`BTreeSet`]: alloc::collections::BTreeSet
+    pub fn total_cmp(&self, other: &Self) -> Ordering {
+        self.as_tuple().cmp(&other.as_tuple())
     }
 
     pub(crate) fn try_from_iter(iter: &mut SubtagIterator) -> Result<Self, ParserError> {
@@ -144,21 +172,24 @@ impl Transform {
         }
 
         let mut current_tkey = None;
-        let mut current_tvalue = vec![];
+        let mut current_tvalue = ShortBoxSlice::new();
+        let mut has_current_tvalue = false;
 
         while let Some(subtag) = iter.peek() {
             if let Some(tkey) = current_tkey {
                 if let Ok(val) = Value::parse_subtag(subtag) {
-                    current_tvalue.push(val);
+                    has_current_tvalue = true;
+                    if let Some(val) = val {
+                        current_tvalue.push(val);
+                    }
                 } else {
-                    if current_tvalue.is_empty() {
+                    if !has_current_tvalue {
                         return Err(ParserError::InvalidExtension);
                     }
-                    tfields.try_insert(
-                        tkey,
-                        Value::from_vec_unchecked(current_tvalue.drain(..).flatten().collect()),
-                    );
+                    tfields.try_insert(tkey, Value::from_short_slice_unchecked(current_tvalue));
                     current_tkey = None;
+                    current_tvalue = ShortBoxSlice::new();
+                    has_current_tvalue = false;
                     continue;
                 }
             } else if let Ok(tkey) = Key::try_from_bytes(subtag) {
@@ -171,13 +202,10 @@ impl Transform {
         }
 
         if let Some(tkey) = current_tkey {
-            if current_tvalue.is_empty() {
+            if !has_current_tvalue {
                 return Err(ParserError::InvalidExtension);
             }
-            tfields.try_insert(
-                tkey,
-                Value::from_vec_unchecked(current_tvalue.into_iter().flatten().collect()),
-            );
+            tfields.try_insert(tkey, Value::from_short_slice_unchecked(current_tvalue));
         }
 
         Ok(Self {
@@ -195,7 +223,7 @@ impl Transform {
         }
         f("t")?;
         if let Some(lang) = &self.lang {
-            lang.for_each_subtag_str(f)?;
+            lang.for_each_subtag_str_lowercased(f)?;
         }
         self.fields.for_each_subtag_str(f)
     }
@@ -211,7 +239,7 @@ impl writeable::Writeable for Transform {
         sink.write_str("t")?;
         if let Some(lang) = &self.lang {
             sink.write_char('-')?;
-            writeable::Writeable::write_to(lang, sink)?;
+            lang.write_lowercased_to(sink)?;
         }
         if !self.fields.is_empty() {
             sink.write_char('-')?;

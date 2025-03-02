@@ -61,7 +61,11 @@
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "js/CharacterEncoding.h"  // JS::ConstUTF8CharsZ
-#include "js/TypeDecls.h"          // JS::MutableHandle (fwd)
+#include "js/ColumnNumber.h"       // JS::ColumnNumberOneOrigin
+#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+#  include "js/Prefs.h"  // JS::Prefs::*
+#endif
+#include "js/TypeDecls.h"  // JS::MutableHandle (fwd)
 
 namespace js {
 class FrontendContext;
@@ -122,15 +126,30 @@ class JS_PUBLIC_API ReadOnlyDecodeOptions;
 class JS_PUBLIC_API PrefableCompileOptions {
  public:
   PrefableCompileOptions()
-      : importAssertions_(false),
+      : importAttributes_(false),
         sourcePragmas_(true),
-        throwOnAsmJSValidationFailure_(false) {}
+#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+        explicitResourceManagement_(
+            JS::Prefs::experimental_explicit_resource_management()),
+#endif
+        throwOnAsmJSValidationFailure_(false) {
+  }
 
-  bool importAssertions() const { return importAssertions_; }
-  PrefableCompileOptions& setImportAssertions(bool enabled) {
-    importAssertions_ = enabled;
+  bool importAttributes() const { return importAttributes_; }
+  PrefableCompileOptions& setImportAttributes(bool enabled) {
+    importAttributes_ = enabled;
     return *this;
   }
+
+#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+  bool explicitResourceManagement() const {
+    return explicitResourceManagement_;
+  }
+  PrefableCompileOptions& setExplicitResourceManagement(bool enabled) {
+    explicitResourceManagement_ = enabled;
+    return *this;
+  }
+#endif
 
   // Enable/disable support for parsing '//(#@) source(Mapping)?URL=' pragmas.
   bool sourcePragmas() const { return sourcePragmas_; }
@@ -166,9 +185,12 @@ class JS_PUBLIC_API PrefableCompileOptions {
   template <typename Printer>
   void dumpWith(Printer& print) const {
 #  define PrintFields_(Name) print(#Name, Name)
-    PrintFields_(importAssertions_);
+    PrintFields_(importAttributes_);
     PrintFields_(sourcePragmas_);
     PrintFields_(throwOnAsmJSValidationFailure_);
+#  ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+    PrintFields_(explicitResourceManagement_);
+#  endif
 #  undef PrintFields_
 
     switch (asmJSOption_) {
@@ -193,10 +215,16 @@ class JS_PUBLIC_API PrefableCompileOptions {
 
  private:
   // ==== Syntax-related options. ====
-  bool importAssertions_ : 1;
+  bool importAttributes_ : 1;
 
   // The context has specified that source pragmas should be parsed.
   bool sourcePragmas_ : 1;
+
+#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+  // The context has specified that explicit resource management syntax
+  // should be parsed.
+  bool explicitResourceManagement_ : 1;
+#endif
 
   // ==== asm.js options. ====
   bool throwOnAsmJSValidationFailure_ : 1;
@@ -271,7 +299,6 @@ class JS_PUBLIC_API TransitiveCompileOptions {
 
  public:
   bool selfHostingMode = false;
-  bool forceAsync = false;
   bool discardSource = false;
   bool sourceIsLazy = false;
   bool allowHTMLComments = true;
@@ -304,11 +331,6 @@ class JS_PUBLIC_API TransitiveCompileOptions {
   // NOTE: When using this mode, the XDR buffer must live until JS_Shutdown is
   // called. There is currently no mechanism to release the data sooner.
   bool usePinnedBytecode = false;
-
-  // When performing off-thread task that generates JS::Stencil as output,
-  // allocate JS::InstantiationStorage off main thread to reduce the
-  // main thread allocation.
-  bool allocateInstantiationStorage = false;
 
   // De-optimize ES module's top-level `var`s, in order to define all of them
   // on the ModuleEnvironmentObject, instead of local slot.
@@ -384,8 +406,13 @@ class JS_PUBLIC_API TransitiveCompileOptions {
     return eagerDelazificationStrategy_;
   }
 
-  bool importAssertions() const { return prefableOptions_.importAssertions(); }
+  bool importAttributes() const { return prefableOptions_.importAttributes(); }
   bool sourcePragmas() const { return prefableOptions_.sourcePragmas(); }
+#ifdef ENABLE_EXPLICIT_RESOURCE_MANAGEMENT
+  bool explicitResourceManagement() const {
+    return prefableOptions_.explicitResourceManagement();
+  }
+#endif
   bool throwOnAsmJSValidationFailure() const {
     return prefableOptions_.throwOnAsmJSValidationFailure();
   }
@@ -420,7 +447,6 @@ class JS_PUBLIC_API TransitiveCompileOptions {
     PrintFields_(deferDebugMetadata_);
     PrintFields_(eagerDelazificationStrategy_);
     PrintFields_(selfHostingMode);
-    PrintFields_(forceAsync);
     PrintFields_(discardSource);
     PrintFields_(sourceIsLazy);
     PrintFields_(allowHTMLComments);
@@ -428,7 +454,6 @@ class JS_PUBLIC_API TransitiveCompileOptions {
     PrintFields_(topLevelAwait);
     PrintFields_(borrowBuffer);
     PrintFields_(usePinnedBytecode);
-    PrintFields_(allocateInstantiationStorage);
     PrintFields_(deoptimizeModuleGlobalVars);
     PrintFields_(introductionType);
     PrintFields_(introductionLineno);
@@ -452,8 +477,11 @@ class JS_PUBLIC_API TransitiveCompileOptions {
 class JS_PUBLIC_API ReadOnlyCompileOptions : public TransitiveCompileOptions {
  public:
   // POD options.
-  unsigned lineno = 1;
-  unsigned column = 0;
+
+  // Line number of the first character (1-origin).
+  uint32_t lineno = 1;
+  // Column number of the first character in UTF-16 code units.
+  JS::ColumnNumberOneOrigin column;
 
   // The offset within the ScriptSource's full uncompressed text of the first
   // character we're presenting for compilation with this CompileOptions.
@@ -487,7 +515,7 @@ class JS_PUBLIC_API ReadOnlyCompileOptions : public TransitiveCompileOptions {
     this->TransitiveCompileOptions::dumpWith(print);
 #  define PrintFields_(Name) print(#Name, Name)
     PrintFields_(lineno);
-    PrintFields_(column);
+    print("column", column.oneOriginValue());
     PrintFields_(scriptSourceOffset);
     PrintFields_(isRunOnce);
     PrintFields_(noScriptRval);
@@ -598,12 +626,12 @@ class MOZ_STACK_CLASS JS_PUBLIC_API CompileOptions final
     return *this;
   }
 
-  CompileOptions& setLine(unsigned l) {
+  CompileOptions& setLine(uint32_t l) {
     lineno = l;
     return *this;
   }
 
-  CompileOptions& setFileAndLine(const char* f, unsigned l) {
+  CompileOptions& setFileAndLine(const char* f, uint32_t l) {
     filename_ = JS::ConstUTF8CharsZ(f);
     lineno = l;
     return *this;
@@ -619,7 +647,7 @@ class MOZ_STACK_CLASS JS_PUBLIC_API CompileOptions final
     return *this;
   }
 
-  CompileOptions& setColumn(unsigned c) {
+  CompileOptions& setColumn(JS::ColumnNumberOneOrigin c) {
     column = c;
     return *this;
   }
@@ -675,7 +703,7 @@ class MOZ_STACK_CLASS JS_PUBLIC_API CompileOptions final
   }
 
   CompileOptions& setIntroductionInfo(const char* introducerFn,
-                                      const char* intro, unsigned line,
+                                      const char* intro, uint32_t line,
                                       uint32_t offset) {
     introducerFilename_ = JS::ConstUTF8CharsZ(introducerFn);
     introductionType = intro;
@@ -700,13 +728,16 @@ class MOZ_STACK_CLASS JS_PUBLIC_API CompileOptions final
     return *this;
   }
 
+  void warnAboutConflictingDelazification() const;
   CompileOptions& setEagerDelazificationStrategy(
       DelazificationOption strategy) {
-    // forceFullParse is at the moment considered as a non-overridable strategy.
-    MOZ_RELEASE_ASSERT(eagerDelazificationStrategy_ !=
-                           DelazificationOption::ParseEverythingEagerly ||
-                       strategy ==
-                           DelazificationOption::ParseEverythingEagerly);
+    const auto PEE = DelazificationOption::ParseEverythingEagerly;
+    if (eagerDelazificationStrategy_ == PEE && strategy != PEE) {
+      // Parse Everything Eagerly cannot be replaced, do noting.
+      warnAboutConflictingDelazification();
+      return *this;
+    }
+
     eagerDelazificationStrategy_ = strategy;
     return *this;
   }
@@ -737,17 +768,22 @@ class JS_PUBLIC_API InstantiateOptions {
   bool hideScriptFromDebugger = false;
   bool deferDebugMetadata = false;
 
-  InstantiateOptions() = default;
+  DelazificationOption eagerDelazificationStrategy_ =
+      DelazificationOption::OnDemandOnly;
+
+  InstantiateOptions();
 
   explicit InstantiateOptions(const ReadOnlyCompileOptions& options)
       : skipFilenameValidation(options.skipFilenameValidation_),
         hideScriptFromDebugger(options.hideScriptFromDebugger_),
-        deferDebugMetadata(options.deferDebugMetadata_) {}
+        deferDebugMetadata(options.deferDebugMetadata_),
+        eagerDelazificationStrategy_(options.eagerDelazificationStrategy()) {}
 
   void copyTo(CompileOptions& options) const {
     options.skipFilenameValidation_ = skipFilenameValidation;
     options.hideScriptFromDebugger_ = hideScriptFromDebugger;
     options.deferDebugMetadata_ = deferDebugMetadata;
+    options.setEagerDelazificationStrategy(eagerDelazificationStrategy_);
   }
 
   bool hideFromNewScriptInitial() const {
@@ -763,6 +799,29 @@ class JS_PUBLIC_API InstantiateOptions {
     MOZ_ASSERT(skipFilenameValidation == false);
     MOZ_ASSERT(hideScriptFromDebugger == false);
     MOZ_ASSERT(deferDebugMetadata == false);
+    MOZ_ASSERT(eagerDelazificationStrategy_ ==
+               DelazificationOption::OnDemandOnly);
+  }
+
+  // Assert that all fields have values compatible with the default value.
+  //
+  // This can be used in the same way as assertDefault, in case the
+  // setForceFullParse() is used on the original compile options.
+  void assertCompatibleWithDefault() const {
+    MOZ_ASSERT(skipFilenameValidation == false);
+    MOZ_ASSERT(hideScriptFromDebugger == false);
+    MOZ_ASSERT(deferDebugMetadata == false);
+
+    // The instantiation step uses the eagerDelazificationStrategy_ field
+    // only for TransitiveCompileOptions::populateDelazificationCache().
+    //
+    // Both the default OnDemandOnly and
+    // the ParseEverythingEagerly from setForceFullParse() returns
+    // false, and they're are compatible.
+    MOZ_ASSERT(eagerDelazificationStrategy_ ==
+                   DelazificationOption::OnDemandOnly ||
+               eagerDelazificationStrategy_ ==
+                   DelazificationOption::ParseEverythingEagerly);
   }
 #endif
 };
@@ -774,8 +833,6 @@ class JS_PUBLIC_API ReadOnlyDecodeOptions {
  public:
   bool borrowBuffer = false;
   bool usePinnedBytecode = false;
-  bool allocateInstantiationStorage = false;
-  bool forceAsync = false;
 
  protected:
   JS::ConstUTF8CharsZ introducerFilename_;
@@ -784,7 +841,7 @@ class JS_PUBLIC_API ReadOnlyDecodeOptions {
   // See `TransitiveCompileOptions::introductionType` field for details.
   const char* introductionType = nullptr;
 
-  unsigned introductionLineno = 0;
+  uint32_t introductionLineno = 0;
   uint32_t introductionOffset = 0;
 
  protected:
@@ -797,8 +854,6 @@ class JS_PUBLIC_API ReadOnlyDecodeOptions {
   void copyPODOptionsFrom(const T& options) {
     borrowBuffer = options.borrowBuffer;
     usePinnedBytecode = options.usePinnedBytecode;
-    allocateInstantiationStorage = options.allocateInstantiationStorage;
-    forceAsync = options.forceAsync;
     introductionType = options.introductionType;
     introductionLineno = options.introductionLineno;
     introductionOffset = options.introductionOffset;
@@ -808,8 +863,6 @@ class JS_PUBLIC_API ReadOnlyDecodeOptions {
   void copyPODOptionsTo(T& options) const {
     options.borrowBuffer = borrowBuffer;
     options.usePinnedBytecode = usePinnedBytecode;
-    options.allocateInstantiationStorage = allocateInstantiationStorage;
-    options.forceAsync = forceAsync;
     options.introductionType = introductionType;
     options.introductionLineno = introductionLineno;
     options.introductionOffset = introductionOffset;

@@ -10,6 +10,7 @@
 #include "nsIPermissionManager.h"
 #include "nsIAsyncShutdown.h"
 #include "nsIObserver.h"
+#include "nsIRemotePermissionService.h"
 #include "nsWeakReference.h"
 #include "nsCOMPtr.h"
 #include "nsIURI.h"
@@ -114,7 +115,7 @@ class PermissionManager final : public nsIPermissionManager,
     PermissionKey() = delete;
 
     // Dtor shouldn't be used outside of the class.
-    ~PermissionKey(){};
+    ~PermissionKey() {};
   };
 
   class PermissionHashKey : public nsRefPtrHashKey<PermissionKey> {
@@ -171,7 +172,7 @@ class PermissionManager final : public nsIPermissionManager,
 
   PermissionManager();
   static already_AddRefed<nsIPermissionManager> GetXPCOMSingleton();
-  static PermissionManager* GetInstance();
+  static already_AddRefed<PermissionManager> GetInstance();
   nsresult Init();
 
   // enums for AddInternal()
@@ -193,11 +194,10 @@ class PermissionManager final : public nsIPermissionManager,
                                                       const nsACString& aType,
                                                       uint32_t* aPermission);
 
-  nsresult LegacyTestPermissionFromURI(
-      nsIURI* aURI, const OriginAttributes* aOriginAttributes,
-      const nsACString& aType, uint32_t* aPermission);
-
-  nsresult RemovePermissionsWithAttributes(OriginAttributesPattern& aAttrs);
+  nsresult RemovePermissionsWithAttributes(
+      OriginAttributesPattern& aPattern,
+      const nsTArray<nsCString>& aTypeInclusions = {},
+      const nsTArray<nsCString>& aTypeExceptions = {});
 
   /**
    * See `nsIPermissionManager::GetPermissionsWithKey` for more info on
@@ -370,7 +370,12 @@ class PermissionManager final : public nsIPermissionManager,
 
  private:
   ~PermissionManager();
-  static StaticMutex sCreationMutex MOZ_UNANNOTATED;
+  static StaticMutex sCreationMutex;
+  // Holding our singleton instance until shutdown.
+  static StaticRefPtr<PermissionManager> sInstanceHolder
+      MOZ_GUARDED_BY(sCreationMutex);
+  // Flag that signals shutdown has started.
+  static bool sInstanceDead MOZ_GUARDED_BY(sCreationMutex);
 
   /**
    * Get all permissions for a given principal, which should not be isolated
@@ -400,6 +405,12 @@ class PermissionManager final : public nsIPermissionManager,
   nsresult GetAllForPrincipalHelper(nsIPrincipal* aPrincipal,
                                     bool aSiteScopePermissions,
                                     nsTArray<RefPtr<nsIPermission>>& aResult);
+
+  // Returns true if the principal can be used for getting / setting
+  // permissions. If the principal can not be used an error code may be
+  // returned.
+  nsresult ShouldHandlePrincipalForPermission(
+      nsIPrincipal* aPrincipal, bool& aIsPermissionPrincipalValid);
 
   // Returns PermissionHashKey for a given { host, isInBrowserElement } tuple.
   // This is not simply using PermissionKey because we will walk-up domains in
@@ -529,7 +540,7 @@ class PermissionManager final : public nsIPermissionManager,
 
   nsCOMPtr<nsIAsyncShutdownClient> GetAsyncShutdownBarrier() const;
 
-  void MaybeCompleteShutdown();
+  void FinishAsyncShutdown();
 
   nsRefPtrHashtable<nsCStringHashKey, GenericNonExclusivePromise::Private>
       mPermissionKeyPromiseMap;
@@ -596,8 +607,7 @@ class PermissionManager final : public nsIPermissionManager,
           mPermission(0),
           mExpireType(0),
           mExpireTime(0),
-          mModificationTime(0),
-          mIsInBrowserElement(false) {}
+          mModificationTime(0) {}
 
     nsCString mHost;
     nsCString mType;
@@ -606,9 +616,6 @@ class PermissionManager final : public nsIPermissionManager,
     uint32_t mExpireType;
     int64_t mExpireTime;
     int64_t mModificationTime;
-
-    // Legacy, for migration.
-    bool mIsInBrowserElement;
   };
 
   // List of entries read from the database. It will be populated OMT and
@@ -619,23 +626,25 @@ class PermissionManager final : public nsIPermissionManager,
 
   // A single entry from the defaults URL.
   struct DefaultEntry {
-    DefaultEntry() : mOp(eImportMatchTypeHost), mPermission(0) {}
-
-    enum Op {
-      eImportMatchTypeHost,
-      eImportMatchTypeOrigin,
-    };
-
-    Op mOp;
-
-    nsCString mHostOrOrigin;
+    nsCString mOrigin;
     nsCString mType;
-    uint32_t mPermission;
+    uint32_t mPermission = 0;
   };
 
   // List of entries read from the default settings.
   // This array is protected by the monitor.
-  nsTArray<DefaultEntry> mDefaultEntries;
+  nsTArray<DefaultEntry> mDefaultEntriesForImport;
+  // Adds a default permission entry to AddDefaultEntryForImport for given
+  // origin, type and value
+  void AddDefaultEntryForImport(const nsACString& aOrigin,
+                                const nsCString& aType, uint32_t aPermission,
+                                const MonitorAutoLock& aProofOfLock);
+  // Given a default entry, import it as a default permission (id = -1) into the
+  // permission manager without storing it to disk. If permission isolation for
+  // private browsing is enabled (which is the default), and the permission type
+  // is not exempt from it, this will also create a separate default permission
+  // for private browsing
+  nsresult ImportDefaultEntry(const DefaultEntry& aDefaultEntry);
 
   nsresult Read(const MonitorAutoLock& aProofOfLock);
   void CompleteRead();
@@ -670,12 +679,8 @@ class PermissionManager final : public nsIPermissionManager,
 };
 
 // {4F6B5E00-0C36-11d5-A535-0010A401EB10}
-#define NS_PERMISSIONMANAGER_CID                   \
-  {                                                \
-    0x4f6b5e00, 0xc36, 0x11d5, {                   \
-      0xa5, 0x35, 0x0, 0x10, 0xa4, 0x1, 0xeb, 0x10 \
-    }                                              \
-  }
+#define NS_PERMISSIONMANAGER_CID \
+  {0x4f6b5e00, 0xc36, 0x11d5, {0xa5, 0x35, 0x0, 0x10, 0xa4, 0x1, 0xeb, 0x10}}
 
 }  // namespace mozilla
 

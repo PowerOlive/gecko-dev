@@ -1,22 +1,17 @@
 /**
- * Copyright 2018 Google Inc. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * @license
+ * Copyright 2018 Google Inc.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 import expect from 'expect';
 import {Puppeteer} from 'puppeteer';
+import type {Point, Quad} from 'puppeteer-core/internal/api/ElementHandle.js';
 import {ElementHandle} from 'puppeteer-core/internal/api/ElementHandle.js';
+import {
+  asyncDisposeSymbol,
+  disposeSymbol,
+} from 'puppeteer-core/internal/util/disposable.js';
 import sinon from 'sinon';
 
 import {
@@ -24,6 +19,7 @@ import {
   setupTestBrowserHooks,
   shortWaitForArrayToHaveAtLeastNElements,
 } from './mocha-utils.js';
+import {initializeTouchEventReport} from './touch-event-utils.js';
 import {attachFrame} from './utils.js';
 
 describe('ElementHandle specs', function () {
@@ -35,29 +31,25 @@ describe('ElementHandle specs', function () {
 
       await page.setViewport({width: 500, height: 500});
       await page.goto(server.PREFIX + '/grid.html');
-      const elementHandle = (await page.$('.box:nth-of-type(13)'))!;
+      using elementHandle = (await page.$('.box:nth-of-type(13)'))!;
       const box = await elementHandle.boundingBox();
       expect(box).toEqual({x: 100, y: 50, width: 50, height: 50});
     });
     it('should handle nested frames', async () => {
-      const {page, server, isChrome} = await getTestState();
+      const {page, server} = await getTestState();
 
       await page.setViewport({width: 500, height: 500});
       await page.goto(server.PREFIX + '/frames/nested-frames.html');
       const nestedFrame = page.frames()[1]!.childFrames()[1]!;
-      const elementHandle = (await nestedFrame.$('div'))!;
+      using elementHandle = (await nestedFrame.$('div'))!;
       const box = await elementHandle.boundingBox();
-      if (isChrome) {
-        expect(box).toEqual({x: 28, y: 182, width: 264, height: 18});
-      } else {
-        expect(box).toEqual({x: 28, y: 182, width: 254, height: 18});
-      }
+      expect(box).toEqual({x: 28, y: 182, width: 300, height: 18});
     });
     it('should return null for invisible elements', async () => {
       const {page} = await getTestState();
 
       await page.setContent('<div style="display:none">hi</div>');
-      const element = (await page.$('div'))!;
+      using element = (await page.$('div'))!;
       expect(await element.boundingBox()).toBe(null);
     });
     it('should force a layout', async () => {
@@ -65,10 +57,10 @@ describe('ElementHandle specs', function () {
 
       await page.setViewport({width: 500, height: 500});
       await page.setContent(
-        '<div style="width: 100px; height: 100px">hello</div>'
+        '<div style="width: 100px; height: 100px">hello</div>',
       );
-      const elementHandle = (await page.$('div'))!;
-      await page.evaluate((element: HTMLElement) => {
+      using elementHandle = (await page.$('div'))!;
+      await page.evaluate(element => {
         return (element.style.height = '200px');
       }, elementHandle);
       const box = await elementHandle.boundingBox();
@@ -82,8 +74,8 @@ describe('ElementHandle specs', function () {
           <rect id="theRect" x="30" y="50" width="200" height="300"></rect>
         </svg>
       `);
-      const element = (await page.$(
-        '#therect'
+      using element = (await page.$(
+        '#therect',
       )) as ElementHandle<SVGRectElement>;
       const pptrBoundingBox = await element.boundingBox();
       const webBoundingBox = await page.evaluate(e => {
@@ -111,7 +103,7 @@ describe('ElementHandle specs', function () {
 
       // Step 2: Add div and position it absolutely inside frame.
       const frame = page.frames()[1]!;
-      const divHandle = (
+      using divHandle = (
         await frame.evaluateHandle(() => {
           const div = document.createElement('div');
           document.body.appendChild(div);
@@ -145,7 +137,7 @@ describe('ElementHandle specs', function () {
         y: 2 + 5,
       });
       expect(box.content[0]).toEqual({
-        x: 1 + 4 + 3 + 1 + 2, // frame.left + div.left + div.marginLeft + div.borderLeft + dif.paddingLeft
+        x: 1 + 4 + 3 + 1 + 2, // frame.left + div.left + div.marginLeft + div.borderLeft + div.paddingLeft
         y: 2 + 5,
       });
     });
@@ -154,8 +146,91 @@ describe('ElementHandle specs', function () {
       const {page} = await getTestState();
 
       await page.setContent('<div style="display:none">hi</div>');
-      const element = (await page.$('div'))!;
+      using element = (await page.$('div'))!;
       expect(await element.boxModel()).toBe(null);
+    });
+
+    it('should correctly compute box model with offsets', async () => {
+      const {page} = await getTestState();
+      const border = 10;
+      const padding = 11;
+      const margin = 12;
+      const width = 200;
+      const height = 100;
+      const verticalOffset = 100;
+      const horizontalOffset = 100;
+      await page.setContent(`<div
+        style='position:absolute; left: ${horizontalOffset}px; top: ${verticalOffset}px; width: ${width}px; height: ${height}px; border: ${border}px solid green; padding: ${padding}px; margin: ${margin}px;'
+        id='box'>
+      </div>`);
+      using element = (await page.$('#box'))!;
+      const boxModel = await element.boxModel();
+
+      function makeQuad(topLeft: Point, bottomRight: Point): Quad {
+        return [
+          {
+            x: topLeft.x,
+            y: topLeft.y,
+          },
+          {
+            x: bottomRight.x,
+            y: topLeft.y,
+          },
+          {
+            x: bottomRight.x,
+            y: bottomRight.y,
+          },
+          {
+            x: topLeft.x,
+            y: bottomRight.y,
+          },
+        ];
+      }
+
+      expect(boxModel).toEqual({
+        content: makeQuad(
+          {
+            x: horizontalOffset + padding + margin + border,
+            y: verticalOffset + padding + margin + border,
+          },
+          {
+            x: horizontalOffset + width + padding + margin + border,
+            y: verticalOffset + height + padding + margin + border,
+          },
+        ),
+        padding: makeQuad(
+          {
+            x: horizontalOffset + margin + border,
+            y: verticalOffset + margin + border,
+          },
+          {
+            x: horizontalOffset + width + padding * 2 + margin + border,
+            y: verticalOffset + padding * 2 + height + margin + border,
+          },
+        ),
+        border: makeQuad(
+          {
+            x: horizontalOffset + margin,
+            y: verticalOffset + margin,
+          },
+          {
+            x: horizontalOffset + width + padding * 2 + margin + border * 2,
+            y: verticalOffset + padding * 2 + height + margin + border * 2,
+          },
+        ),
+        margin: makeQuad(
+          {
+            x: horizontalOffset,
+            y: verticalOffset,
+          },
+          {
+            x: horizontalOffset + width + padding * 2 + margin * 2 + border * 2,
+            y: verticalOffset + padding * 2 + height + margin * 2 + border * 2,
+          },
+        ),
+        width: width + padding * 2 + border * 2,
+        height: height + padding * 2 + border * 2,
+      });
     });
   });
 
@@ -165,7 +240,7 @@ describe('ElementHandle specs', function () {
 
       await page.goto(server.EMPTY_PAGE);
       await attachFrame(page, 'frame1', server.EMPTY_PAGE);
-      const elementHandle = (await page.$('#frame1'))!;
+      using elementHandle = (await page.$('#frame1'))!;
       const frame = await elementHandle.contentFrame();
       expect(frame).toBe(page.frames()[1]);
     });
@@ -175,7 +250,7 @@ describe('ElementHandle specs', function () {
     it('should work', async () => {
       const {page} = await getTestState();
       await page.setContent('<div style="display: none">text</div>');
-      const element = (await page.waitForSelector('div'))!;
+      using element = (await page.waitForSelector('div'))!;
       await expect(element.isVisible()).resolves.toBeFalsy();
       await expect(element.isHidden()).resolves.toBeTruthy();
       await element.evaluate(e => {
@@ -191,12 +266,12 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/button.html');
-      const button = (await page.$('button'))!;
+      using button = (await page.$('button'))!;
       await button.click();
       expect(
         await page.evaluate(() => {
           return (globalThis as any).result;
-        })
+        }),
       ).toBe('Clicked');
     });
     it('should return Point data', async () => {
@@ -219,7 +294,7 @@ describe('ElementHandle specs', function () {
         });
       });
 
-      const divHandle = (await page.$('div'))!;
+      using divHandle = (await page.$('div'))!;
       await divHandle.click();
       await divHandle.click({
         offset: {
@@ -237,7 +312,7 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/shadow.html');
-      const buttonHandle = await page.evaluateHandle(() => {
+      using buttonHandle = await page.evaluateHandle(() => {
         // @ts-expect-error button is expected to be in the page's scope.
         return button as HTMLButtonElement;
       });
@@ -246,14 +321,14 @@ describe('ElementHandle specs', function () {
         await page.evaluate(() => {
           // @ts-expect-error clicked is expected to be in the page's scope.
           return clicked;
-        })
+        }),
       ).toBe(true);
     });
     it('should not work for TextNodes', async () => {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/button.html');
-      const buttonTextNode = await page.evaluateHandle(() => {
+      using buttonTextNode = await page.evaluateHandle(() => {
         return document.querySelector('button')!.firstChild as HTMLElement;
       });
       let error!: Error;
@@ -269,8 +344,8 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/button.html');
-      const button = (await page.$('button'))!;
-      await page.evaluate((button: HTMLElement) => {
+      using button = (await page.$('button'))!;
+      await page.evaluate(button => {
         return button.remove();
       }, button);
       let error!: Error;
@@ -286,45 +361,211 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/button.html');
-      const button = (await page.$('button'))!;
-      await page.evaluate((button: HTMLElement) => {
+      using button = (await page.$('button'))!;
+      await page.evaluate(button => {
         return (button.style.display = 'none');
       }, button);
       const error = await button.click().catch(error_ => {
         return error_;
       });
       expect(error.message).atLeastOneToContain([
-        'Node is either not clickable or not an HTMLElement',
-        'no such node',
+        'Node is either not clickable or not an Element',
+        'no such element',
       ]);
     });
     it('should throw for recursively hidden nodes', async () => {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/button.html');
-      const button = (await page.$('button'))!;
-      await page.evaluate((button: HTMLElement) => {
+      using button = (await page.$('button'))!;
+      await page.evaluate(button => {
         return (button.parentElement!.style.display = 'none');
       }, button);
       const error = await button.click().catch(error_ => {
         return error_;
       });
       expect(error.message).atLeastOneToContain([
-        'Node is either not clickable or not an HTMLElement',
-        'no such node',
+        'Node is either not clickable or not an Element',
+        'no such element',
       ]);
     });
     it('should throw for <br> elements', async () => {
       const {page} = await getTestState();
 
       await page.setContent('hello<br>goodbye');
-      const br = (await page.$('br'))!;
+      using br = (await page.$('br'))!;
       const error = await br.click().catch(error_ => {
         return error_;
       });
       expect(error.message).atLeastOneToContain([
-        'Node is either not clickable or not an HTMLElement',
+        'Node is either not clickable or not an Element',
         'no such node',
+      ]);
+    });
+  });
+
+  describe('ElementHandle.touchStart', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      const {events} = await initializeTouchEventReport(page);
+
+      await page.evaluate(() => {
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        document.body.innerHTML = `
+          <div style="cursor: pointer; width: 120px; height: 60px; margin: 30px; padding: 15px;"></div>
+        `;
+      });
+
+      using divHandle = (await page.$('div'))!;
+      await divHandle.touchStart();
+      await shortWaitForArrayToHaveAtLeastNElements(events, 1);
+
+      const expectedTouchLocation = [45 + 60, 45 + 30]; // margin + middle point offset
+
+      expect(events).toEqual([
+        {
+          changed: [expectedTouchLocation],
+          touches: [expectedTouchLocation],
+        },
+      ]);
+    });
+
+    it('should work with the returned Touch', async () => {
+      const {page} = await getTestState();
+      const {events} = await initializeTouchEventReport(page);
+
+      await page.evaluate(() => {
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        document.body.innerHTML = `
+          <div style="cursor: pointer; width: 120px; height: 60px; margin: 30px; padding: 15px;"></div>
+        `;
+      });
+
+      using divHandle = (await page.$('div'))!;
+      const touch = await divHandle.touchStart();
+      await touch.move(150, 150);
+
+      await shortWaitForArrayToHaveAtLeastNElements(events, 2);
+
+      const expectedTouchLocation = [45 + 60, 45 + 30]; // margin + middle point offset
+
+      expect(events).toEqual([
+        {
+          changed: [expectedTouchLocation],
+          touches: [expectedTouchLocation],
+        },
+        {
+          changed: [[150, 150]],
+          touches: [[150, 150]],
+        },
+      ]);
+    });
+  });
+
+  describe('ElementHandle.touchMove', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      const {events} = await initializeTouchEventReport(page);
+
+      await page.evaluate(() => {
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        document.body.innerHTML = `
+          <div style="cursor: pointer; width: 120px; height: 60px; margin: 30px; padding: 15px;"></div>
+        `;
+      });
+
+      using divHandle = (await page.$('div'))!;
+
+      await page.touchscreen.touchStart(200, 200);
+      await divHandle.touchMove();
+
+      await shortWaitForArrayToHaveAtLeastNElements(events, 2);
+
+      const expectedDivTouchLocation = [45 + 60, 45 + 30]; // margin + middle point offset
+      expect(events).toEqual([
+        {
+          changed: [[200, 200]],
+          touches: [[200, 200]],
+        },
+        {
+          changed: [expectedDivTouchLocation],
+          touches: [expectedDivTouchLocation],
+        },
+      ]);
+    });
+
+    it('should work with a pre-existing Touch', async () => {
+      const {page} = await getTestState();
+      const {events} = await initializeTouchEventReport(page);
+
+      await page.evaluate(() => {
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        document.body.innerHTML = `
+          <div style="cursor: pointer; width: 120px; height: 60px; margin: 30px; padding: 15px;"></div>
+        `;
+      });
+
+      using divHandle = (await page.$('div'))!;
+      await page.touchscreen.touchStart(200, 200);
+      const secondTouch = await page.touchscreen.touchStart(200, 100);
+      await divHandle.touchMove(secondTouch);
+
+      await shortWaitForArrayToHaveAtLeastNElements(events, 3);
+
+      const expectedDivTouchLocation = [45 + 60, 45 + 30]; // margin + middle point offset
+
+      expect(events).toEqual([
+        {
+          changed: [[200, 200]],
+          touches: [[200, 200]],
+        },
+        {
+          changed: [[200, 100]],
+          touches: [
+            [200, 200],
+            [200, 100],
+          ],
+        },
+        {
+          changed: [expectedDivTouchLocation],
+          touches: [[200, 200], expectedDivTouchLocation],
+        },
+      ]);
+    });
+  });
+
+  describe('ElementHandle.touchEnd', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      const {events} = await initializeTouchEventReport(page);
+
+      await page.evaluate(() => {
+        document.body.style.padding = '0';
+        document.body.style.margin = '0';
+        document.body.innerHTML = `
+          <div style="cursor: pointer; width: 120px; height: 60px; margin: 30px; padding: 15px;"></div>
+        `;
+      });
+
+      using divHandle = (await page.$('div'))!;
+
+      await page.touchscreen.touchStart(100, 100);
+      await divHandle.touchEnd();
+      await shortWaitForArrayToHaveAtLeastNElements(events, 2);
+
+      expect(events).toEqual([
+        {
+          changed: [[100, 100]],
+          touches: [[100, 100]],
+        },
+        {
+          changed: [[100, 100]],
+          touches: [],
+        },
       ]);
     });
   });
@@ -341,11 +582,11 @@ describe('ElementHandle specs', function () {
         `;
       });
       await page.evaluate(async () => {
-        return new Promise(resolve => {
+        return await new Promise(resolve => {
           return window.requestAnimationFrame(resolve);
         });
       });
-      const divHandle = (await page.$('div'))!;
+      using divHandle = (await page.$('div'))!;
       expect(await divHandle.clickablePoint()).toEqual({
         x: 45 + 60, // margin + middle point offset
         y: 45 + 30, // margin + middle point offset
@@ -354,11 +595,77 @@ describe('ElementHandle specs', function () {
         await divHandle.clickablePoint({
           x: 10,
           y: 15,
-        })
+        }),
       ).toEqual({
         x: 30 + 10, // margin + offset
         y: 30 + 15, // margin + offset
       });
+    });
+
+    it('should not work if the click box is not visible', async () => {
+      const {page} = await getTestState();
+
+      await page.setContent(
+        '<button style="width: 10px; height: 10px; position: absolute; left: -20px"></button>',
+      );
+      using handle = await page.locator('button').waitHandle();
+      await expect(handle.clickablePoint()).rejects.toBeInstanceOf(Error);
+
+      await page.setContent(
+        '<button style="width: 10px; height: 10px; position: absolute; right: -20px"></button>',
+      );
+      using handle2 = await page.locator('button').waitHandle();
+      await expect(handle2.clickablePoint()).rejects.toBeInstanceOf(Error);
+
+      await page.setContent(
+        '<button style="width: 10px; height: 10px; position: absolute; top: -20px"></button>',
+      );
+      using handle3 = await page.locator('button').waitHandle();
+      await expect(handle3.clickablePoint()).rejects.toBeInstanceOf(Error);
+
+      await page.setContent(
+        '<button style="width: 10px; height: 10px; position: absolute; bottom: -20px"></button>',
+      );
+      using handle4 = await page.locator('button').waitHandle();
+      await expect(handle4.clickablePoint()).rejects.toBeInstanceOf(Error);
+    });
+
+    it('should not work if the click box is not visible due to the iframe', async () => {
+      const {page} = await getTestState();
+
+      await page.setContent(
+        `<iframe name='frame' style='position: absolute; left: -100px' srcdoc="<button style='width: 10px; height: 10px;'></button>"></iframe>`,
+      );
+      const frame = await page.waitForFrame(async frame => {
+        using element = await frame.frameElement();
+        if (!element) {
+          return false;
+        }
+        const name = await element.evaluate(frame => {
+          return frame.name;
+        });
+        return name === 'frame';
+      });
+
+      using handle = await frame.locator('button').waitHandle();
+      await expect(handle.clickablePoint()).rejects.toBeInstanceOf(Error);
+
+      await page.setContent(
+        `<iframe name='frame2' style='position: absolute; top: -100px' srcdoc="<button style='width: 10px; height: 10px;'></button>"></iframe>`,
+      );
+      const frame2 = await page.waitForFrame(async frame => {
+        using element = await frame.frameElement();
+        if (!element) {
+          return false;
+        }
+        const name = await element.evaluate(frame => {
+          return frame.name;
+        });
+        return name === 'frame2';
+      });
+
+      using handle2 = await frame2.locator('button').waitHandle();
+      await expect(handle2.clickablePoint()).rejects.toBeInstanceOf(Error);
     });
 
     it('should work for iframes', async () => {
@@ -371,12 +678,12 @@ describe('ElementHandle specs', function () {
         `;
       });
       await page.evaluate(async () => {
-        return new Promise(resolve => {
+        return await new Promise(resolve => {
           return window.requestAnimationFrame(resolve);
         });
       });
       const frame = page.frames()[1]!;
-      const divHandle = (await frame.$('div'))!;
+      using divHandle = (await frame.$('div'))!;
       expect(await divHandle.clickablePoint()).toEqual({
         x: 20 + 45 + 60, // iframe pos + margin + middle point offset
         y: 20 + 45 + 30, // iframe pos + margin + middle point offset
@@ -385,7 +692,7 @@ describe('ElementHandle specs', function () {
         await divHandle.clickablePoint({
           x: 10,
           y: 15,
-        })
+        }),
       ).toEqual({
         x: 20 + 30 + 10, // iframe pos + margin + offset
         y: 20 + 30 + 15, // iframe pos + margin + offset
@@ -401,9 +708,9 @@ describe('ElementHandle specs', function () {
       }) as Promise<ElementHandle<HTMLDivElement>>;
       // Set the page content after the waitFor has been started.
       await page.setContent(
-        '<div id="not-foo"></div><div class="bar">bar2</div><div class="foo">Foo1</div>'
+        '<div id="not-foo"></div><div class="bar">bar2</div><div class="foo">Foo1</div>',
       );
-      let element = (await waitFor)!;
+      using element = (await waitFor)!;
       if (element instanceof Error) {
         throw element;
       }
@@ -415,21 +722,19 @@ describe('ElementHandle specs', function () {
       await element.evaluate(el => {
         el.innerHTML = '<div class="bar">bar1</div>';
       });
-      element = (await innerWaitFor)!;
-      if (element instanceof Error) {
-        throw element;
+      using element2 = (await innerWaitFor)!;
+      if (element2 instanceof Error) {
+        throw element2;
       }
-      expect(element).toBeDefined();
+      expect(element2).toBeDefined();
       expect(
-        await element.evaluate(el => {
-          return (el as HTMLElement).innerText;
-        })
+        await element2.evaluate(el => {
+          return el.innerText;
+        }),
       ).toStrictEqual('bar1');
     });
-  });
 
-  describe('Element.waitForXPath', () => {
-    it('should wait correctly with waitForXPath on an element', async () => {
+    it('should wait correctly with waitForSelector and xpath on an element', async () => {
       const {page} = await getTestState();
       // Set the page content after the waitFor has been started.
       await page.setContent(
@@ -441,23 +746,21 @@ describe('ElementHandle specs', function () {
         </div>
         <div id=el3>
           el3
-        </div>`
+        </div>`,
       );
 
-      const el1 = (await page.waitForSelector(
-        '#el1'
+      using elById = (await page.waitForSelector(
+        '#el1',
       )) as ElementHandle<HTMLDivElement>;
 
-      for (const path of ['//div', './/div']) {
-        const e = (await el1.waitForXPath(
-          path
-        )) as ElementHandle<HTMLDivElement>;
-        expect(
-          await e.evaluate(el => {
-            return el.id;
-          })
-        ).toStrictEqual('el2');
-      }
+      using elByXpath = (await elById.waitForSelector(
+        'xpath/.//div',
+      )) as ElementHandle<HTMLDivElement>;
+      expect(
+        await elByXpath.evaluate(el => {
+          return el.id;
+        }),
+      ).toStrictEqual('el2');
     });
   });
 
@@ -466,12 +769,12 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       await page.goto(server.PREFIX + '/input/scrollable.html');
-      const button = (await page.$('#button-6'))!;
+      using button = (await page.$('#button-6'))!;
       await button.hover();
       expect(
         await page.evaluate(() => {
           return document.querySelector('button:hover')!.id;
-        })
+        }),
       ).toBe('button-6');
     });
   });
@@ -481,7 +784,7 @@ describe('ElementHandle specs', function () {
       const {page, server} = await getTestState();
 
       async function getVisibilityForButton(selector: string) {
-        const button = (await page.$(selector))!;
+        using button = (await page.$(selector))!;
         return await button.isIntersectingViewport();
       }
 
@@ -505,11 +808,11 @@ describe('ElementHandle specs', function () {
       await page.goto(server.PREFIX + '/offscreenbuttons.html');
       // a button almost cannot be seen
       // sometimes we expect to return false by isIntersectingViewport1
-      const button = (await page.$('#btn11'))!;
+      using button = (await page.$('#btn11'))!;
       expect(
         await button.isIntersectingViewport({
           threshold: 0.001,
-        })
+        }),
       ).toBe(false);
     });
     it('should work with threshold of 1', async () => {
@@ -518,11 +821,11 @@ describe('ElementHandle specs', function () {
       await page.goto(server.PREFIX + '/offscreenbuttons.html');
       // a button almost cannot be seen
       // sometimes we expect to return false by isIntersectingViewport1
-      const button = (await page.$('#btn0'))!;
+      using button = (await page.$('#btn0'))!;
       expect(
         await button.isIntersectingViewport({
           threshold: 1,
-        })
+        }),
       ).toBe(true);
     });
     it('should work with svg elements', async () => {
@@ -563,7 +866,7 @@ describe('ElementHandle specs', function () {
 
       const [invisibleCircle, invisibleSvg] = await Promise.all([
         page.$('div circle'),
-        await page.$('div svg'),
+        page.$('div svg'),
       ]);
 
       // Firefox seems slow when using `isIntersectingViewport`
@@ -609,13 +912,13 @@ describe('ElementHandle specs', function () {
           return document.querySelector(`[id="${selector}"]`);
         },
       });
-      const element = (await page.$(
-        'getById/foo'
+      using element = (await page.$(
+        'getById/foo',
       )) as ElementHandle<HTMLDivElement>;
       expect(
         await page.evaluate(element => {
           return element.id;
-        }, element)
+        }, element),
       ).toBe('foo');
       const handlerNamesAfterRegistering = Puppeteer.customQueryHandlerNames();
       expect(handlerNamesAfterRegistering.includes('getById')).toBeTruthy();
@@ -627,14 +930,14 @@ describe('ElementHandle specs', function () {
         throw new Error('Custom query handler name not set - throw expected');
       } catch (error) {
         expect(error).not.toStrictEqual(
-          new Error('Custom query handler name not set - throw expected')
+          new Error('Custom query handler name not set - throw expected'),
         );
       }
       const handlerNamesAfterUnregistering =
         Puppeteer.customQueryHandlerNames();
       expect(handlerNamesAfterUnregistering.includes('getById')).toBeFalsy();
     });
-    it('should throw with invalid query names', () => {
+    it('should throw with invalid query names', async () => {
       try {
         Puppeteer.registerCustomQueryHandler('1/2/3', {
           queryOne: () => {
@@ -642,18 +945,18 @@ describe('ElementHandle specs', function () {
           },
         });
         throw new Error(
-          'Custom query handler name was invalid - throw expected'
+          'Custom query handler name was invalid - throw expected',
         );
       } catch (error) {
         expect(error).toStrictEqual(
-          new Error('Custom query handler names may only contain [a-zA-Z]')
+          new Error('Custom query handler names may only contain [a-zA-Z]'),
         );
       }
     });
     it('should work for multiple elements', async () => {
       const {page} = await getTestState();
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo">Foo1</div><div class="foo baz">Foo2</div>'
+        '<div id="not-foo"></div><div class="foo">Foo1</div><div class="foo baz">Foo2</div>',
       );
       Puppeteer.registerCustomQueryHandler('getByClass', {
         queryAll: (_element, selector) => {
@@ -668,7 +971,7 @@ describe('ElementHandle specs', function () {
           return await page.evaluate(element => {
             return element.className;
           }, element);
-        })
+        }),
       );
 
       expect(classNames).toStrictEqual(['foo', 'foo baz']);
@@ -676,7 +979,7 @@ describe('ElementHandle specs', function () {
     it('should eval correctly', async () => {
       const {page} = await getTestState();
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo">Foo1</div><div class="foo baz">Foo2</div>'
+        '<div id="not-foo"></div><div class="foo">Foo1</div><div class="foo baz">Foo2</div>',
       );
       Puppeteer.registerCustomQueryHandler('getByClass', {
         queryAll: (_element, selector) => {
@@ -702,7 +1005,7 @@ describe('ElementHandle specs', function () {
 
       // Set the page content after the waitFor has been started.
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo">Foo1</div>'
+        '<div id="not-foo"></div><div class="foo">Foo1</div>',
       );
       const element = await waitFor;
 
@@ -726,9 +1029,9 @@ describe('ElementHandle specs', function () {
 
       // Set the page content after the waitFor has been started.
       await page.setContent(
-        '<div id="not-foo"></div><div class="bar">bar2</div><div class="foo">Foo1</div>'
+        '<div id="not-foo"></div><div class="bar">bar2</div><div class="foo">Foo1</div>',
       );
-      let element = (await waitFor)!;
+      using element = (await waitFor)!;
       if (element instanceof Error) {
         throw element;
       }
@@ -744,21 +1047,19 @@ describe('ElementHandle specs', function () {
         el.innerHTML = '<div class="bar">bar1</div>';
       });
 
-      element = (await innerWaitFor)!;
-      if (element instanceof Error) {
-        throw element;
+      using element2 = (await innerWaitFor)!;
+      if (element2 instanceof Error) {
+        throw element2;
       }
-      expect(element).toBeDefined();
+      expect(element2).toBeDefined();
       expect(
-        await element.evaluate(el => {
+        await element2.evaluate(el => {
           return el.innerText;
-        })
+        }),
       ).toStrictEqual('bar1');
     });
 
-    it('should wait correctly with waitFor', async () => {
-      /* page.waitFor is deprecated so we silence the warning to avoid test noise */
-      sinon.stub(console, 'warn').callsFake(() => {});
+    it('should wait correctly with waitForSelector', async () => {
       const {page} = await getTestState();
       Puppeteer.registerCustomQueryHandler('getByClass', {
         queryOne: (element, selector) => {
@@ -771,7 +1072,7 @@ describe('ElementHandle specs', function () {
 
       // Set the page content after the waitFor has been started.
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo">Foo1</div>'
+        '<div id="not-foo"></div><div class="foo">Foo1</div>',
       );
       const element = await waitFor;
 
@@ -784,7 +1085,7 @@ describe('ElementHandle specs', function () {
     it('should work when both queryOne and queryAll are registered', async () => {
       const {page} = await getTestState();
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo"><div id="nested-foo" class="foo"/></div><div class="foo baz">Foo2</div>'
+        '<div id="not-foo"></div><div class="foo"><div id="nested-foo" class="foo"/></div><div class="foo baz">Foo2</div>',
       );
       Puppeteer.registerCustomQueryHandler('getByClass', {
         queryOne: (element, selector) => {
@@ -795,7 +1096,7 @@ describe('ElementHandle specs', function () {
         },
       });
 
-      const element = (await page.$('getByClass/foo'))!;
+      using element = (await page.$('getByClass/foo'))!;
       expect(element).toBeDefined();
 
       const elements = await page.$$('getByClass/foo');
@@ -804,7 +1105,7 @@ describe('ElementHandle specs', function () {
     it('should eval when both queryOne and queryAll are registered', async () => {
       const {page} = await getTestState();
       await page.setContent(
-        '<div id="not-foo"></div><div class="foo">text</div><div class="foo baz">content</div>'
+        '<div id="not-foo"></div><div class="foo">text</div><div class="foo baz">content</div>',
       );
       Puppeteer.registerCustomQueryHandler('getByClass', {
         queryOne: (element, selector) => {
@@ -841,24 +1142,67 @@ describe('ElementHandle specs', function () {
         },
       });
 
-      const element = (await page.$(
-        'getById/foo'
+      using element = (await page.$(
+        'getById/foo',
       )) as ElementHandle<HTMLDivElement>;
       expect(
         await page.evaluate(element => {
           return element.id;
-        }, element)
+        }, element),
       ).toBe('foo');
     });
   });
 
-  describe('Element.toElement', () => {
+  describe('ElementHandle.toElement', () => {
     it('should work', async () => {
       const {page} = await getTestState();
       await page.setContent('<div class="foo">Foo1</div>');
-      const element = await page.$('.foo');
-      const div = await element?.toElement('div');
+      using element = await page.$('.foo');
+      using div = await element?.toElement('div');
       expect(div).toBeDefined();
+    });
+  });
+
+  describe('ElementHandle[Symbol.dispose]', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      using handle = await page.evaluateHandle('document');
+      const spy = sinon.spy(handle, disposeSymbol);
+      {
+        using _ = handle;
+      }
+      expect(handle).toBeInstanceOf(ElementHandle);
+      expect(spy.calledOnce).toBeTruthy();
+      expect(handle.disposed).toBeTruthy();
+    });
+  });
+
+  describe('ElementHandle[Symbol.asyncDispose]', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      using handle = await page.evaluateHandle('document');
+      const spy = sinon.spy(handle, asyncDisposeSymbol);
+      {
+        await using _ = handle;
+      }
+      expect(handle).toBeInstanceOf(ElementHandle);
+      expect(spy.calledOnce).toBeTruthy();
+      expect(handle.disposed).toBeTruthy();
+    });
+  });
+
+  describe('ElementHandle.move', () => {
+    it('should work', async () => {
+      const {page} = await getTestState();
+      using handle = await page.evaluateHandle('document');
+      const spy = sinon.spy(handle, disposeSymbol);
+      {
+        using _ = handle;
+        handle.move();
+      }
+      expect(handle).toBeInstanceOf(ElementHandle);
+      expect(spy.calledOnce).toBeTruthy();
+      expect(handle.disposed).toBeFalsy();
     });
   });
 });

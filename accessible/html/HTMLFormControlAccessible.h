@@ -59,8 +59,8 @@ class HTMLButtonAccessible : public HyperTextAccessible {
   HTMLButtonAccessible(nsIContent* aContent, DocAccessible* aDoc);
 
   // LocalAccessible
+  virtual void Value(nsString& aValue) const override;
   virtual mozilla::a11y::role NativeRole() const override;
-  virtual uint64_t State() override;
   virtual uint64_t NativeState() const override;
 
   // ActionAccessible
@@ -118,7 +118,7 @@ class HTMLTextFieldAccessible : public HyperTextAccessible {
   virtual ~HTMLTextFieldAccessible() {}
 
   // LocalAccessible
-  virtual ENameValueFlag NativeName(nsString& aName) const override;
+  virtual ENameValueFlag Name(nsString& aName) const override;
 
   virtual void DOMAttributeChanged(int32_t aNameSpaceID, nsAtom* aAttribute,
                                    int32_t aModType,
@@ -135,8 +135,11 @@ class HTMLFileInputAccessible : public HyperTextAccessible {
 
   // LocalAccessible
   virtual mozilla::a11y::role NativeRole() const override;
-  virtual nsresult HandleAccEvent(AccEvent* aAccEvent) override;
-  virtual LocalAccessible* CurrentItem() const override;
+  virtual bool IsAcceptableChild(nsIContent* aEl) const override;
+  virtual ENameValueFlag Name(nsString& aName) const override;
+  virtual bool HasPrimaryAction() const override;
+  virtual void ActionNameAt(uint8_t aIndex, nsAString& aName) override;
+  virtual bool IsWidget() const override;
 };
 
 /**
@@ -332,6 +335,17 @@ class HTMLMeterAccessible : public LeafAccessible {
 
   // Widgets
   virtual bool IsWidget() const override;
+
+  // HTMLMeterAccessible
+
+  /**
+   * Given the low, high, and optimum attrs from DOM, return an int
+   * that indicates which region the current value falls in:
+   * - Optimal (1)
+   * - Suboptimal (0)
+   * - Critical, or "even less good" by the spec (-1)
+   */
+  int32_t ValueRegion() const;
 
  protected:
   virtual ~HTMLMeterAccessible() {}

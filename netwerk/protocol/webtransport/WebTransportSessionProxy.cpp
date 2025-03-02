@@ -6,12 +6,15 @@
 #include "WebTransportLog.h"
 #include "Http3WebTransportSession.h"
 #include "Http3WebTransportStream.h"
+#include "ScopedNSSTypes.h"
 #include "WebTransportSessionProxy.h"
 #include "WebTransportStreamProxy.h"
 #include "nsIAsyncVerifyRedirectCallback.h"
 #include "nsIHttpChannel.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsIRequest.h"
+#include "nsITransportSecurityInfo.h"
+#include "nsIX509Cert.h"
 #include "nsNetUtil.h"
 #include "nsProxyRelease.h"
 #include "nsSocketTransportService2.h"
@@ -24,7 +27,9 @@ namespace mozilla::net {
 LazyLogModule webTransportLog("nsWebTransport");
 
 NS_IMPL_ISUPPORTS(WebTransportSessionProxy, WebTransportSessionEventListener,
-                  nsIWebTransport, nsIRedirectResultListener, nsIStreamListener,
+                  WebTransportSessionEventListenerInternal,
+                  WebTransportConnectionSettings, nsIWebTransport,
+                  nsIRedirectResultListener, nsIStreamListener,
                   nsIChannelEventSink, nsIInterfaceRequestor);
 
 WebTransportSessionProxy::WebTransportSessionProxy()
@@ -60,18 +65,28 @@ WebTransportSessionProxy::~WebTransportSessionProxy() {
 //-----------------------------------------------------------------------------
 
 nsresult WebTransportSessionProxy::AsyncConnect(
-    nsIURI* aURI, nsIPrincipal* aPrincipal, uint32_t aSecurityFlags,
-    WebTransportSessionEventListener* aListener) {
-  return AsyncConnectWithClient(aURI, aPrincipal, aSecurityFlags, aListener,
-                                Maybe<dom::ClientInfo>());
+    nsIURI* aURI, bool aDedicated,
+    const nsTArray<RefPtr<nsIWebTransportHash>>& aServerCertHashes,
+    nsIPrincipal* aPrincipal, uint32_t aSecurityFlags,
+    WebTransportSessionEventListener* aListener,
+    nsIWebTransport::HTTPVersion aVersion) {
+  return AsyncConnectWithClient(aURI, aDedicated, std::move(aServerCertHashes),
+                                aPrincipal, aSecurityFlags, aListener,
+                                Maybe<dom::ClientInfo>(), aVersion);
 }
 
 nsresult WebTransportSessionProxy::AsyncConnectWithClient(
-    nsIURI* aURI, nsIPrincipal* aPrincipal, uint32_t aSecurityFlags,
+    nsIURI* aURI, bool aDedicated,
+    const nsTArray<RefPtr<nsIWebTransportHash>>& aServerCertHashes,
+    nsIPrincipal* aPrincipal, uint32_t aSecurityFlags,
     WebTransportSessionEventListener* aListener,
-    const Maybe<dom::ClientInfo>& aClientInfo) {
+    const Maybe<dom::ClientInfo>& aClientInfo,
+    nsIWebTransport::HTTPVersion aVersion) {
   MOZ_ASSERT(NS_IsMainThread());
 
+  if (aVersion == nsIWebTransport::HTTPVersion::h2) {
+    mHTTPVersion = nsIWebTransport::HTTPVersion::h2;
+  }
   LOG(("WebTransportSessionProxy::AsyncConnect"));
   {
     MutexAutoLock lock(mMutex);
@@ -116,6 +131,13 @@ nsresult WebTransportSessionProxy::AsyncConnectWithClient(
   if (!httpChannel) {
     mChannel = nullptr;
     return NS_ERROR_ABORT;
+  }
+
+  mDedicatedConnection = aDedicated;
+
+  if (!aServerCertHashes.IsEmpty()) {
+    mServerCertHashes.Clear();
+    mServerCertHashes.AppendElements(aServerCertHashes);
   }
 
   {
@@ -194,6 +216,7 @@ WebTransportSessionProxy::CloseSession(uint32_t status,
   mReason = reason;
   mListener = nullptr;
   mPendingEvents.Clear();
+  mServerCertHashes.Clear();
   switch (mState) {
     case WebTransportSessionProxyState::INIT:
     case WebTransportSessionProxyState::DONE:
@@ -222,12 +245,30 @@ WebTransportSessionProxy::CloseSession(uint32_t status,
   return NS_OK;
 }
 
+NS_IMETHODIMP WebTransportSessionProxy::GetDedicated(bool* dedicated) {
+  *dedicated = mDedicatedConnection;
+  return NS_OK;
+}
+
+NS_IMETHODIMP WebTransportSessionProxy::GetServerCertificateHashes(
+    nsTArray<RefPtr<nsIWebTransportHash>>& aServerCertHashes) {
+  aServerCertHashes.Clear();
+  aServerCertHashes.AppendElements(mServerCertHashes);
+  return NS_OK;
+}
+
+NS_IMETHODIMP WebTransportSessionProxy::GetHttpVersion(
+    nsIWebTransport::HTTPVersion* aVersion) {
+  *aVersion = mHTTPVersion;
+  return NS_OK;
+}
+
 void WebTransportSessionProxy::CloseSessionInternalLocked() {
   MutexAutoLock lock(mMutex);
   CloseSessionInternal();
 }
 
-void WebTransportSessionProxy::CloseSessionInternal() {
+void WebTransportSessionProxy::CloseSessionInternal() MOZ_REQUIRES(mMutex) {
   if (!OnSocketThread()) {
     mMutex.AssertCurrentThreadOwns();
     RefPtr<WebTransportSessionProxy> self(this);
@@ -932,7 +973,7 @@ void WebTransportSessionProxy::CallOnSessionClosedLocked() {
   CallOnSessionClosed();
 }
 
-void WebTransportSessionProxy::CallOnSessionClosed() {
+void WebTransportSessionProxy::CallOnSessionClosed() MOZ_REQUIRES(mMutex) {
   mMutex.AssertCurrentThreadOwns();
 
   if (!mTarget->IsOnCurrentThread()) {
@@ -1048,15 +1089,6 @@ void WebTransportSessionProxy::NotifyDatagramReceived(
     MutexAutoLock lock(mMutex);
     MOZ_ASSERT(mTarget->IsOnCurrentThread());
 
-    if (!mStopRequestCalled) {
-      CopyableTArray<uint8_t> copied(aData);
-      mPendingEvents.AppendElement(
-          [self = RefPtr{this}, data = std::move(copied)]() mutable {
-            self->NotifyDatagramReceived(std::move(data));
-          });
-      return;
-    }
-
     if (mState != WebTransportSessionProxyState::ACTIVE || !mListener) {
       return;
     }
@@ -1072,6 +1104,15 @@ NS_IMETHODIMP WebTransportSessionProxy::OnDatagramReceivedInternal(
 
   {
     MutexAutoLock lock(mMutex);
+    if (!mStopRequestCalled) {
+      CopyableTArray<uint8_t> copied(aData);
+      mPendingEvents.AppendElement(
+          [self = RefPtr{this}, data = std::move(copied)]() mutable {
+            self->OnDatagramReceivedInternal(std::move(data));
+          });
+      return NS_OK;
+    }
+
     if (!mTarget->IsOnCurrentThread()) {
       return mTarget->Dispatch(NS_NewRunnableFunction(
           "WebTransportSessionProxy::OnDatagramReceived",

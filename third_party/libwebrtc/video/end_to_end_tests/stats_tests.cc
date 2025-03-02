@@ -9,14 +9,13 @@
  */
 
 #include <memory>
+#include <optional>
 
 #include "absl/algorithm/container.h"
-#include "absl/types/optional.h"
 #include "api/task_queue/task_queue_base.h"
 #include "api/test/simulated_network.h"
 #include "api/test/video/function_video_encoder_factory.h"
 #include "call/fake_network_pipe.h"
-#include "call/simulated_network.h"
 #include "modules/rtp_rtcp/source/rtp_packet.h"
 #include "modules/video_coding/include/video_coding_defines.h"
 #include "rtc_base/strings/string_builder.h"
@@ -27,6 +26,7 @@
 #include "test/call_test.h"
 #include "test/fake_encoder.h"
 #include "test/gtest.h"
+#include "test/network/simulated_network.h"
 #include "test/rtcp_packet_parser.h"
 #include "test/video_test_constants.h"
 
@@ -53,17 +53,17 @@ TEST_F(StatsEndToEndTest, GetStats) {
    public:
     StatsObserver()
         : EndToEndTest(test::VideoTestConstants::kLongTimeout),
-          encoder_factory_([]() {
-            return std::make_unique<test::DelayedEncoder>(
-                Clock::GetRealTimeClock(), 10);
-          }) {}
+          encoder_factory_(
+              [](const Environment& env, const SdpVideoFormat& format) {
+                return std::make_unique<test::DelayedEncoder>(env, 10);
+              }) {}
 
    private:
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       // Drop every 25th packet => 4% loss.
       static const int kPacketLossFrac = 25;
       RtpPacket header;
-      if (header.Parse(packet, length) &&
+      if (header.Parse(packet) &&
           expected_send_ssrcs_.find(header.Ssrc()) !=
               expected_send_ssrcs_.end() &&
           header.SequenceNumber() % kPacketLossFrac == 0) {
@@ -73,17 +73,17 @@ TEST_F(StatsEndToEndTest, GetStats) {
       return SEND_PACKET;
     }
 
-    Action OnSendRtcp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtcp(rtc::ArrayView<const uint8_t> packet) override {
       check_stats_event_.Set();
       return SEND_PACKET;
     }
 
-    Action OnReceiveRtp(const uint8_t* packet, size_t length) override {
+    Action OnReceiveRtp(rtc::ArrayView<const uint8_t> packet) override {
       check_stats_event_.Set();
       return SEND_PACKET;
     }
 
-    Action OnReceiveRtcp(const uint8_t* packet, size_t length) override {
+    Action OnReceiveRtcp(rtc::ArrayView<const uint8_t> packet) override {
       check_stats_event_.Set();
       return SEND_PACKET;
     }
@@ -126,6 +126,15 @@ TEST_F(StatsEndToEndTest, GetStats) {
         receive_stats_filled_["FrameCounts"] |=
             stats.frame_counts.key_frames != 0 ||
             stats.frame_counts.delta_frames != 0;
+
+        receive_stats_filled_["JitterBufferDelay"] =
+            stats.jitter_buffer_delay > TimeDelta::Zero();
+        receive_stats_filled_["JitterBufferTargetDelay"] =
+            stats.jitter_buffer_target_delay > TimeDelta::Zero();
+        receive_stats_filled_["JitterBufferEmittedCount"] =
+            stats.jitter_buffer_emitted_count != 0;
+        receive_stats_filled_["JitterBufferMinimumDelay"] =
+            stats.jitter_buffer_minimum_delay > TimeDelta::Zero();
 
         receive_stats_filled_["CName"] |= !stats.c_name.empty();
 
@@ -421,7 +430,7 @@ TEST_F(StatsEndToEndTest, TestReceivedRtpPacketStats) {
 
     void OnStreamsStopped() override { task_safety_flag_->SetNotAlive(); }
 
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       if (sent_rtp_ >= kNumRtpPacketsToSend) {
         // Need to check the stats on the correct thread.
         task_queue_->PostTask(SafeTask(task_safety_flag_, [this]() {
@@ -480,7 +489,7 @@ TEST_F(StatsEndToEndTest, MAYBE_ContentTypeSwitches) {
       }
     }
 
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       if (MinNumberOfFramesReceived())
         observation_complete_.Set();
       return SEND_PACKET;
@@ -509,49 +518,46 @@ TEST_F(StatsEndToEndTest, MAYBE_ContentTypeSwitches) {
 
   metrics::Reset();
 
-  Call::Config send_config(send_event_log_.get());
+  CallConfig send_config = SendCallConfig();
   test.ModifySenderBitrateConfig(&send_config.bitrate_config);
-  Call::Config recv_config(recv_event_log_.get());
+  CallConfig recv_config = RecvCallConfig();
   test.ModifyReceiverBitrateConfig(&recv_config.bitrate_config);
 
   VideoEncoderConfig encoder_config_with_screenshare;
 
-  SendTask(
-      task_queue(), [this, &test, &send_config, &recv_config,
-                     &encoder_config_with_screenshare]() {
-        CreateSenderCall(send_config);
-        CreateReceiverCall(recv_config);
-        CreateReceiveTransport(test.GetReceiveTransportConfig(), &test);
-        CreateSendTransport(test.GetReceiveTransportConfig(), &test);
+  SendTask(task_queue(), [this, &test, &send_config, &recv_config,
+                          &encoder_config_with_screenshare]() {
+    CreateSenderCall(std::move(send_config));
+    CreateReceiverCall(std::move(recv_config));
+    CreateReceiveTransport(test.GetReceiveTransportConfig(), &test);
+    CreateSendTransport(test.GetReceiveTransportConfig(), &test);
 
-        receiver_call_->SignalChannelNetworkState(MediaType::VIDEO, kNetworkUp);
-        CreateSendConfig(1, 0, 0);
-        CreateMatchingReceiveConfigs();
+    receiver_call_->SignalChannelNetworkState(MediaType::VIDEO, kNetworkUp);
+    CreateSendConfig(1, 0, 0);
+    CreateMatchingReceiveConfigs();
 
-        // Modify send and receive configs.
-        GetVideoSendConfig()->rtp.nack.rtp_history_ms =
-            test::VideoTestConstants::kNackRtpHistoryMs;
-        video_receive_configs_[0].rtp.nack.rtp_history_ms =
-            test::VideoTestConstants::kNackRtpHistoryMs;
-        video_receive_configs_[0].renderer = &test;
-        // RTT needed for RemoteNtpTimeEstimator for the receive stream.
-        video_receive_configs_[0].rtp.rtcp_xr.receiver_reference_time_report =
-            true;
-        // Start with realtime video.
-        GetVideoEncoderConfig()->content_type =
-            VideoEncoderConfig::ContentType::kRealtimeVideo;
-        // Encoder config for the second part of the test uses screenshare.
-        encoder_config_with_screenshare = GetVideoEncoderConfig()->Copy();
-        encoder_config_with_screenshare.content_type =
-            VideoEncoderConfig::ContentType::kScreen;
+    // Modify send and receive configs.
+    GetVideoSendConfig()->rtp.nack.rtp_history_ms =
+        test::VideoTestConstants::kNackRtpHistoryMs;
+    video_receive_configs_[0].rtp.nack.rtp_history_ms =
+        test::VideoTestConstants::kNackRtpHistoryMs;
+    video_receive_configs_[0].renderer = &test;
+    // RTT needed for RemoteNtpTimeEstimator for the receive stream.
+    video_receive_configs_[0].rtp.rtcp_xr.receiver_reference_time_report = true;
+    // Start with realtime video.
+    GetVideoEncoderConfig()->content_type =
+        VideoEncoderConfig::ContentType::kRealtimeVideo;
+    // Encoder config for the second part of the test uses screenshare.
+    encoder_config_with_screenshare = GetVideoEncoderConfig()->Copy();
+    encoder_config_with_screenshare.content_type =
+        VideoEncoderConfig::ContentType::kScreen;
 
-        CreateVideoStreams();
-        CreateFrameGeneratorCapturer(
-            test::VideoTestConstants::kDefaultFramerate,
-            test::VideoTestConstants::kDefaultWidth,
-            test::VideoTestConstants::kDefaultHeight);
-        Start();
-      });
+    CreateVideoStreams();
+    CreateFrameGeneratorCapturer(test::VideoTestConstants::kDefaultFramerate,
+                                 test::VideoTestConstants::kDefaultWidth,
+                                 test::VideoTestConstants::kDefaultHeight);
+    Start();
+  });
 
   test.PerformTest();
 
@@ -597,12 +603,12 @@ TEST_F(StatsEndToEndTest, VerifyNackStats) {
           task_queue_(task_queue) {}
 
    private:
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       {
         MutexLock lock(&mutex_);
         if (++sent_rtp_packets_ == kPacketNumberToDrop) {
           RtpPacket header;
-          EXPECT_TRUE(header.Parse(packet, length));
+          EXPECT_TRUE(header.Parse(packet));
           dropped_rtp_packet_ = header.SequenceNumber();
           return DROP_PACKET;
         }
@@ -612,10 +618,10 @@ TEST_F(StatsEndToEndTest, VerifyNackStats) {
       return SEND_PACKET;
     }
 
-    Action OnReceiveRtcp(const uint8_t* packet, size_t length) override {
+    Action OnReceiveRtcp(rtc::ArrayView<const uint8_t> packet) override {
       MutexLock lock(&mutex_);
       test::RtcpPacketParser rtcp_parser;
-      rtcp_parser.Parse(packet, length);
+      rtcp_parser.Parse(packet);
       const std::vector<uint16_t>& nacks = rtcp_parser.nack()->packet_ids();
       if (!nacks.empty() && absl::c_linear_search(nacks, dropped_rtp_packet_)) {
         dropped_rtp_packet_requested_ = true;
@@ -685,7 +691,7 @@ TEST_F(StatsEndToEndTest, VerifyNackStats) {
     bool dropped_rtp_packet_requested_ RTC_GUARDED_BY(&mutex_) = false;
     std::vector<VideoReceiveStreamInterface*> receive_streams_;
     VideoSendStream* send_stream_ = nullptr;
-    absl::optional<int64_t> start_runtime_ms_;
+    std::optional<int64_t> start_runtime_ms_;
     TaskQueueBase* const task_queue_;
     rtc::scoped_refptr<PendingTaskSafetyFlag> task_safety_flag_ =
         PendingTaskSafetyFlag::CreateDetached();
@@ -726,13 +732,13 @@ TEST_F(StatsEndToEndTest, CallReportsRttForSender) {
     Start();
   });
 
-  int64_t start_time_ms = clock_->TimeInMilliseconds();
+  int64_t start_time_ms = env().clock().TimeInMilliseconds();
   while (true) {
     Call::Stats stats;
     SendTask(task_queue(),
              [this, &stats]() { stats = sender_call_->GetStats(); });
     ASSERT_GE(start_time_ms + test::VideoTestConstants::kDefaultTimeout.ms(),
-              clock_->TimeInMilliseconds())
+              env().clock().TimeInMilliseconds())
         << "No RTT stats before timeout!";
     if (stats.rtt_ms != -1) {
       // To avoid failures caused by rounding or minor ntp clock adjustments,

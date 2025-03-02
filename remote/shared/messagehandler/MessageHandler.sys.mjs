@@ -29,6 +29,8 @@ ChromeUtils.defineLazyGetter(lazy, "logger", () => lazy.Log.get());
  *     For ContextDescriptorType.All, id can be ommitted.
  *     For ContextDescriptorType.TopBrowsingContext, the id should be the
  *     browserId corresponding to a top-level browsing context.
+ *     For ContextDescriptorType.UserContext, the id should be the
+ *     platform user context id.
  */
 
 /**
@@ -39,6 +41,7 @@ ChromeUtils.defineLazyGetter(lazy, "logger", () => lazy.Log.get());
 export const ContextDescriptorType = {
   All: "All",
   TopBrowsingContext: "TopBrowsingContext",
+  UserContext: "UserContext",
 };
 
 /**
@@ -187,7 +190,7 @@ export class MessageHandler extends EventEmitter {
    * @typedef {object} CommandDestination
    * @property {string} type
    *     One of MessageHandler.type.
-   * @property {string=} id
+   * @property {string | number=} id
    *     Unique context identifier. The format depends on the type.
    *     For WINDOW_GLOBAL destinations, this is a browsing context id.
    *     Optional, should only be provided if `contextDescriptor` is missing.
@@ -210,12 +213,14 @@ export class MessageHandler extends EventEmitter {
    * @property {boolean=} retryOnAbort
    *     Optional. When true, commands will be retried upon AbortError, which
    *     can occur when the underlying JSWindowActor pair is destroyed.
-   *     Defaults to `false`.
+   *     If not explicitly set, the framework will automatically retry if the
+   *     destination is likely to be replaced (e.g. browsingContext on the
+   *     initial document or loading a document).
    */
 
   /**
    * Retrieve all module classes matching the moduleName and destination.
-   * See `getAllModuleClasses` (ModuleCache.jsm) for more details.
+   * See `getAllModuleClasses` (ModuleCache.sys.mjs) for more details.
    *
    * @param {string} moduleName
    *     The name of the module.
@@ -263,15 +268,12 @@ export class MessageHandler extends EventEmitter {
   }
 
   /**
-   * Apply the initial session data items provided to this MessageHandler on
-   * startup. Implementation is specific to each MessageHandler class.
+   * Execute the required initialization steps, inlcluding apply the initial session data items
+   * provided to this MessageHandler on startup. Implementation is specific to each MessageHandler class.
    *
    * By default the implementation is a no-op.
-   *
-   * @param {Array<SessionDataItem>} sessionDataItems
-   *     Initial session data items for this MessageHandler.
    */
-  async applyInitialSessionDataItems(sessionDataItems) {}
+  async initialize() {}
 
   /**
    * Returns the module path corresponding to this MessageHandler class.
@@ -297,7 +299,7 @@ export class MessageHandler extends EventEmitter {
    *
    * Needs to be implemented in the sub class.
    */
-  static getIdFromContext(context) {
+  static getIdFromContext() {
     throw new Error("Not implemented");
   }
 
@@ -306,7 +308,7 @@ export class MessageHandler extends EventEmitter {
    *
    * Needs to be implemented in the sub class.
    */
-  forwardCommand(command) {
+  forwardCommand() {
     throw new Error("Not implemented");
   }
 
@@ -316,7 +318,7 @@ export class MessageHandler extends EventEmitter {
    *
    * Needs to be implemented in the sub class.
    */
-  matchesContext(contextDescriptor) {
+  matchesContext() {
     throw new Error("Not implemented");
   }
 

@@ -1,34 +1,74 @@
-From: Michael Froman <mfroman@mozilla.com>
-Date: Mon, 24 Oct 2022 14:03:00 -0500
-Subject: Bug 1797161 - pt3 - add static_assert to ensure we don't include
- task_queue_win.cc in Mozilla builds. r?ng!
+From: Jan Grulich <jgrulich@redhat.com>
+Date: Fri, 10 Mar 2023 09:21:00 +0000
+Subject: Bug 1819035 - get EGL display based on the used platform in the
+ browser r=webrtc-reviewers,ng
 
-Differential Revision: https://phabricator.services.mozilla.com/D160117
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/50b15e036924203147e34ec20e2689fe4a847645
+Because of a possible misconfiguration or a possible driver issue it
+might happen that the browser will use a different driver on X11 and
+end up using yet another one for wayland/gbm, which might lead to not
+working screen sharing in the better case, but also to a crash in the
+other driver (Nvidia). This adds a check for platform the browser runs
+on, if it's XWayland or Wayland and based on that query EGL display for
+that specific platform, rather than going for the Wayland one only.
+
+Differential Revision: https://phabricator.services.mozilla.com/D171858
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/c8606497de1f461a6352456e0e511c2ae498d526
 ---
- rtc_base/task_queue_win.cc | 9 +++++++++
- 1 file changed, 9 insertions(+)
+ .../linux/wayland/egl_dmabuf.cc               | 30 +++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
 
-diff --git a/rtc_base/task_queue_win.cc b/rtc_base/task_queue_win.cc
-index 7e46d58e27..bf55a25c69 100644
---- a/rtc_base/task_queue_win.cc
-+++ b/rtc_base/task_queue_win.cc
-@@ -8,6 +8,15 @@
-  *  be found in the AUTHORS file in the root of the source tree.
-  */
+diff --git a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
+index fff976468c..15a447d1b0 100644
+--- a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
++++ b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
+@@ -13,6 +13,7 @@
+ #include <asm/ioctl.h>
+ #include <dlfcn.h>
+ #include <fcntl.h>
++#include <gdk/gdk.h>
+ #include <libdrm/drm_fourcc.h>
+ #include <linux/types.h>
+ #include <spa/param/video/format-utils.h>
+@@ -218,6 +219,26 @@ static void CloseLibrary(void* library) {
+   }
+ }
  
-+// Mozilla - this file should not be included in Mozilla builds until
-+// win32k API usage is removed.  This was once done in Bug 1395259, but
-+// the upstreaming attempt stalled.  Until win32k usage is officially
-+// removed upstream, we have reverted to upstream's version of the file
-+// (to reduce or elminate merge conflicts), and a static assert is
-+// placed here to ensure this file isn't accidentally included in the
-+// Mozilla build.
-+static_assert(false, "This file should not be built, see Bug 1797161.");
++static bool IsWaylandDisplay() {
++  static auto sGdkWaylandDisplayGetType =
++    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_wayland_display_get_type");
++  if (!sGdkWaylandDisplayGetType) {
++    return false;
++  }
++  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
++                                      sGdkWaylandDisplayGetType()));
++}
 +
- #include "rtc_base/task_queue_win.h"
++static bool IsX11Display() {
++  static auto sGdkX11DisplayGetType =
++    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_x11_display_get_type");
++  if (!sGdkX11DisplayGetType) {
++    return false;
++  }
++  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
++                                      sGdkX11DisplayGetType()));
++}
++
+ static void* g_lib_egl = nullptr;
  
- // clang-format off
--- 
-2.34.1
-
+ RTC_NO_SANITIZE("cfi-icall")
+@@ -363,8 +384,13 @@ EglDmaBuf::EglDmaBuf() {
+     return;
+   }
+ 
+-  egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
+-                                       (void*)EGL_DEFAULT_DISPLAY, nullptr);
++  if (IsWaylandDisplay()) {
++    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
++                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
++  } else if (IsX11Display()) {
++    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_X11_KHR,
++                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
++  }
+ 
+   if (egl_.display == EGL_NO_DISPLAY) {
+     RTC_LOG(LS_ERROR) << "Failed to obtain default EGL display: "

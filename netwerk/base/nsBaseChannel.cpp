@@ -8,7 +8,6 @@
 #include "nsContentUtils.h"
 #include "nsURLHelper.h"
 #include "nsNetCID.h"
-#include "nsMimeTypes.h"
 #include "nsUnknownDecoder.h"
 #include "nsIScriptSecurityManager.h"
 #include "nsMimeTypes.h"
@@ -287,7 +286,7 @@ void nsBaseChannel::ClassifyURI() {
     return;
   }
 
-  if (NS_ShouldClassifyChannel(this)) {
+  if (NS_ShouldClassifyChannel(this, ClassifyType::SafeBrowsing)) {
     auto classifier = MakeRefPtr<net::nsChannelClassifier>(this);
     classifier->Start();
   }
@@ -302,6 +301,7 @@ NS_IMPL_RELEASE(nsBaseChannel)
 NS_INTERFACE_MAP_BEGIN(nsBaseChannel)
   NS_INTERFACE_MAP_ENTRY(nsIRequest)
   NS_INTERFACE_MAP_ENTRY(nsIChannel)
+  NS_INTERFACE_MAP_ENTRY(nsIBaseChannel)
   NS_INTERFACE_MAP_ENTRY(nsIThreadRetargetableRequest)
   NS_INTERFACE_MAP_ENTRY(nsIInterfaceRequestor)
   NS_INTERFACE_MAP_ENTRY(nsITransportEventSink)
@@ -530,6 +530,10 @@ nsBaseChannel::SetContentType(const nsACString& aContentType) {
 NS_IMETHODIMP
 nsBaseChannel::GetContentCharset(nsACString& aContentCharset) {
   aContentCharset = mContentCharset;
+  if (mContentCharset.IsEmpty() && (mOriginalURI->SchemeIs("chrome") ||
+                                    mOriginalURI->SchemeIs("resource"))) {
+    aContentCharset.AssignLiteral("UTF-8");
+  }
   return NS_OK;
 }
 
@@ -783,10 +787,7 @@ nsBaseChannel::OnStartRequest(nsIRequest* request) {
   MOZ_ASSERT_IF(mRequest, request == mRequest);
   MOZ_ASSERT_IF(mCancelableAsyncRequest, !mRequest);
 
-  nsAutoCString scheme;
-  mURI->GetScheme(scheme);
-
-  if (mPump && !scheme.EqualsLiteral("ftp")) {
+  if (mPump) {
     // If our content type is unknown, use the content type
     // sniffer. If the sniffer is not available for some reason, then we just
     // keep going as-is.
@@ -898,7 +899,9 @@ NS_IMETHODIMP
 nsBaseChannel::RetargetDeliveryTo(nsISerialEventTarget* aEventTarget) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  NS_ENSURE_TRUE(mRequest, NS_ERROR_NOT_INITIALIZED);
+  if (!mRequest) {
+    return NS_ERROR_NOT_INITIALIZED;
+  }
 
   nsCOMPtr<nsIThreadRetargetableRequest> req;
   if (mAllowThreadRetargeting) {
@@ -940,68 +943,56 @@ nsBaseChannel::CheckListenerChain() {
   return listener->CheckListenerChain();
 }
 
+NS_IMETHODIMP
+nsBaseChannel::OnDataFinished(nsresult aStatus) {
+  if (!mListener) {
+    return NS_ERROR_FAILURE;
+  }
+
+  if (!mAllowThreadRetargeting) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  nsCOMPtr<nsIThreadRetargetableStreamListener> listener =
+      do_QueryInterface(mListener);
+  if (listener) {
+    return listener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
+}
+
 NS_IMETHODIMP nsBaseChannel::GetCanceled(bool* aCanceled) {
   *aCanceled = mCanceled;
   return NS_OK;
 }
 
 void nsBaseChannel::SetupNeckoTarget() {
-  mNeckoTarget =
-      nsContentUtils::GetEventTargetByLoadInfo(mLoadInfo, TaskCategory::Other);
+  mNeckoTarget = GetMainThreadSerialEventTarget();
 }
 
-nsBaseChannel::ContentRange::ContentRange(const nsACString& aRangeHeader,
-                                          uint64_t aSize)
-    : mStart(0), mEnd(0), mSize(0) {
-  auto parsed = nsContentUtils::ParseSingleRangeRequest(aRangeHeader, true);
-  // https://fetch.spec.whatwg.org/#ref-for-simple-range-header-value%E2%91%A1
-  // If rangeValue is failure, then return a network error.
-  if (!parsed) {
-    return;
+NS_IMETHODIMP nsBaseChannel::GetContentRange(
+    RefPtr<mozilla::net::ContentRange>* aRange) {
+  if (aRange) {
+    *aRange = mContentRange;
   }
-
-  // Sanity check: ParseSingleRangeRequest should handle these two cases.
-  // If rangeEndValue and rangeStartValue are null, then return failure.
-  MOZ_ASSERT(parsed->Start().isSome() || parsed->End().isSome());
-  // If rangeStartValue and rangeEndValue are numbers, and rangeStartValue
-  // is greater than rangeEndValue, then return failure.
-  MOZ_ASSERT(parsed->Start().isNothing() || parsed->End().isNothing() ||
-             *parsed->Start() <= *parsed->End());
-
-  // https://fetch.spec.whatwg.org/#ref-for-simple-range-header-value%E2%91%A1
-  // If rangeStart is null:
-  if (parsed->Start().isNothing()) {
-    // Set rangeStart to fullLength − rangeEnd.
-    mStart = aSize - *parsed->End();
-
-    // Set rangeEnd to rangeStart + rangeEnd − 1.
-    mEnd = mStart + *parsed->End() - 1;
-
-    // Otherwise:
-  } else {
-    // If rangeStart is greater than or equal to fullLength, then return a
-    // network error.
-    if (*parsed->Start() >= aSize) {
-      return;
-    }
-    mStart = *parsed->Start();
-
-    // If rangeEnd is null or rangeEnd is greater than or equal to fullLength,
-    // then set rangeEnd to fullLength − 1.
-    if (parsed->End().isNothing() || *parsed->End() >= aSize) {
-      mEnd = aSize - 1;
-    } else {
-      mEnd = *parsed->End();
-    }
-  }
-  mSize = aSize;
+  return NS_OK;
 }
 
-void nsBaseChannel::ContentRange::AsHeader(nsACString& aOutString) const {
-  aOutString.Assign("bytes "_ns);
-  aOutString.AppendInt(mStart);
-  aOutString.AppendLiteral("-");
-  aOutString.AppendInt(mEnd);
-  aOutString.AppendLiteral("/");
-  aOutString.AppendInt(mSize);
+NS_IMETHODIMP nsBaseChannel::SetContentRange(
+    RefPtr<mozilla::net::ContentRange> aRange) {
+  mContentRange = aRange;
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsBaseChannel::GetFullMimeType(RefPtr<TMimeType<char>>* aOut) {
+  if (aOut) {
+    *aOut = mFullMimeType;
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsBaseChannel::SetFullMimeType(RefPtr<TMimeType<char>> aType) {
+  mFullMimeType = aType;
+  return NS_OK;
 }

@@ -8,13 +8,18 @@
 
 #  include "AudioConfig.h"
 #  include "AudioSampleFormat.h"
+#  include "EncoderConfig.h"
 #  include "ImageTypes.h"
+#  include "MediaResult.h"
 #  include "SharedBuffer.h"
 #  include "TimeUnits.h"
 #  include "mozilla/CheckedInt.h"
+#  include "mozilla/DefineEnum.h"
+#  include "mozilla/EnumSet.h"
 #  include "mozilla/Maybe.h"
 #  include "mozilla/PodOperations.h"
 #  include "mozilla/RefPtr.h"
+#  include "mozilla/Result.h"
 #  include "mozilla/Span.h"
 #  include "mozilla/UniquePtr.h"
 #  include "mozilla/UniquePtrExtensions.h"
@@ -95,8 +100,16 @@ class AlignedBuffer {
   }
 
   AlignedBuffer& operator=(AlignedBuffer&& aOther) noexcept {
-    this->~AlignedBuffer();
-    new (this) AlignedBuffer(std::move(aOther));
+    if (&aOther == this) {
+      return *this;
+    }
+    mData = aOther.mData;
+    mLength = aOther.mLength;
+    mBuffer = std::move(aOther.mBuffer);
+    mCapacity = aOther.mCapacity;
+    aOther.mData = nullptr;
+    aOther.mLength = 0;
+    aOther.mCapacity = 0;
     return *this;
   }
 
@@ -112,7 +125,7 @@ class AlignedBuffer {
     return mData[aIndex];
   }
   // Set length of buffer, allocating memory as required.
-  // If length is increased, new buffer area is filled with 0.
+  // If memory is allocated, additional buffer area is filled with 0.
   bool SetLength(size_t aLength) {
     if (aLength > mLength && !EnsureCapacity(aLength)) {
       return false;
@@ -265,8 +278,8 @@ class InflatableShortBuffer {
     // The reason this works is because the buffer has in fact twice the
     // capacity, and the loop goes backward.
     float* output = reinterpret_cast<float*>(mBuffer.mData);
-    for (size_t i = Length() - 1; i--;) {
-      output[i] = AudioSampleToFloat(mBuffer.mData[i]);
+    for (size_t i = Length(); i--;) {
+      output[i] = ConvertAudioSample<float>(mBuffer.mData[i]);
     }
     AlignedFloatBuffer rv;
     rv.mBuffer = std::move(mBuffer.mBuffer);
@@ -288,21 +301,8 @@ class MediaData {
  public:
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(MediaData)
 
-  enum class Type : uint8_t { AUDIO_DATA = 0, VIDEO_DATA, RAW_DATA, NULL_DATA };
-  static const char* TypeToStr(Type aType) {
-    switch (aType) {
-      case Type::AUDIO_DATA:
-        return "AUDIO_DATA";
-      case Type::VIDEO_DATA:
-        return "VIDEO_DATA";
-      case Type::RAW_DATA:
-        return "RAW_DATA";
-      case Type::NULL_DATA:
-        return "NULL_DATA";
-      default:
-        MOZ_CRASH("bad value");
-    }
-  }
+  MOZ_DEFINE_ENUM_CLASS_WITH_BASE_AND_TOSTRING_AT_CLASS_SCOPE(
+      Type, uint8_t, (AUDIO_DATA, VIDEO_DATA, RAW_DATA, NULL_DATA));
 
   MediaData(Type aType, int64_t aOffset, const media::TimeUnit& aTimestamp,
             const media::TimeUnit& aDuration)
@@ -369,7 +369,7 @@ class NullData : public MediaData {
   static const Type sType = Type::NULL_DATA;
 };
 
-// Holds chunk a decoded audio frames.
+// Holds chunk a decoded interleaved audio frames.
 class AudioData : public MediaData {
  public:
   AudioData(int64_t aOffset, const media::TimeUnit& aTime,
@@ -378,6 +378,8 @@ class AudioData : public MediaData {
 
   static const Type sType = Type::AUDIO_DATA;
   static const char* sTypeName;
+
+  nsCString ToString() const;
 
   // Access the buffer as a Span.
   Span<AudioDataValue> Data() const;
@@ -497,7 +499,7 @@ class VideoData : public MediaData {
 
   // Creates a new VideoData containing a deep copy of aBuffer. May use
   // aContainer to allocate an Image to hold the copied data.
-  static already_AddRefed<VideoData> CreateAndCopyData(
+  static Result<already_AddRefed<VideoData>, MediaResult> CreateAndCopyData(
       const VideoInfo& aInfo, ImageContainer* aContainer, int64_t aOffset,
       const media::TimeUnit& aTime, const media::TimeUnit& aDuration,
       const YCbCrBuffer& aBuffer, bool aKeyframe,
@@ -518,10 +520,11 @@ class VideoData : public MediaData {
 
   // Initialize PlanarYCbCrImage. Only When aCopyData is true,
   // video data is copied to PlanarYCbCrImage.
-  static bool SetVideoDataToImage(PlanarYCbCrImage* aVideoImage,
-                                  const VideoInfo& aInfo,
-                                  const YCbCrBuffer& aBuffer,
-                                  const IntRect& aPicture, bool aCopyData);
+  static MediaResult SetVideoDataToImage(PlanarYCbCrImage* aVideoImage,
+                                         const VideoInfo& aInfo,
+                                         const YCbCrBuffer& aBuffer,
+                                         const IntRect& aPicture,
+                                         bool aCopyData);
 
   size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const;
 
@@ -541,6 +544,8 @@ class VideoData : public MediaData {
             const media::TimeUnit& aDuration, bool aKeyframe,
             const media::TimeUnit& aTimecode, IntSize aDisplay,
             uint32_t aFrameID);
+
+  nsCString ToString() const;
 
   void MarkSentToCompositor() { mSentToCompositor = true; }
   bool IsSentToCompositor() { return mSentToCompositor; }
@@ -565,11 +570,13 @@ class VideoData : public MediaData {
   media::TimeUnit mNextKeyFrameTime;
 };
 
-enum class CryptoScheme : uint8_t {
-  None,
-  Cenc,
-  Cbcs,
-};
+// See https://w3c.github.io/encrypted-media/#scheme-cenc
+MOZ_DEFINE_ENUM_CLASS_WITH_BASE_AND_TOSTRING(CryptoScheme, uint8_t,
+                                             (None, Cenc, Cbcs, Cbcs_1_9));
+using CryptoSchemeSet = EnumSet<CryptoScheme, uint8_t>;
+
+nsCString CryptoSchemeSetToString(const CryptoSchemeSet& aSchemes);
+CryptoScheme StringToCryptoScheme(const nsAString& aString);
 
 class CryptoTrack {
  public:
@@ -640,7 +647,7 @@ class MediaRawDataWriter {
   // Data manipulation methods. mData and mSize may be updated accordingly.
 
   // Set size of buffer, allocating memory as required.
-  // If size is increased, new buffer area is filled with 0.
+  // If memory is allocated, additional buffer area is filled with 0.
   [[nodiscard]] bool SetSize(size_t aSize);
   // Add aData at the beginning of buffer.
   [[nodiscard]] bool Prepend(const uint8_t* aData, size_t aSize);
@@ -691,6 +698,9 @@ class MediaRawData final : public MediaData {
 
   RefPtr<TrackInfoSharedPtr> mTrackInfo;
 
+  // Used to indicate the id of the temporal scalability layer.
+  Maybe<uint8_t> mTemporalLayerId;
+
   // May contain the original start time and duration of the frames.
   // mOriginalPresentationWindow.mStart would always be less or equal to mTime
   // and mOriginalPresentationWindow.mEnd equal or greater to mTime + mDuration.
@@ -702,6 +712,9 @@ class MediaRawData final : public MediaData {
   // If it's true, the `mCrypto` should be copied into the remote data as well.
   // Currently this is only used for the media engine DRM playback.
   bool mShouldCopyCryptoToRemoteRawData = false;
+
+  // Config used to encode this packet.
+  UniquePtr<const EncoderConfig> mConfig;
 
   // It's only used when the remote decoder reconstructs the media raw data.
   CryptoSample& GetWritableCrypto() { return mCryptoInternal; }

@@ -1,77 +1,47 @@
-From: Jan Grulich <jgrulich@redhat.com>
-Date: Fri, 10 Mar 2023 09:21:00 +0000
-Subject: Bug 1819035 - get EGL display based on the used platform in the
- browser r=webrtc-reviewers,ng
+From: stransky <stransky@redhat.com>
+Date: Tue, 29 Aug 2023 12:43:00 +0000
+Subject: Bug 1821629 [Pipewire/DMABuf] Don't create dmabuf backend if it's
+ disabled r=ng,webrtc-reviewers
 
-Because of a possible misconfiguration or a possible driver issue it
-might happen that the browser will use a different driver on X11 and
-end up using yet another one for wayland/gbm, which might lead to not
-working screen sharing in the better case, but also to a crash in the
-other driver (Nvidia). This adds a check for platform the browser runs
-on, if it's XWayland or Wayland and based on that query EGL display for
-that specific platform, rather than going for the Wayland one only.
+Depends on D172224
 
-Differential Revision: https://phabricator.services.mozilla.com/D171858
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/c8606497de1f461a6352456e0e511c2ae498d526
+Differential Revision: https://phabricator.services.mozilla.com/D172229
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/237d19fe96dd7d25b6a817415ee4e6854678d648
 ---
- .../linux/wayland/egl_dmabuf.cc               | 30 +++++++++++++++++--
- 1 file changed, 28 insertions(+), 2 deletions(-)
+ .../linux/wayland/shared_screencast_stream.cc            | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
 
-diff --git a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-index b529077c6d..6a019c64b4 100644
---- a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-+++ b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-@@ -13,6 +13,7 @@
- #include <asm/ioctl.h>
- #include <dlfcn.h>
- #include <fcntl.h>
-+#include <gdk/gdk.h>
- #include <libdrm/drm_fourcc.h>
- #include <linux/types.h>
- #include <spa/param/video/format-utils.h>
-@@ -217,6 +218,26 @@ static void CloseLibrary(void* library) {
+diff --git a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+index 09da88cad3..f98253de2d 100644
+--- a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
++++ b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+@@ -406,7 +406,9 @@ bool SharedScreenCastStreamPrivate::StartScreenCastStream(
+     RTC_LOG(LS_ERROR) << "Unable to open PipeWire library";
+     return false;
    }
- }
- 
-+static bool IsWaylandDisplay() {
-+  static auto sGdkWaylandDisplayGetType =
-+    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_wayland_display_get_type");
-+  if (!sGdkWaylandDisplayGetType) {
-+    return false;
+-  egl_dmabuf_ = std::make_unique<EglDmaBuf>();
++  if (mozilla::gfx::IsDMABufEnabled()) {
++    egl_dmabuf_ = std::make_unique<EglDmaBuf>();
 +  }
-+  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
-+                                      sGdkWaylandDisplayGetType()));
-+}
-+
-+static bool IsX11Display() {
-+  static auto sGdkX11DisplayGetType =
-+    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_x11_display_get_type");
-+  if (!sGdkX11DisplayGetType) {
-+    return false;
-+  }
-+  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
-+                                      sGdkX11DisplayGetType()));
-+}
-+
- static void* g_lib_egl = nullptr;
  
- RTC_NO_SANITIZE("cfi-icall")
-@@ -362,8 +383,13 @@ EglDmaBuf::EglDmaBuf() {
-     return;
+   pw_stream_node_id_ = stream_node_id;
+ 
+@@ -495,7 +497,8 @@ bool SharedScreenCastStreamPrivate::StartScreenCastStream(
+     for (uint32_t format : {SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA,
+                             SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx}) {
+       // Modifiers can be used with PipeWire >= 0.3.33
+-      if (has_required_pw_client_version && has_required_pw_server_version) {
++      if (egl_dmabuf_ &&
++          has_required_pw_client_version && has_required_pw_server_version) {
+         modifiers_ = egl_dmabuf_->QueryDmaBufModifiers(format);
+ 
+         if (!modifiers_.empty()) {
+@@ -938,7 +941,7 @@ bool SharedScreenCastStreamPrivate::ProcessDMABuffer(
+ 
+   const uint n_planes = spa_buffer->n_datas;
+ 
+-  if (!n_planes) {
++  if (!n_planes || !egl_dmabuf_) {
+     return false;
    }
  
--  egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
--                                       (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  if (IsWaylandDisplay()) {
-+    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
-+                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  } else if (IsX11Display()) {
-+    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_X11_KHR,
-+                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  }
- 
-   if (egl_.display == EGL_NO_DISPLAY) {
-     RTC_LOG(LS_ERROR) << "Failed to obtain default EGL display: "
--- 
-2.34.1
-

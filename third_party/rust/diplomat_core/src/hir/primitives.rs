@@ -3,6 +3,7 @@ use crate::ast;
 
 /// 8, 16, 32, and 64-bit signed and unsigned integers.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::exhaustive_enums)] // there are only these
 pub enum IntType {
     I8,
     I16,
@@ -16,6 +17,7 @@ pub enum IntType {
 
 /// Platform-dependent signed and unsigned size types.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::exhaustive_enums)] // there are only these
 pub enum IntSizeType {
     Isize,
     Usize,
@@ -23,6 +25,7 @@ pub enum IntSizeType {
 
 /// 128-bit signed and unsigned integers.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::exhaustive_enums)] // there are only these
 pub enum Int128Type {
     I128,
     U128,
@@ -30,6 +33,7 @@ pub enum Int128Type {
 
 /// 32 and 64-bit floating point numbers.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::exhaustive_enums)] // there are only these
 pub enum FloatType {
     F32,
     F64,
@@ -37,9 +41,13 @@ pub enum FloatType {
 
 /// All primitive types.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::exhaustive_enums)] // there are only these
 pub enum PrimitiveType {
     Bool,
     Char,
+    /// a primitive byte that is not meant to be interpreted numerically
+    /// in languages that don't have fine-grained integer types
+    Byte,
     Int(IntType),
     IntSize(IntSizeType),
     Int128(Int128Type),
@@ -111,6 +119,7 @@ impl PrimitiveType {
             ast::PrimitiveType::f64 => PrimitiveType::Float(FloatType::F64),
             ast::PrimitiveType::bool => PrimitiveType::Bool,
             ast::PrimitiveType::char => PrimitiveType::Char,
+            ast::PrimitiveType::byte => PrimitiveType::Byte,
         }
     }
 
@@ -119,6 +128,7 @@ impl PrimitiveType {
         match self {
             PrimitiveType::Bool => "bool",
             PrimitiveType::Char => "char",
+            PrimitiveType::Byte => "byte",
             PrimitiveType::Int(ty) => ty.as_str(),
             PrimitiveType::IntSize(ty) => ty.as_str(),
             PrimitiveType::Int128(ty) => ty.as_str(),

@@ -31,6 +31,7 @@ var gSyncPane = {
   init() {
     this._setupEventListeners();
     this.setupEnginesUI();
+    this.updateSyncUI();
 
     document
       .getElementById("weavePrefsDeck")
@@ -69,7 +70,7 @@ var gSyncPane = {
     xps.ensureLoaded();
   },
 
-  _showLoadPage(xps) {
+  _showLoadPage() {
     let maybeAcct = false;
     let username = Services.prefs.getCharPref("services.sync.username", "");
     if (username) {
@@ -119,6 +120,12 @@ var gSyncPane = {
     // Notify observers that the UI is now ready
     Services.obs.notifyObservers(window, "sync-pane-loaded");
 
+    this._maybeShowSyncAction();
+  },
+
+  // Check if the user is coming from a call to action
+  // and show them the correct additional panel
+  _maybeShowSyncAction() {
     if (
       location.hash == "#sync" &&
       UIState.get().status == UIState.STATUS_SIGNED_IN
@@ -218,7 +225,9 @@ var gSyncPane = {
       /* no warning as account can't have previously synced */
       gSyncPane.unlinkFirefoxAccount(false);
     });
-    setEventListener("rejectReSignIn", "command", gSyncPane.reSignIn);
+    setEventListener("rejectReSignIn", "command", function () {
+      gSyncPane.reSignIn(this._getEntryPoint());
+    });
     setEventListener("rejectUnlinkFxaAccount", "command", function () {
       gSyncPane.unlinkFirefoxAccount(true);
     });
@@ -256,6 +265,27 @@ var gSyncPane = {
     });
   },
 
+  updateSyncUI() {
+    const state = UIState.get();
+    const isSyncEnabled = state.syncEnabled;
+    let syncStatusTitle = document.getElementById("syncStatusTitle");
+    let syncNowButton = document.getElementById("syncNow");
+    let syncNotConfiguredEl = document.getElementById("syncNotConfigured");
+    let syncConfiguredEl = document.getElementById("syncConfigured");
+
+    if (isSyncEnabled) {
+      syncStatusTitle.setAttribute("data-l10n-id", "prefs-syncing-on");
+      syncNowButton.hidden = false;
+      syncConfiguredEl.hidden = false;
+      syncNotConfiguredEl.hidden = true;
+    } else {
+      syncStatusTitle.setAttribute("data-l10n-id", "prefs-syncing-off");
+      syncNowButton.hidden = true;
+      syncConfiguredEl.hidden = true;
+      syncNotConfiguredEl.hidden = false;
+    }
+  },
+
   async _chooseWhatToSync(isAlreadySyncing) {
     // Assuming another device is syncing and we're not,
     // we update the engines selection so the correct
@@ -282,12 +312,20 @@ var gSyncPane = {
             fxAccounts.telemetry
               .recordConnection(["sync"], "ui")
               .then(() => {
+                this.updateSyncUI();
                 return Weave.Service.configure();
               })
               .catch(err => {
                 console.error("Failed to enable sync", err);
               });
           }
+          // When the modal closes we want to remove any query params
+          // so it doesn't open on subsequent visits (and will reload)
+          const browser = window.docShell.chromeEventHandler;
+          browser.loadURI(Services.io.newURI("about:preferences#sync"), {
+            triggeringPrincipal:
+              Services.scriptSecurityManager.getSystemPrincipal(),
+          });
         },
       },
       params /* aParams */
@@ -394,12 +432,10 @@ var gSyncPane = {
           .setAttribute("href", accountsManageURI);
       });
     // and the actual sync state.
-    let eltSyncStatus = document.getElementById("syncStatus");
+    let eltSyncStatus = document.getElementById("syncStatusContainer");
     eltSyncStatus.hidden = !syncReady;
-    eltSyncStatus.selectedIndex = state.syncEnabled
-      ? SYNC_CONNECTED
-      : SYNC_DISCONNECTED;
     this._updateSyncNow(state.syncing);
+    this.updateSyncUI();
   },
 
   _getEntryPoint() {
@@ -440,19 +476,14 @@ var gSyncPane = {
     this.replaceTabWithUrl(url);
   },
 
-  async reSignIn() {
-    // There's a bit of an edge-case here - we might be forcing reauth when we've
-    // lost the FxA account data - in which case we'll not get a URL as the re-auth
-    // URL embeds account info and the server endpoint complains if we don't
-    // supply it - So we just use the regular "sign in" URL in that case.
-    if (!(await FxAccounts.canConnectAccount())) {
-      return;
-    }
-
-    let entryPoint = this._getEntryPoint();
-    const url =
-      (await FxAccounts.config.promiseForceSigninURI(entryPoint)) ||
-      (await FxAccounts.config.promiseConnectAccountURI(entryPoint));
+  /**
+   * Attempts to take the user through the sign in flow by opening the web content
+   * with the given entrypoint as a query parameter
+   * @param entrypoint: An string appended to the query parameters, used in telemtry to differentiate
+   * different entrypoints to accounts
+   * */
+  async reSignIn(entrypoint) {
+    const url = await FxAccounts.config.promiseConnectAccountURI(entrypoint);
     this.replaceTabWithUrl(url);
   },
 
@@ -484,21 +515,7 @@ var gSyncPane = {
   },
 
   async verifyFirefoxAccount() {
-    let titleL10nid, bodyL10nId;
-    try {
-      await fxAccounts.resendVerificationEmail();
-      const { email } = await fxAccounts.getSignedInUser();
-      titleL10nid = "sync-verification-sent-title";
-      bodyL10nId = { id: "sync-verification-sent-body", args: { email } };
-    } catch {
-      titleL10nid = "sync-verification-not-sent-title";
-      bodyL10nId = "sync-verification-not-sent-body";
-    }
-    const [title, body] = await document.l10n.formatValues([
-      titleL10nid,
-      bodyL10nId,
-    ]);
-    new Notification(title, { body });
+    return this.reSignIn("preferences-reverify");
   },
 
   // Disconnect the account, including everything linked.

@@ -27,7 +27,7 @@ repackage_signing_description_schema = Schema(
         Optional("shipping-product"): task_description_schema["shipping-product"],
         Optional("shipping-phase"): task_description_schema["shipping-phase"],
         Optional("priority"): task_description_schema["priority"],
-        Optional("job-from"): task_description_schema["job-from"],
+        Optional("task-from"): task_description_schema["task-from"],
     }
 )
 
@@ -58,10 +58,13 @@ def make_repackage_signing_description(config, jobs):
         label = dep_job.label.replace("repackage-", "repackage-signing-")
         # Linux
         label = label.replace("chunking-dummy-", "repackage-signing-")
-        description = "Signing of repackaged artifacts for partner repack id '{repack_id}' for build '" "{build_platform}/{build_type}'".format(  # NOQA: E501
-            repack_id=repack_id,
-            build_platform=attributes.get("build_platform"),
-            build_type=attributes.get("build_type"),
+        description = (
+            "Signing of repackaged artifacts for partner repack id '{repack_id}' for build '"
+            "{build_platform}/{build_type}'".format(  # NOQA: E501
+                repack_id=repack_id,
+                build_platform=attributes.get("build_platform"),
+                build_type=attributes.get("build_type"),
+            )
         )
 
         if "linux" in build_platform:
@@ -90,7 +93,10 @@ def make_repackage_signing_description(config, jobs):
                     "paths": [
                         get_artifact_path(dep_job, f"{repack_id}/target.installer.exe"),
                     ],
-                    "formats": ["autograph_authenticode_sha2", "autograph_gpg"],
+                    "formats": [
+                        "gcp_prod_autograph_authenticode_202412",
+                        "gcp_prod_autograph_gpg",
+                    ],
                 }
             ]
 
@@ -110,7 +116,10 @@ def make_repackage_signing_description(config, jobs):
                                 f"{repack_id}/target.stub-installer.exe",
                             ),
                         ],
-                        "formats": ["autograph_authenticode_sha2", "autograph_gpg"],
+                        "formats": [
+                            "gcp_prod_autograph_authenticode_202412",
+                            "gcp_prod_autograph_gpg",
+                        ],
                     }
                 )
         elif "mac" in build_platform:
@@ -121,7 +130,7 @@ def make_repackage_signing_description(config, jobs):
                     "paths": [
                         get_artifact_path(dep_job, f"{repack_id}/target.dmg"),
                     ],
-                    "formats": ["autograph_gpg"],
+                    "formats": ["gcp_prod_autograph_gpg"],
                 }
             ]
         elif "linux" in build_platform:
@@ -130,9 +139,9 @@ def make_repackage_signing_description(config, jobs):
                     "taskId": {"task-reference": "<repack>"},
                     "taskType": "repackage",
                     "paths": [
-                        get_artifact_path(dep_job, f"{repack_id}/target.tar.bz2"),
+                        get_artifact_path(dep_job, f"{repack_id}/target.tar.xz"),
                     ],
-                    "formats": ["autograph_gpg"],
+                    "formats": ["gcp_prod_autograph_gpg"],
                 }
             ]
 

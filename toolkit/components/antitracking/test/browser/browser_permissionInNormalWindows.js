@@ -1,3 +1,6 @@
+// We're using custom message passing so don't have access to Assert.foo
+// everywhere. Disable the linter:
+/* eslint-disable mozilla/no-comparison-or-assignment-inside-ok */
 AntiTracking.runTest(
   "Test whether we receive any persistent permissions in normal windows",
   // Blocking callback
@@ -94,17 +97,12 @@ AntiTracking.runTest(
   // Cleanup callback
   async _ => {
     await new Promise(resolve => {
-      Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+      Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
         resolve()
       );
     });
   },
-  [
-    [
-      "privacy.partition.always_partition_third_party_non_cookie_storage",
-      false,
-    ],
-  ], // extra prefs
+  [], // extra prefs
   true, // run the window.open() test
   true, // run the user interaction test
   0, // don't expect blocking notifications

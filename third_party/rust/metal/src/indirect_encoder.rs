@@ -1,6 +1,6 @@
 use super::*;
 
-bitflags! {
+bitflags::bitflags! {
     /// See <https://developer.apple.com/documentation/metal/mtlindirectcommandtype/>
     #[allow(non_upper_case_globals)]
     #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -20,6 +20,13 @@ pub enum MTLIndirectCommandBufferDescriptor {}
 foreign_obj_type! {
     type CType = MTLIndirectCommandBufferDescriptor;
     pub struct IndirectCommandBufferDescriptor;
+}
+
+impl IndirectCommandBufferDescriptor {
+    pub fn new() -> Self {
+        let class = class!(MTLIndirectCommandBufferDescriptor);
+        unsafe { msg_send![class, new] }
+    }
 }
 
 impl IndirectCommandBufferDescriptorRef {

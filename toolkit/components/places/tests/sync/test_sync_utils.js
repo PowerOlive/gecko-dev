@@ -200,9 +200,8 @@ add_task(async function test_determineNonSyncableGuids() {
   }
 
   // Filter the visits.
-  let filteredGuids = await PlacesSyncUtils.history.determineNonSyncableGuids(
-    guids
-  );
+  let filteredGuids =
+    await PlacesSyncUtils.history.determineNonSyncableGuids(guids);
 
   let filtered = [TRANSITION_FRAMED_LINK, TRANSITION_DOWNLOAD];
   // Check if the filtered visits are of type TRANSITION_FRAMED_LINK.
@@ -1924,10 +1923,8 @@ add_task(async function test_separator() {
     url: "https://bar.foo",
   });
 
-  let child2Guid = await PlacesSyncUtils.bookmarks.recordIdToGuid(
-    childBmk.recordId
-  );
-  let parentGuid = await await PlacesSyncUtils.bookmarks.recordIdToGuid("menu");
+  let child2Guid = PlacesSyncUtils.bookmarks.recordIdToGuid(childBmk.recordId);
+  let parentGuid = PlacesSyncUtils.bookmarks.recordIdToGuid("menu");
   let separatorGuid =
     PlacesSyncUtils.bookmarks.recordIdToGuid(separatorRecordId);
 
@@ -2221,8 +2218,9 @@ add_task(async function test_migrateOldTrackerEntries() {
   );
   for (let field of fields) {
     if (field.guid == normalBmk.guid) {
-      ok(
-        field.lastModified > normalBmk.lastModified,
+      Assert.greater(
+        field.lastModified,
+        normalBmk.lastModified,
         `Should bump last modified date for migrated bookmark ${field.guid}`
       );
       equal(

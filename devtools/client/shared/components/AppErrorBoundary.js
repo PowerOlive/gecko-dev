@@ -10,7 +10,7 @@ const {
 } = require("resource://devtools/client/shared/vendor/react.js");
 const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-types.js");
 const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
-const { div, h1, h2, h3, p, a } = dom;
+const { div, h1, h2, h3, p, a, button } = dom;
 
 // Localized strings for (devtools/client/locales/en-US/components.properties)
 loader.lazyGetter(this, "L10N", function () {
@@ -29,8 +29,10 @@ loader.lazyGetter(this, "RELOAD_PAGE_INFO", function () {
 });
 
 // File a bug for the selected component specifically
+// Add format=__default__ to make sure users without EDITBUGS permission still
+// use the regular UI to create bugs, including the prefilled description.
 const bugLink =
-  "https://bugzilla.mozilla.org/enter_bug.cgi?product=DevTools&component=";
+  "https://bugzilla.mozilla.org/enter_bug.cgi?format=__default__&product=DevTools&component=";
 
 /**
  * Error boundary that wraps around the a given component.
@@ -62,17 +64,21 @@ class AppErrorBoundary extends Component {
    */
   renderErrorInfo(info = {}) {
     if (Object.keys(info).length) {
-      return Object.keys(info).map((obj, outerIdx) => {
-        const traceParts = info[obj]
-          .split("\n")
-          .map((part, idx) => p({ key: `strace${idx}` }, part));
-        return div(
-          { key: `st-div-${outerIdx}`, className: "stack-trace-section" },
-          h3({}, "React Component Stack"),
-          p({ key: `st-p-${outerIdx}` }, obj.toString()),
-          traceParts
-        );
-      });
+      return Object.keys(info)
+        .filter(key => info[key])
+        .map((obj, outerIdx) => {
+          const traceParts = info[obj]
+            .split("\n")
+            .map((part, idx) => p({ key: `strace${idx}` }, part));
+          return div(
+            { key: `st-div-${outerIdx}`, className: "stack-trace-section" },
+            h3(
+              {},
+              obj == "componentStack" ? "React Component Stack" : "Server Stack"
+            ),
+            traceParts
+          );
+        });
     }
 
     return p({}, "undefined errorInfo");
@@ -96,7 +102,7 @@ class AppErrorBoundary extends Component {
 
   // Return a valid object, even if we don't receive one
   getValidInfo(infoObj) {
-    if (!infoObj.componentStack) {
+    if (!infoObj.componentStack && !infoObj.serverStack) {
       try {
         return { componentStack: JSON.stringify(infoObj) };
       } catch (err) {
@@ -117,10 +123,22 @@ class AppErrorBoundary extends Component {
   }
 
   getBugLink() {
-    const compStack = this.getValidInfo(this.state.errorInfo).componentStack;
-    const errorMsg = this.state.errorMsg;
-    const errorStack = this.state.errorStack;
-    const msg = `Error: \n${errorMsg}\n\nReact Component Stack: ${compStack}\n\nStacktrace: \n${errorStack}`;
+    const { componentStack, serverStack } = this.getValidInfo(
+      this.state.errorInfo
+    );
+
+    let msg = `Error: \n${this.state.errorMsg}\n\n`;
+
+    if (componentStack) {
+      msg += `React Component Stack: ${componentStack}\n\n`;
+    }
+
+    if (serverStack) {
+      msg += `Server Stack: ${serverStack}\n\n`;
+    }
+
+    msg += `Stacktrace: \n${this.state.errorStack}`;
+
     return `${bugLink}${this.props.componentName}&comment=${encodeURIComponent(
       msg
     )}`;
@@ -142,12 +160,18 @@ class AppErrorBoundary extends Component {
           {
             className: "error-panel-file-button",
             href: this.getBugLink(),
-            onClick: () => {
-              window.open(this.getBugLink(), "_blank");
-            },
+            target: "_blank",
           },
           FILE_BUG_BUTTON
         ),
+        this.state.toolbox
+          ? button({
+              className: "devtools-tabbar-button error-panel-close",
+              onClick: () => {
+                this.state.toolbox.closeToolbox();
+              },
+            })
+          : null,
         h2({ className: "error-panel-error" }, this.state.errorMsg),
         div({}, this.renderErrorInfo(this.state.errorInfo)),
         div({}, this.renderStackTrace(this.state.errorStack)),

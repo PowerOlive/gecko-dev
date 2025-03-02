@@ -11,9 +11,11 @@
 #include "mozilla/intl/BidiEmbeddingLevel.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
+#include "mozilla/CaretAssociationHint.h"
 #include "mozilla/CompactPair.h"
 #include "mozilla/EnumSet.h"
 #include "mozilla/EventForwards.h"
+#include "mozilla/dom/Element.h"
 #include "mozilla/dom/Highlight.h"
 #include "mozilla/dom/Selection.h"
 #include "mozilla/Result.h"
@@ -25,7 +27,6 @@
 #include "nsISelectionListener.h"
 #include "nsITableCellLayout.h"
 #include "WordMovementType.h"
-#include "CaretAssociationHint.h"
 #include "nsBidiPresUtils.h"
 
 class nsRange;
@@ -64,16 +65,12 @@ struct SelectionCustomColors {
 
 namespace mozilla {
 class PresShell;
-}  // namespace mozilla
 
 /** PeekOffsetStruct is used to group various arguments (both input and output)
  *  that are passed to nsIFrame::PeekOffset(). See below for the description of
  *  individual arguments.
  */
-
-namespace mozilla {
-
-enum class PeekOffsetOption : uint8_t {
+enum class PeekOffsetOption : uint16_t {
   // Whether to allow jumping across line boundaries.
   //
   // Used with: eSelectCharacter, eSelectWord.
@@ -85,7 +82,10 @@ enum class PeekOffsetOption : uint8_t {
   // Whether to stop when reaching a scroll view boundary.
   //
   // Used with: eSelectCharacter, eSelectWord, eSelectLine.
-  ScrollViewStop,
+  StopAtScroller,
+
+  // Whether to stop when reaching a placeholder frame.
+  StopAtPlaceholder,
 
   // Whether the peeking is done in response to a keyboard action.
   //
@@ -113,7 +113,19 @@ struct MOZ_STACK_CLASS PeekOffsetStruct {
                    // Passing by value here is intentional because EnumSet
                    // is optimized as uint*_t in opt builds.
                    const PeekOffsetOptions aOptions,
-                   EWordMovementType aWordMovementType = eDefaultBehavior);
+                   EWordMovementType aWordMovementType = eDefaultBehavior,
+                   const dom::Element* aAncestorLimiter = nullptr);
+
+  /**
+   * Return true if the ancestor limiter is not specified or if the content for
+   * aFrame is an inclusive descendant of mAncestorLimiter.
+   */
+  [[nodiscard]] bool FrameContentIsInAncestorLimiter(
+      const nsIFrame* aFrame) const {
+    return !mAncestorLimiter ||
+           (aFrame->GetContent() &&
+            aFrame->GetContent()->IsInclusiveDescendantOf(mAncestorLimiter));
+  }
 
   // Note: Most arguments (input and output) are only used with certain values
   // of mAmount. These values are indicated for each argument below.
@@ -157,6 +169,9 @@ struct MOZ_STACK_CLASS PeekOffsetStruct {
 
   PeekOffsetOptions mOptions;
 
+  // The ancestor limiter element to peek offset.
+  const dom::Element* const mAncestorLimiter;
+
   /*** Output arguments ***/
 
   // Content reached as a result of the peek.
@@ -178,6 +193,8 @@ struct MOZ_STACK_CLASS PeekOffsetStruct {
   // Used with: eSelectLine, eSelectBeginLine, eSelectEndLine.
   CaretAssociationHint mAttach;
 };
+
+struct LimitersAndCaretData;
 
 }  // namespace mozilla
 
@@ -201,6 +218,7 @@ class SelectionChangeEventDispatcher;
 namespace dom {
 class Highlight;
 class Selection;
+enum class ClickSelectionType { NotApplicable, Double, Triple };
 }  // namespace dom
 
 /**
@@ -217,11 +235,11 @@ enum class TableSelectionMode : uint32_t {
 };
 
 }  // namespace mozilla
-class nsIScrollableFrame;
 
 class nsFrameSelection final {
  public:
-  typedef mozilla::CaretAssociationHint CaretAssociateHint;
+  using CaretAssociationHint = mozilla::CaretAssociationHint;
+  using Element = mozilla::dom::Element;
 
   /*interfaces for addref and release and queryinterface*/
 
@@ -256,18 +274,21 @@ class nsFrameSelection final {
                                           uint32_t aContentOffset,
                                           uint32_t aContentEndOffset,
                                           FocusMode aFocusMode,
-                                          CaretAssociateHint aHint);
+                                          CaretAssociationHint aHint);
 
  public:
   /**
-   * Sets flag to true if a selection is created by doubleclick or
-   * long tapping a word.
+   * Sets the type of the selection based on whether a selection is created
+   * by doubleclick, long tapping a word or tripleclick.
    *
-   * @param aIsDoubleClickSelection   True if the selection is created by
-   *                                  doubleclick or long tap over a word.
+   * @param aClickSelectionType   ClickSelectionType::Double if the selection
+   *                              is created by doubleclick,
+   *                              ClickSelectionType::Triple if the selection
+   *                              is created by tripleclick.
    */
-  void SetIsDoubleClickSelection(bool aIsDoubleClickSelection) {
-    mIsDoubleClickSelection = aIsDoubleClickSelection;
+  void SetClickSelectionType(
+      mozilla::dom::ClickSelectionType aClickSelectionType) {
+    mClickSelectionType = aClickSelectionType;
   }
 
   /**
@@ -275,7 +296,14 @@ class nsFrameSelection final {
    * long tap over a word.
    */
   [[nodiscard]] bool IsDoubleClickSelection() const {
-    return mIsDoubleClickSelection;
+    return mClickSelectionType == mozilla::dom::ClickSelectionType::Double;
+  }
+
+  /**
+   * Returns true if the selection was created by triple click
+   */
+  [[nodiscard]] bool IsTripleClickSelection() const {
+    return mClickSelectionType == mozilla::dom::ClickSelectionType::Triple;
   }
 
   /**
@@ -432,6 +460,27 @@ class nsFrameSelection final {
       mozilla::SelectionType aSelectionType) const;
 
   /**
+   * Convenience method to access the `eNormal` Selection.
+   */
+  mozilla::dom::Selection& NormalSelection() const {
+    return *GetSelection(mozilla::SelectionType::eNormal);
+  }
+
+  /**
+   * Returns the number of highlight selections.
+   */
+  size_t HighlightSelectionCount() const {
+    return mHighlightSelections.Length();
+  }
+
+  /**
+   * Get a highlight selection by index. The index must be valid.
+   */
+  RefPtr<mozilla::dom::Selection> HighlightSelection(size_t aIndex) const {
+    return mHighlightSelections[aIndex].second();
+  }
+
+  /**
    * @brief Adds a highlight selection for `aHighlight`.
    */
   MOZ_CAN_RUN_SCRIPT void AddHighlightSelection(
@@ -484,22 +533,11 @@ class nsFrameSelection final {
    */
   nsresult RepaintSelection(mozilla::SelectionType aSelectionType);
 
-  bool IsValidSelectionPoint(nsINode* aNode) const;
+  [[nodiscard]] bool NodeIsInLimiters(const nsINode* aContainerNode) const;
 
-  static bool AdjustFrameForLineStart(nsIFrame*& aFrame, int32_t& aFrameOffset);
-
-  /**
-   * Given a node and its child offset, return the nsIFrame and the offset into
-   * that frame.
-   *
-   * @param aNode input parameter for the node to look at
-   *              TODO: Make this `const nsIContent*` for `ContentEventHandler`.
-   * @param aOffset offset into above node.
-   * @param aReturnOffset will contain offset into frame.
-   */
-  static nsIFrame* GetFrameForNodeOffset(nsIContent* aNode, int32_t aOffset,
-                                         CaretAssociateHint aHint,
-                                         int32_t* aReturnOffset);
+  [[nodiscard]] static bool NodeIsInLimiters(
+      const nsINode* aContainerNode, const Element* aSelectionLimiter,
+      const Element* aSelectionAncestorLimiter);
 
   /**
    * GetFrameToPageSelect() returns a frame which is ancestor limit of
@@ -530,8 +568,8 @@ class nsFrameSelection final {
                                        nsIFrame* aFrame,
                                        SelectionIntoView aSelectionIntoView);
 
-  void SetHint(CaretAssociateHint aHintRight) { mCaret.mHint = aHintRight; }
-  CaretAssociateHint GetHint() const { return mCaret.mHint; }
+  void SetHint(CaretAssociationHint aHintRight) { mCaret.mHint = aHintRight; }
+  CaretAssociationHint GetHint() const { return mCaret.mHint; }
 
   void SetCaretBidiLevelAndMaybeSchedulePaint(
       mozilla::intl::BidiEmbeddingLevel aLevel);
@@ -605,68 +643,140 @@ class nsFrameSelection final {
    * CreateRangeExtendedToNextGraphemeClusterBoundary() returns range which is
    * extended from normal selection range to start of next grapheme cluster
    * boundary.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToNextGraphemeClusterBoundary() {
-    return CreateRangeExtendedToSomewhere<RangeType>(eDirNext, eSelectCluster,
-                                                     eLogical);
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToNextGraphemeClusterBoundary(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
+    return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection, eDirNext,
+        eSelectCluster, eLogical);
   }
 
   /**
    * CreateRangeExtendedToPreviousCharacterBoundary() returns range which is
    * extended from normal selection range to start of previous character
    * boundary.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToPreviousCharacterBoundary() {
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToPreviousCharacterBoundary(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
     return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection,
         eDirPrevious, eSelectCharacter, eLogical);
   }
 
   /**
    * CreateRangeExtendedToNextWordBoundary() returns range which is
    * extended from normal selection range to start of next word boundary.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToNextWordBoundary() {
-    return CreateRangeExtendedToSomewhere<RangeType>(eDirNext, eSelectWord,
-                                                     eLogical);
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToNextWordBoundary(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
+    return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection, eDirNext,
+        eSelectWord, eLogical);
   }
 
   /**
    * CreateRangeExtendedToPreviousWordBoundary() returns range which is
    * extended from normal selection range to start of previous word boundary.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToPreviousWordBoundary() {
-    return CreateRangeExtendedToSomewhere<RangeType>(eDirPrevious, eSelectWord,
-                                                     eLogical);
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToPreviousWordBoundary(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
+    return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection,
+        eDirPrevious, eSelectWord, eLogical);
   }
 
   /**
    * CreateRangeExtendedToPreviousHardLineBreak() returns range which is
    * extended from normal selection range to previous hard line break.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToPreviousHardLineBreak() {
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToPreviousHardLineBreak(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
     return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection,
         eDirPrevious, eSelectBeginLine, eLogical);
   }
 
   /**
    * CreateRangeExtendedToNextHardLineBreak() returns range which is extended
    * from normal selection range to next hard line break.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToNextHardLineBreak() {
-    return CreateRangeExtendedToSomewhere<RangeType>(eDirNext, eSelectEndLine,
-                                                     eLogical);
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToNextHardLineBreak(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection) {
+    return CreateRangeExtendedToSomewhere<RangeType>(
+        aPresShell, aLimitersAndCaretData, aRange, aRangeDirection, eDirNext,
+        eSelectEndLine, eLogical);
   }
 
   /** Sets/Gets The display selection enum.
@@ -708,16 +818,26 @@ class nsFrameSelection final {
   }
 
   /**
-   * Get the content node that limits the selection
-   *
-   * When searching up a nodes for parents, as in a text edit field
-   * in an browser page, we must stop at this node else we reach into the
-   * parent page, which is very bad!
+   * GetLimiter() returns the selection limiter element which is currently
+   * non-nullptr only when this instance is for an independent selection of a
+   * text control.  Then, this returns the editor root anonymous <div> in the
+   * text control element.
    */
-  nsIContent* GetLimiter() const { return mLimiters.mLimiter; }
+  Element* GetLimiter() const { return mLimiters.mLimiter; }
 
-  nsIContent* GetAncestorLimiter() const { return mLimiters.mAncestorLimiter; }
-  MOZ_CAN_RUN_SCRIPT_BOUNDARY void SetAncestorLimiter(nsIContent* aLimiter);
+  /**
+   * GetAncestorLimiter() returns the root of current selection ranges.  This is
+   * typically the focused editing host unless it's the root element of the
+   * document.
+   */
+  Element* GetAncestorLimiter() const { return mLimiters.mAncestorLimiter; }
+
+  /**
+   * Set ancestor limiter.  If aLimiter is not nullptr, this adjusts all
+   * selection ranges into the limiter element.  Thus, calling this may run
+   * the selection listeners.
+   */
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY void SetAncestorLimiter(Element* aLimiter);
 
   /**
    * GetPrevNextBidiLevels will return the frames and associated Bidi levels of
@@ -743,21 +863,6 @@ class nsFrameSelection final {
                                              bool aJumpLines) const;
 
   /**
-   * GetFrameFromLevel will scan in a given direction
-   * until it finds a frame with a Bidi level less than or equal to a given
-   * level. It will return the last frame before this.
-   *
-   * @param aPresContext is the context to use
-   * @param aFrameIn is the frame to start from
-   * @param aDirection is the direction to scan
-   * @param aBidiLevel is the level to search for
-   * @param aFrameOut will hold the frame returned
-   */
-  nsresult GetFrameFromLevel(nsIFrame* aFrameIn, nsDirection aDirection,
-                             mozilla::intl::BidiEmbeddingLevel aBidiLevel,
-                             nsIFrame** aFrameOut) const;
-
-  /**
    * MaintainSelection will track the normal selection as being "sticky".
    * Dragging or extending selection will never allow for a subset
    * (or the whole) of the maintained selection to become unselected.
@@ -776,13 +881,15 @@ class nsFrameSelection final {
    * @param aPresShell is the parameter to be used for most of the other calls
    * for callbacks etc
    *
-   * @param aLimiter limits the selection to nodes with aLimiter parents
-   *
    * @param aAccessibleCaretEnabled true if we should enable the accessible
    * caret.
+   *
+   * @param aEditorRootAnonymousDiv if this instance is for an independent
+   * selection for a text control, specify this to the anonymous <div> element
+   * of the text control which contains only an editable Text and/or a <br>.
    */
-  nsFrameSelection(mozilla::PresShell* aPresShell, nsIContent* aLimiter,
-                   bool aAccessibleCaretEnabled);
+  nsFrameSelection(mozilla::PresShell* aPresShell, bool aAccessibleCaretEnabled,
+                   Element* aEditorRootAnonymousDiv = nullptr);
 
   /**
    * @param aRequesterFuncName function name which wants to start the batch.
@@ -817,7 +924,7 @@ class nsFrameSelection final {
   // error, in other cases to runtime errors. This deserves to be cleaned up.
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT nsresult
   TakeFocus(nsIContent& aNewFocus, uint32_t aContentOffset,
-            uint32_t aContentEndOffset, CaretAssociateHint aHint,
+            uint32_t aContentEndOffset, CaretAssociationHint aHint,
             FocusMode aFocusMode);
 
   /**
@@ -844,7 +951,7 @@ class nsFrameSelection final {
    */
   void BidiLevelFromMove(mozilla::PresShell* aPresShell, nsIContent* aNode,
                          uint32_t aContentOffset, nsSelectionAmount aAmount,
-                         CaretAssociateHint aHint);
+                         CaretAssociationHint aHint);
   /**
    * BidiLevelFromClick is called when the caret is repositioned by clicking the
    * mouse
@@ -853,11 +960,6 @@ class nsFrameSelection final {
    * @param aContentOffset is the new caret position, as an offset into aNode
    */
   void BidiLevelFromClick(nsIContent* aNewFocus, uint32_t aContentOffset);
-
-  static nsPrevNextBidiLevels GetPrevNextBidiLevels(nsIContent* aNode,
-                                                    uint32_t aContentOffset,
-                                                    CaretAssociateHint aHint,
-                                                    bool aJumpLines);
 
   /**
    * @param aReasons potentially multiple of the reasons defined in
@@ -904,69 +1006,89 @@ class nsFrameSelection final {
   // Whether MoveCaret should use logical or visual movement,
   // or follow the bidi.edit.caret_movement_style preference.
   enum CaretMovementStyle { eLogical, eVisual, eUsePrefStyle };
+  enum class ExtendSelection : bool { No, Yes };
   MOZ_CAN_RUN_SCRIPT nsresult MoveCaret(nsDirection aDirection,
-                                        bool aContinueSelection,
+                                        ExtendSelection aExtendSelection,
                                         nsSelectionAmount aAmount,
                                         CaretMovementStyle aMovementStyle);
 
   /**
-   * PeekOffsetForCaretMove() only peek offset for caret move.  I.e., won't
-   * change selection ranges nor bidi information.
+   * @brief Creates `PeekOffsetOptions` for caret move operations.
+   *
+   * @param aSelection       The selection object. Must be non-null
+   * @param aExtendSelection Whether the selection should be extended or not
+   * @param aMovementStyle   The `CaretMovementStyle` (logical or visual)
+   * @return mozilla::Result<mozilla::PeekOffsetOptions, nsresult>
    */
-  mozilla::Result<mozilla::PeekOffsetStruct, nsresult> PeekOffsetForCaretMove(
-      nsDirection aDirection, bool aContinueSelection,
-      const nsSelectionAmount aAmount, CaretMovementStyle aMovementStyle,
-      const nsPoint& aDesiredCaretPos) const;
+  mozilla::Result<mozilla::PeekOffsetOptions, nsresult>
+  CreatePeekOffsetOptionsForCaretMove(mozilla::dom::Selection* aSelection,
+                                      ExtendSelection aExtendSelection,
+                                      CaretMovementStyle aMovementStyle) const {
+    MOZ_ASSERT(aSelection);
+    return CreatePeekOffsetOptionsForCaretMove(
+        mLimiters.mLimiter,
+        static_cast<ForceEditableRegion>(aSelection->IsEditorSelection()),
+        aExtendSelection, aMovementStyle);
+  }
+
+  enum class ForceEditableRegion : bool { No, Yes };
+  static mozilla::Result<mozilla::PeekOffsetOptions, nsresult>
+  CreatePeekOffsetOptionsForCaretMove(const Element* aSelectionLimiter,
+                                      ForceEditableRegion aForceEditableRegion,
+                                      ExtendSelection aExtendSelection,
+                                      CaretMovementStyle aMovementStyle);
+
+  /**
+   * @brief Get the Ancestor Limiter for caret move operation.
+   *
+   * If the selection is an editor selection, the correct editing host is
+   * identified and chosen as limiting element.
+   *
+   * @param aSelection The selection object. Must be non-null
+   * @return The ancestor limiter, or nullptr.
+   */
+  mozilla::Result<Element*, nsresult> GetAncestorLimiterForCaretMove(
+      mozilla::dom::Selection* aSelection) const;
 
   /**
    * CreateRangeExtendedToSomewhere() is common method to implement
    * CreateRangeExtendedTo*().  This method creates a range extended from
-   * normal selection range.
+   * aRange.
+   *
+   * @param aLimitersAndCaretData       The data of limiters and additional
+   *                                    caret data.
+   * @param aRange                      The range which you want to extend.
+   * @param aRangeDirection             eDirNext if the start boundary of
+   *                                    aRange is focus.  Otherwise, i.e., if
+   *                                    the start boundary is anchor,
+   *                                    eDirPrevious.
+   * @param aExtendDirection            Whether you want to extend the range
+   *                                    backward or forward.
+   * @param aAmount                     The amount which you want to extend.
+   * @param aMovementStyle              Whether visual or logical.
    */
   template <typename RangeType>
-  MOZ_CAN_RUN_SCRIPT mozilla::Result<RefPtr<RangeType>, nsresult>
-  CreateRangeExtendedToSomewhere(nsDirection aDirection,
-                                 const nsSelectionAmount aAmount,
-                                 CaretMovementStyle aMovementStyle);
-
-  /**
-   * IsIntraLineCaretMove() is a helper method for PeekOffsetForCaretMove()
-   * and CreateRangeExtendedToSomwhereFromNormalSelection().  This returns
-   * whether aAmount is intra line move or is crossing hard line break.
-   * This returns error if aMount is not supported by the methods.
-   */
-  static mozilla::Result<bool, nsresult> IsIntraLineCaretMove(
-      nsSelectionAmount aAmount) {
-    switch (aAmount) {
-      case eSelectCharacter:
-      case eSelectCluster:
-      case eSelectWord:
-      case eSelectWordNoSpace:
-      case eSelectBeginLine:
-      case eSelectEndLine:
-        return true;
-      case eSelectLine:
-        return false;
-      default:
-        return mozilla::Err(NS_ERROR_FAILURE);
-    }
-  }
+  MOZ_CAN_RUN_SCRIPT static mozilla::Result<RefPtr<RangeType>, nsresult>
+  CreateRangeExtendedToSomewhere(
+      mozilla::PresShell& aPresShell,
+      const mozilla::LimitersAndCaretData& aLimitersAndCaretData,
+      const mozilla::dom::AbstractRange& aRange, nsDirection aRangeDirection,
+      nsDirection aExtendDirection, const nsSelectionAmount aAmount,
+      CaretMovementStyle aMovementStyle);
 
   void InvalidateDesiredCaretPos();  // do not listen to mDesiredCaretPos.mValue
                                      // you must get another.
 
   bool IsBatching() const { return mBatching.mCounter > 0; }
 
-  void SetChangesDuringBatchingFlag() {
-    MOZ_ASSERT(mBatching.mCounter > 0);
-
-    mBatching.mChangesDuringBatching = true;
-  }
+  enum class IsBatchingEnd : bool { No, Yes };
 
   // nsFrameSelection may get deleted when calling this,
   // so remember to use nsCOMPtr when needed.
   MOZ_CAN_RUN_SCRIPT
-  nsresult NotifySelectionListeners(mozilla::SelectionType aSelectionType);
+  nsresult NotifySelectionListeners(
+      mozilla::SelectionType aSelectionType,
+      IsBatchingEnd aEndBatching = IsBatchingEnd::No);
 
   static nsresult GetCellIndexes(const nsIContent* aCell, int32_t& aRowIndex,
                                  int32_t& aColIndex);
@@ -1072,10 +1194,12 @@ class nsFrameSelection final {
         mozilla::dom::Selection& aNormalSelection) const;
 
     /**
-     * @param aScrollViewStop see `PeekOffsetOption::ScrollViewStop`.
+     * @param aStopAtScroller   If yes, this will
+     *                          set `PeekOffsetOption::StopAtScroller`.
      */
+    enum class StopAtScroller : bool { No, Yes };
     void AdjustContentOffsets(nsIFrame::ContentOffsets& aOffsets,
-                              bool aScrollViewStop) const;
+                              StopAtScroller aStopAtScroller) const;
 
     void MaintainAnchorFocusRange(
         const mozilla::dom::Selection& aNormalSelection,
@@ -1089,16 +1213,20 @@ class nsFrameSelection final {
 
   struct Batching {
     uint32_t mCounter = 0;
-    bool mChangesDuringBatching = false;
   };
 
   Batching mBatching;
 
   struct Limiters {
-    // Limit selection navigation to a child of this node.
-    nsCOMPtr<nsIContent> mLimiter;
-    // Limit selection navigation to a descendant of this node.
-    nsCOMPtr<nsIContent> mAncestorLimiter;
+    // Limit selection navigation to a child of this element.
+    // This is set only when the nsFrameSelection instance is for the
+    // independent selection for a text control.  If this is set, it's always
+    // the anonymous <div> of the text control element.
+    RefPtr<Element> mLimiter;
+    // Limit selection navigation to a descendant of this element.
+    // This is typically the focused editing host if set unless it's the root
+    // element of the document.
+    RefPtr<Element> mAncestorLimiter;
   };
 
   Limiters mLimiters;
@@ -1114,11 +1242,11 @@ class nsFrameSelection final {
   struct Caret {
     // Hint to tell if the selection is at the end of this line or beginning of
     // next.
-    CaretAssociateHint mHint = mozilla::CARET_ASSOCIATE_BEFORE;
+    CaretAssociationHint mHint = CaretAssociationHint::Before;
     mozilla::intl::BidiEmbeddingLevel mBidiLevel = BIDI_LEVEL_UNDEFINED;
 
-    bool IsVisualMovement(bool aContinueSelection,
-                          CaretMovementStyle aMovementStyle) const;
+    static bool IsVisualMovement(ExtendSelection aExtendSelection,
+                                 CaretMovementStyle aMovementStyle);
   };
 
   Caret mCaret;
@@ -1158,17 +1286,18 @@ class nsFrameSelection final {
   bool mDragState = false;  // for drag purposes
   bool mAccessibleCaretEnabled = false;
 
-  // Records if a selection was created by doubleclicking a word.
-  // This information is needed later on to determine if a leading
+  // Records if a selection was created by doubleclicking or tripleclicking
+  // a word. This information is needed later on to determine if a leading
   // or trailing whitespace needs to be removed as well to achieve
   // native behaviour on macOS.
-  bool mIsDoubleClickSelection{false};
+  mozilla::dom::ClickSelectionType mClickSelectionType =
+      mozilla::dom::ClickSelectionType::NotApplicable;
 };
 
 /**
  * Selection Batcher class that supports multiple FrameSelections.
  */
-class MOZ_STACK_CLASS AutoFrameSelectionBatcher {
+class MOZ_RAII AutoFrameSelectionBatcher final {
  public:
   explicit AutoFrameSelectionBatcher(const char* aFunctionName,
                                      size_t aEstimatedSize = 1)
@@ -1192,5 +1321,41 @@ class MOZ_STACK_CLASS AutoFrameSelectionBatcher {
   const char* mFunctionName;
   AutoTArray<RefPtr<nsFrameSelection>, 1> mFrameSelections;
 };
+
+namespace mozilla {
+/**
+ * A struct for sharing nsFrameSelection outside of its instance.
+ */
+struct LimitersAndCaretData {
+  using Element = dom::Element;
+
+  LimitersAndCaretData() = default;
+  explicit LimitersAndCaretData(const nsFrameSelection& aFrameSelection)
+      : mLimiter(aFrameSelection.GetLimiter()),
+        mAncestorLimiter(aFrameSelection.GetAncestorLimiter()),
+        mCaretAssociationHint(aFrameSelection.GetHint()),
+        mCaretBidiLevel(aFrameSelection.GetCaretBidiLevel()) {}
+
+  [[nodiscard]] bool NodeIsInLimiters(const nsINode* aContainerNode) const {
+    return nsFrameSelection::NodeIsInLimiters(aContainerNode, mLimiter,
+                                              mAncestorLimiter);
+  }
+  [[nodiscard]] bool RangeInLimiters(const dom::AbstractRange& aRange) const {
+    return NodeIsInLimiters(aRange.GetStartContainer()) &&
+           (!aRange.IsPositionedAndSameContainer() ||
+            NodeIsInLimiters(aRange.GetEndContainer()));
+  }
+
+  // nsFrameSelection::GetLimiter
+  RefPtr<Element> mLimiter;
+  // nsFrameSelection::GetAncestorLimiter
+  RefPtr<Element> mAncestorLimiter;
+  // nsFrameSelection::GetHint
+  CaretAssociationHint mCaretAssociationHint = CaretAssociationHint::Before;
+  // nsFrameSelection::GetCaretBidiLevel
+  intl::BidiEmbeddingLevel mCaretBidiLevel;
+};
+
+}  // namespace mozilla
 
 #endif /* nsFrameSelection_h___ */

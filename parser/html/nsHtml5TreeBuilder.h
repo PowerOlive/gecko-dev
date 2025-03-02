@@ -314,6 +314,8 @@ class nsHtml5TreeBuilder : public nsAHtml5TreeBuilderState {
  private:
   bool quirks;
   bool forceNoQuirks;
+  bool allowDeclarativeShadowRoots;
+  bool keepBuffer;
   inline nsHtml5ContentCreatorFunction htmlCreator(
       mozilla::dom::HTMLContentCreatorFunction htmlCreator) {
     nsHtml5ContentCreatorFunction creator;
@@ -329,6 +331,8 @@ class nsHtml5TreeBuilder : public nsAHtml5TreeBuilderState {
   }
 
  public:
+  void setKeepBuffer(bool keepBuffer);
+  bool dropBufferIfLongerThan(int32_t length);
   void startTokenization(nsHtml5Tokenizer* self);
   void doctype(nsAtom* name, nsHtml5String publicIdentifier,
                nsHtml5String systemIdentifier, bool forceQuirks);
@@ -353,6 +357,9 @@ class nsHtml5TreeBuilder : public nsAHtml5TreeBuilderState {
   bool isTemplateContents();
   bool isTemplateModeStackEmpty();
   bool isSpecialParentInForeign(nsHtml5StackNode* stackNode);
+  nsIContentHandle* getDeclarativeShadowRoot(nsIContentHandle* currentNode,
+                                             nsIContentHandle* templateNode,
+                                             nsHtml5HtmlAttributes* attributes);
 
  public:
   static nsHtml5String extractCharsetFromContent(nsHtml5String attributeValue,
@@ -477,6 +484,8 @@ class nsHtml5TreeBuilder : public nsAHtml5TreeBuilderState {
   void appendToCurrentNodeAndPushElementMayFoster(
       nsHtml5ElementName* elementName, nsHtml5HtmlAttributes* attributes,
       nsIContentHandle* form);
+  void appendVoidElementToCurrent(nsHtml5ElementName* elementName,
+                                  nsHtml5HtmlAttributes* attributes);
   void appendVoidElementToCurrentMayFoster(nsHtml5ElementName* elementName,
                                            nsHtml5HtmlAttributes* attributes,
                                            nsIContentHandle* form);
@@ -554,6 +563,8 @@ class nsHtml5TreeBuilder : public nsAHtml5TreeBuilderState {
   void setScriptingEnabled(bool scriptingEnabled);
   void setForceNoQuirks(bool forceNoQuirks);
   void setIsSrcdocDocument(bool isSrcdocDocument);
+  bool isAllowDeclarativeShadowRoots();
+  void setAllowDeclarativeShadowRoots(bool allow);
   void flushCharacters();
 
  private:

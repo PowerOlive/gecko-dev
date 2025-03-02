@@ -347,10 +347,8 @@ class nsXULElement : public nsStyledElement {
   using Element::Blur;
   using Element::Focus;
 
-  static nsresult CreateFromPrototype(nsXULPrototypeElement* aPrototype,
-                                      Document* aDocument, bool aIsScriptable,
-                                      bool aIsRoot,
-                                      mozilla::dom::Element** aResult);
+  static already_AddRefed<mozilla::dom::Element> CreateFromPrototype(
+      nsXULPrototypeElement* aPrototype, Document* aDocument, bool aIsRoot);
 
   // This is the constructor for nsXULElements.
   static nsXULElement* Construct(
@@ -374,7 +372,7 @@ class nsXULElement : public nsStyledElement {
       mozilla::EventChainVisitor& aVisitor) override;
   // nsIContent
   virtual nsresult BindToTree(BindContext&, nsINode& aParent) override;
-  virtual void UnbindFromTree(bool aNullParent) override;
+  virtual void UnbindFromTree(UnbindContext&) override;
   virtual void DestroyContent() override;
   virtual void DoneAddingChildren(bool aHaveNotified) override;
 
@@ -392,8 +390,17 @@ class nsXULElement : public nsStyledElement {
       bool aKeyCausesActivation, bool aIsTrustedEvent) override;
   MOZ_CAN_RUN_SCRIPT void ClickWithInputSource(uint16_t aInputSource,
                                                bool aIsTrustedEvent);
+  struct XULFocusability {
+    bool mDefaultFocusable = false;
+    mozilla::Maybe<bool> mForcedFocusable;
+    mozilla::Maybe<int32_t> mForcedTabIndexIfFocusable;
 
-  bool IsFocusableInternal(int32_t* aTabIndex, bool aWithMouse) override;
+    static XULFocusability NeverFocusable() {
+      return {false, mozilla::Some(false), mozilla::Some(-1)};
+    }
+  };
+  XULFocusability GetXULFocusability(mozilla::IsFocusableFlags);
+  Focusable IsFocusableWithoutStyle(mozilla::IsFocusableFlags) override;
 
   NS_IMETHOD_(bool) IsAttributeMapped(const nsAtom* aAttribute) const override;
 
@@ -504,8 +511,6 @@ class nsXULElement : public nsStyledElement {
                     const nsAttrValue* aValue, const nsAttrValue* aOldValue,
                     nsIPrincipal* aSubjectPrincipal, bool aNotify) override;
 
-  void UpdateEditableState(bool aNotify) override;
-
   bool ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
                       const nsAString& aValue,
                       nsIPrincipal* aMaybeScriptedPrincipal,
@@ -544,10 +549,6 @@ class nsXULElement : public nsStyledElement {
                                    const nsAString* aIs);
   friend void NS_TrustedNewXULElement(mozilla::dom::Element** aResult,
                                       mozilla::dom::NodeInfo* aNodeInfo);
-
-  static already_AddRefed<nsXULElement> CreateFromPrototype(
-      nsXULPrototypeElement* aPrototype, mozilla::dom::NodeInfo* aNodeInfo,
-      bool aIsScriptable, bool aIsRoot);
 
   JSObject* WrapNode(JSContext*, JS::Handle<JSObject*> aGivenProto) override;
 

@@ -24,12 +24,16 @@
 
 #include "jit/InlinableNatives.h"
 #include "js/Class.h"
+#include "js/ForOfIterator.h"
+#include "js/Prefs.h"
 #include "js/PropertySpec.h"
 #include "util/DifferentialTesting.h"
+#include "vm/Float16.h"
+#include "vm/Interpreter.h"
 #include "vm/JSContext.h"
 #include "vm/Realm.h"
 #include "vm/Time.h"
-#include "vm/WellKnownAtom.h"  // js_*_str
+#include "xsum/xsum.h"
 
 #include "vm/JSObject-inl.h"
 
@@ -48,16 +52,12 @@ using mozilla::NumberEqualsInt64;
 using mozilla::PositiveInfinity;
 using mozilla::WrappingMultiply;
 
-static mozilla::Atomic<bool, mozilla::Relaxed> sUseFdlibmForSinCosTan;
-
-JS_PUBLIC_API void JS::SetUseFdlibmForSinCosTan(bool value) {
-  sUseFdlibmForSinCosTan = value;
+bool js::math_use_fdlibm_for_sin_cos_tan() {
+  return JS::Prefs::use_fdlibm_for_sin_cos_tan();
 }
 
-bool js::math_use_fdlibm_for_sin_cos_tan() { return sUseFdlibmForSinCosTan; }
-
 static inline bool UseFdlibmForSinCosTan(const CallArgs& args) {
-  return sUseFdlibmForSinCosTan ||
+  return math_use_fdlibm_for_sin_cos_tan() ||
          args.callee().nonCCWRealm()->creationOptions().alwaysUseFdlibm();
 }
 
@@ -205,7 +205,7 @@ double js::math_cos_fdlibm_impl(double x) {
 }
 
 double js::math_cos_native_impl(double x) {
-  MOZ_ASSERT(!sUseFdlibmForSinCosTan);
+  MOZ_ASSERT(!math_use_fdlibm_for_sin_cos_tan());
   AutoUnsafeCallWithABI unsafe;
   return std::cos(x);
 }
@@ -301,6 +301,46 @@ static bool math_fround(JSContext* cx, unsigned argc, Value* vp) {
   }
 
   return RoundFloat32(cx, args[0], args.rval());
+}
+
+double js::RoundFloat16(double d) {
+  AutoUnsafeCallWithABI unsafe;
+
+  // http://tc39.es/proposal-float16array/#sec-function-properties-of-the-math-object
+
+  // 1. Let n be ? ToNumber(x).
+  // [Not applicable here]
+
+  // 2. If n is NaN, return NaN.
+  // 3. If n is one of +0𝔽, -0𝔽, +∞𝔽, or -∞𝔽, return n.
+  // 4. Let n16 be the result of converting n to IEEE 754-2019 binary16 format
+  // using roundTiesToEven mode.
+  js::float16 f16 = js::float16(d);
+
+  // 5. Let n64 be the result of converting n16 to IEEE 754-2019 binary64
+  // format.
+  // 6. Return the ECMAScript Number value corresponding to n64.
+  return static_cast<double>(f16);
+}
+
+static bool math_f16round(JSContext* cx, unsigned argc, Value* vp) {
+  // http://tc39.es/proposal-float16array/#sec-function-properties-of-the-math-object
+  CallArgs args = CallArgsFromVp(argc, vp);
+
+  if (args.length() == 0) {
+    args.rval().setNaN();
+    return true;
+  }
+
+  // 1. Let n be ? ToNumber(x).
+  double d;
+  if (!ToNumber(cx, args[0], &d)) {
+    return false;
+  }
+
+  // Steps 2-6.
+  args.rval().setDouble(RoundFloat16(d));
+  return true;
 }
 
 double js::math_log_impl(double x) {
@@ -600,7 +640,7 @@ double js::math_sin_fdlibm_impl(double x) {
 }
 
 double js::math_sin_native_impl(double x) {
-  MOZ_ASSERT(!sUseFdlibmForSinCosTan);
+  MOZ_ASSERT(!math_use_fdlibm_for_sin_cos_tan());
   AutoUnsafeCallWithABI unsafe;
   return std::sin(x);
 }
@@ -629,7 +669,7 @@ double js::math_tan_fdlibm_impl(double x) {
 }
 
 double js::math_tan_native_impl(double x) {
-  MOZ_ASSERT(!sUseFdlibmForSinCosTan);
+  MOZ_ASSERT(!math_use_fdlibm_for_sin_cos_tan());
   AutoUnsafeCallWithABI unsafe;
   return std::tan(x);
 }
@@ -872,7 +912,7 @@ double js::math_sign_impl(double x) {
   return x == 0 ? x : x < 0 ? -1 : 1;
 }
 
-static bool math_sign(JSContext* cx, unsigned argc, Value* vp) {
+bool js::math_sign(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
   if (args.length() == 0) {
     args.rval().setNaN();
@@ -901,6 +941,161 @@ static bool math_cbrt(JSContext* cx, unsigned argc, Value* vp) {
 static bool math_toSource(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
   args.rval().setString(cx->names().Math);
+  return true;
+}
+
+enum class SumPreciseState : uint8_t {
+  MinusZero,
+  Finite,
+  PlusInfinity,
+  MinusInfinity,
+  NotANumber,
+};
+
+/**
+ * Math.sumPrecise ( items )
+ *
+ * https://tc39.es/proposal-math-sum/#sec-math.sumprecise
+ */
+static bool math_sumPrecise(JSContext* cx, unsigned argc, Value* vp) {
+  constexpr int64_t MaxCount = int64_t(1) << 53;
+
+  // Step 1. Perform ? RequireObjectCoercible(items).
+  CallArgs args = CallArgsFromVp(argc, vp);
+  if (!args.requireAtLeast(cx, "Math.sumPrecise", 1)) {
+    return false;
+  }
+
+  // Step 2. Let iteratorRecord be ? GetIterator(items, sync).
+  JS::ForOfIterator iterator(cx);
+  if (!iterator.init(args[0], JS::ForOfIterator::ThrowOnNonIterable)) {
+    return false;
+  }
+
+  // Step 3. Let state be minus-zero.
+  SumPreciseState state = SumPreciseState::MinusZero;
+
+  // Step 4. Let sum be 0.
+  xsum_small_accumulator sum;
+  xsum_small_init(&sum);
+
+  // Step 5. Let count be 0.
+  int64_t count = 0;
+
+  // Step 6. Let next be not-started.
+  // (implicit)
+
+  JS::Rooted<JS::Value> value(cx);
+
+  // Step 7. Repeat, while next is not done,
+  while (true) {
+    // Step 7.a. Set next to ? IteratorStepValue(iteratorRecord).
+    bool done;
+    if (!iterator.next(&value, &done)) {
+      return false;
+    }
+
+    // Step 7.b. If next is not done, then
+    if (done) {
+      break;
+    }
+
+    // Step 7.b.i. Set count to count + 1.
+    count += 1;
+
+    // Step 7.b.ii. If count ≥ 2**53, then
+    if (count >= MaxCount) {
+      // Step 7.b.ii.1. Let error be ThrowCompletion(a newly created RangeError
+      // object).
+      JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                                JSMSG_SUMPRECISE_TOO_MANY_VALUES);
+
+      // Step 7.b.ii.2. Return ? IteratorClose(iteratorRecord, error).
+      iterator.closeThrow();
+      return false;
+    }
+
+    // Step 7.b.iv. If next is not a Number, then
+    if (!value.isNumber()) {
+      // Step 7.b.iv.1. Let error be ThrowCompletion(a newly created TypeError
+      // object).
+      JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                                JSMSG_SUMPRECISE_EXPECTED_NUMBER);
+
+      // Step 7.b.iv.2. Return ? IteratorClose(iteratorRecord, error).
+      iterator.closeThrow();
+      return false;
+    }
+
+    // Step 7.b.v. Let n be next.
+    double n = value.toNumber();
+
+    // Step 7.b.vi. If state is not not-a-number, then
+    if (state == SumPreciseState::NotANumber) {
+      continue;
+    }
+
+    // Step 7.b.vi.1. If n is NaN, then
+    if (std::isnan(n)) {
+      // Step 7.b.vi.1.a. Set state to not-a-number.
+      state = SumPreciseState::NotANumber;
+    } else if (n == PositiveInfinity<double>()) {
+      // Step 7.b.vi.2. Else if n is +∞𝔽, then
+      if (state == SumPreciseState::MinusInfinity) {
+        // Step 7.b.vi.2.a. If state is minus-infinity, set state to
+        //                  not-a-number.
+        state = SumPreciseState::NotANumber;
+      } else {
+        // Step 7.b.vi.2.b. Else, set state to plus-infinity.
+        state = SumPreciseState::PlusInfinity;
+      }
+    } else if (n == NegativeInfinity<double>()) {
+      // Step 7.b.vi.3. Else if n is -∞𝔽, then
+      if (state == SumPreciseState::PlusInfinity) {
+        // Step 7.b.vi.3.a. If state is plus-infinity, set state to
+        //                  not-a-number.
+        state = SumPreciseState::NotANumber;
+      } else {
+        // Step 7.b.vi.3.b. Else, set state to minus-infinity.
+        state = SumPreciseState::MinusInfinity;
+      }
+    } else if (!IsNegativeZero(n) && (state == SumPreciseState::MinusZero ||
+                                      state == SumPreciseState::Finite)) {
+      // Step 7.b.vi.4. Else if n is not -0𝔽 and state is either minus-zero or
+      //                finite, then
+      // Step 7.b.vi.4.a. Set state to finite.
+      state = SumPreciseState::Finite;
+
+      // Step 7.b.vi.4.b. Set sum to sum + ℝ(n).
+      xsum_small_add1(&sum, n);
+    }
+  }
+
+  double rval;
+  switch (state) {
+    case SumPreciseState::NotANumber:
+      // Step 8. If state is not-a-number, return NaN.
+      rval = GenericNaN();
+      break;
+    case SumPreciseState::PlusInfinity:
+      // Step 9. If state is plus-infinity, return +∞𝔽.
+      rval = PositiveInfinity<double>();
+      break;
+    case SumPreciseState::MinusInfinity:
+      // Step 10. If state is minus-infinity, return -∞𝔽.
+      rval = NegativeInfinity<double>();
+      break;
+    case SumPreciseState::MinusZero:
+      // Step 11. If state is minus-zero, return -0𝔽.
+      rval = -0.0;
+      break;
+    case SumPreciseState::Finite:
+      // Step 12. Return 𝔽(sum).
+      rval = xsum_small_round(&sum);
+      break;
+  }
+
+  args.rval().setNumber(rval);
   return true;
 }
 
@@ -962,20 +1157,20 @@ UnaryMathFunctionType js::GetUnaryMathFunctionPtr(UnaryMathFunction fun) {
   MOZ_CRASH("Unknown function");
 }
 
-const char* js::GetUnaryMathFunctionName(UnaryMathFunction fun) {
+const char* js::GetUnaryMathFunctionName(UnaryMathFunction fun, bool enumName) {
   switch (fun) {
     case UnaryMathFunction::SinNative:
-      return "Sin (native)";
+      return enumName ? "SinNative" : "Sin (native)";
     case UnaryMathFunction::SinFdlibm:
-      return "Sin (fdlibm)";
+      return enumName ? "SinFdlibm" : "Sin (fdlibm)";
     case UnaryMathFunction::CosNative:
-      return "Cos (native)";
+      return enumName ? "CosNative" : "Cos (native)";
     case UnaryMathFunction::CosFdlibm:
-      return "Cos (fdlibm)";
+      return enumName ? "CosFdlibm" : "Cos (fdlibm)";
     case UnaryMathFunction::TanNative:
-      return "Tan (native)";
+      return enumName ? "TanNative" : "Tan (native)";
     case UnaryMathFunction::TanFdlibm:
-      return "Tan (fdlibm)";
+      return enumName ? "TanFdlibm" : "Tan (fdlibm)";
     case UnaryMathFunction::Log:
       return "Log";
     case UnaryMathFunction::Exp:
@@ -1021,7 +1216,7 @@ const char* js::GetUnaryMathFunctionName(UnaryMathFunction fun) {
 }
 
 static const JSFunctionSpec math_static_methods[] = {
-    JS_FN(js_toSource_str, math_toSource, 0, 0),
+    JS_FN("toSource", math_toSource, 0, 0),
     JS_INLINABLE_FN("abs", math_abs, 1, 0, MathAbs),
     JS_INLINABLE_FN("acos", math_acos, 1, 0, MathACos),
     JS_INLINABLE_FN("asin", math_asin, 1, 0, MathASin),
@@ -1034,6 +1229,7 @@ static const JSFunctionSpec math_static_methods[] = {
     JS_INLINABLE_FN("floor", math_floor, 1, 0, MathFloor),
     JS_INLINABLE_FN("imul", math_imul, 2, 0, MathImul),
     JS_INLINABLE_FN("fround", math_fround, 1, 0, MathFRound),
+    JS_INLINABLE_FN("f16round", math_f16round, 1, 0, MathF16Round),
     JS_INLINABLE_FN("log", math_log, 1, 0, MathLog),
     JS_INLINABLE_FN("max", math_max, 2, 0, MathMax),
     JS_INLINABLE_FN("min", math_min, 2, 0, MathMin),
@@ -1057,7 +1253,9 @@ static const JSFunctionSpec math_static_methods[] = {
     JS_INLINABLE_FN("trunc", math_trunc, 1, 0, MathTrunc),
     JS_INLINABLE_FN("sign", math_sign, 1, 0, MathSign),
     JS_INLINABLE_FN("cbrt", math_cbrt, 1, 0, MathCbrt),
-    JS_FS_END};
+    JS_FN("sumPrecise", math_sumPrecise, 1, 0),
+    JS_FS_END,
+};
 
 static const JSPropertySpec math_static_properties[] = {
     JS_DOUBLE_PS("E", M_E, JSPROP_READONLY | JSPROP_PERMANENT),
@@ -1070,21 +1268,27 @@ static const JSPropertySpec math_static_properties[] = {
     JS_DOUBLE_PS("SQRT1_2", M_SQRT1_2, JSPROP_READONLY | JSPROP_PERMANENT),
 
     JS_STRING_SYM_PS(toStringTag, "Math", JSPROP_READONLY),
-    JS_PS_END};
+    JS_PS_END,
+};
 
 static JSObject* CreateMathObject(JSContext* cx, JSProtoKey key) {
   RootedObject proto(cx, &cx->global()->getObjectPrototype());
   return NewTenuredObjectWithGivenProto(cx, &MathClass, proto);
 }
 
-static const ClassSpec MathClassSpec = {CreateMathObject,
-                                        nullptr,
-                                        math_static_methods,
-                                        math_static_properties,
-                                        nullptr,
-                                        nullptr,
-                                        nullptr};
+static const ClassSpec MathClassSpec = {
+    CreateMathObject,
+    nullptr,
+    math_static_methods,
+    math_static_properties,
+    nullptr,
+    nullptr,
+    nullptr,
+};
 
-const JSClass js::MathClass = {js_Math_str,
-                               JSCLASS_HAS_CACHED_PROTO(JSProto_Math),
-                               JS_NULL_CLASS_OPS, &MathClassSpec};
+const JSClass js::MathClass = {
+    "Math",
+    JSCLASS_HAS_CACHED_PROTO(JSProto_Math),
+    JS_NULL_CLASS_OPS,
+    &MathClassSpec,
+};

@@ -26,19 +26,19 @@
 #include "nsProxyInfo.h"
 #include "prnetdb.h"
 
-static nsresult SHA256(const char* aPlainText, nsAutoCString& aResult) {
-  nsresult rv;
-  nsCOMPtr<nsICryptoHash> hasher =
-      do_CreateInstance(NS_CRYPTO_HASH_CONTRACTID, &rv);
+static nsresult ComputeHash(uint32_t aAlgorithm, const uint8_t* aInput,
+                            uint32_t aLen, nsAutoCString& aResult) {
+  nsCOMPtr<nsICryptoHash> hasher;
+  nsresult rv = NS_NewCryptoHash(aAlgorithm, getter_AddRefs(hasher));
+
   if (NS_FAILED(rv)) {
     LOG(("nsHttpDigestAuth: no crypto hash!\n"));
     return rv;
   }
-  rv = hasher->Init(nsICryptoHash::SHA256);
+
+  rv = hasher->Update(aInput, aLen);
   NS_ENSURE_SUCCESS(rv, rv);
-  rv = hasher->Update((unsigned char*)aPlainText, strlen(aPlainText));
-  NS_ENSURE_SUCCESS(rv, rv);
-  return hasher->Finish(false, aResult);
+  return hasher->Finish(true, aResult);
 }
 
 namespace mozilla {
@@ -80,8 +80,6 @@ void nsHttpConnectionInfo::Init(const nsACString& host, int32_t port,
                                 bool e2eSSL, bool aIsHttp3,
                                 bool aWebTransport) {
   LOG(("Init nsHttpConnectionInfo @%p\n", this));
-
-  MOZ_RELEASE_ASSERT(!aWebTransport || aIsHttp3);
 
   mUsername = username;
   mProxyInfo = proxyInfo;
@@ -204,9 +202,12 @@ void nsHttpConnectionInfo::BuildHashKey() {
     mHashKey.Append(ProxyUsername());
     mHashKey.Append(':');
     const char* password = ProxyPassword();
-    if (strlen(password) > 0) {
+    uint32_t len = strlen(password);
+    if (len > 0) {
       nsAutoCString digestedPassword;
-      nsresult rv = SHA256(password, digestedPassword);
+      nsresult rv = ComputeHash(nsICryptoHash::SHA256,
+                                reinterpret_cast<const uint8_t*>(password), len,
+                                digestedPassword);
       if (rv == NS_OK) {
         mHashKey.Append(digestedPassword);
       }
@@ -258,6 +259,26 @@ void nsHttpConnectionInfo::BuildHashKey() {
     }
   }
 
+  if (mWebTransportId) {
+    mHashKey.AppendLiteral("{wId");
+    mHashKey.AppendInt(mWebTransportId, 16);
+    mHashKey.AppendLiteral("}");
+  }
+
+  // Make sure when echConfig is changed, we don't reuse the old connection.
+  if (!mEchConfig.IsEmpty()) {
+    nsAutoCString digestedEch;
+    nsresult rv =
+        ComputeHash(nsICryptoHash::SHA1,
+                    reinterpret_cast<const uint8_t*>(mEchConfig.BeginReading()),
+                    mEchConfig.Length(), digestedEch);
+    if (NS_SUCCEEDED(rv)) {
+      mHashKey.AppendLiteral("{ech");
+      mHashKey.Append(digestedEch);
+      mHashKey.AppendLiteral("}");
+    }
+  }
+
   nsAutoCString originAttributes;
   mOriginAttributes.CreateSuffix(originAttributes);
   mHashKey.Append(originAttributes);
@@ -283,6 +304,7 @@ void nsHttpConnectionInfo::RebuildHashKey() {
   SetBeConservative(isBeConservative);
   SetAnonymousAllowClientCert(isAnonymousAllowClientCert);
   SetFallbackConnection(isFallback);
+  SetTlsFlags(mTlsFlags);
 }
 
 void nsHttpConnectionInfo::SetOriginServer(const nsACString& host,
@@ -326,6 +348,7 @@ already_AddRefed<nsHttpConnectionInfo> nsHttpConnectionInfo::Clone() const {
   clone->SetIPv6Disabled(GetIPv6Disabled());
   clone->SetHasIPHintAddress(HasIPHintAddress());
   clone->SetEchConfig(GetEchConfig());
+  clone->SetWebTransportId(GetWebTransportId());
   MOZ_ASSERT(clone->Equals(this));
 
   return clone.forget();
@@ -418,6 +441,7 @@ void nsHttpConnectionInfo::SerializeHttpConnectionInfo(
   aArgs.hasIPHintAddress() = aInfo->HasIPHintAddress();
   aArgs.echConfig() = aInfo->GetEchConfig();
   aArgs.webTransport() = aInfo->GetWebTransport();
+  aArgs.webTransportId() = aInfo->GetWebTransportId();
 
   if (!aInfo->ProxyInfo()) {
     return;
@@ -448,6 +472,8 @@ nsHttpConnectionInfo::DeserializeHttpConnectionInfoCloneArgs(
         aInfoArgs.routedHost(), aInfoArgs.routedPort(), aInfoArgs.isHttp3(),
         aInfoArgs.webTransport());
   }
+  // Transfer Webtransport ids
+  cinfo->SetWebTransportId(aInfoArgs.webTransportId());
 
   // Make sure the anonymous, insecure-scheme, and private flags are transferred
   cinfo->SetAnonymous(aInfoArgs.anonymous());
@@ -538,6 +564,20 @@ void nsHttpConnectionInfo::SetIPv6Disabled(bool aNoIPv6) {
 void nsHttpConnectionInfo::SetWebTransport(bool aWebTransport) {
   if (mWebTransport != aWebTransport) {
     mWebTransport = aWebTransport;
+    RebuildHashKey();
+  }
+}
+
+void nsHttpConnectionInfo::SetWebTransportId(uint64_t id) {
+  if (mWebTransportId != id) {
+    mWebTransportId = id;
+    RebuildHashKey();
+  }
+}
+
+void nsHttpConnectionInfo::SetEchConfig(const nsACString& aEchConfig) {
+  if (!mEchConfig.Equals(aEchConfig)) {
+    mEchConfig = aEchConfig;
     RebuildHashKey();
   }
 }

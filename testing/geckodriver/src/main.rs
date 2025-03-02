@@ -16,22 +16,21 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
-extern crate serde_yaml;
 extern crate tempfile;
 extern crate url;
 extern crate uuid;
 extern crate webdriver;
+extern crate yaml_rust;
 extern crate zip;
 
 #[macro_use]
 extern crate log;
 
 use std::env;
-use std::fmt;
-use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
-use std::result;
+use std::process::ExitCode;
+
 use std::str::FromStr;
 
 use clap::{Arg, ArgAction, Command};
@@ -60,69 +59,13 @@ pub mod test;
 use crate::command::extension_routes;
 use crate::logging::Level;
 use crate::marionette::{MarionetteHandler, MarionetteSettings};
+use anyhow::{bail, Result as ProgramResult};
+use clap::ArgMatches;
 use mozdevice::AndroidStorageInput;
 use url::{Host, Url};
 
-const EXIT_SUCCESS: i32 = 0;
-const EXIT_USAGE: i32 = 64;
-const EXIT_UNAVAILABLE: i32 = 69;
-
-enum FatalError {
-    Parsing(clap::Error),
-    Usage(String),
-    Server(io::Error),
-}
-
-impl FatalError {
-    fn exit_code(&self) -> i32 {
-        use FatalError::*;
-        match *self {
-            Parsing(_) | Usage(_) => EXIT_USAGE,
-            Server(_) => EXIT_UNAVAILABLE,
-        }
-    }
-
-    fn help_included(&self) -> bool {
-        matches!(*self, FatalError::Parsing(_))
-    }
-}
-
-impl From<clap::Error> for FatalError {
-    fn from(err: clap::Error) -> FatalError {
-        FatalError::Parsing(err)
-    }
-}
-
-impl From<io::Error> for FatalError {
-    fn from(err: io::Error) -> FatalError {
-        FatalError::Server(err)
-    }
-}
-
-// harmonise error message from clap to avoid duplicate "error:" prefix
-impl fmt::Display for FatalError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use FatalError::*;
-        let s = match *self {
-            Parsing(ref err) => err.to_string(),
-            Usage(ref s) => format!("error: {}", s),
-            Server(ref err) => format!("error: {}", err),
-        };
-        write!(f, "{}", s)
-    }
-}
-
-macro_rules! usage {
-    ($msg:expr) => {
-        return Err(FatalError::Usage($msg.to_string()))
-    };
-
-    ($fmt:expr, $($arg:tt)+) => {
-        return Err(FatalError::Usage(format!($fmt, $($arg)+)))
-    };
-}
-
-type ProgramResult<T> = result::Result<T, FatalError>;
+const EXIT_USAGE: u8 = 64;
+const EXIT_UNAVAILABLE: u8 = 69;
 
 #[allow(clippy::large_enum_variant)]
 enum Operation {
@@ -135,6 +78,7 @@ enum Operation {
         allow_hosts: Vec<Host>,
         allow_origins: Vec<Url>,
         settings: MarionetteSettings,
+        deprecated_enable_crash_reporter: bool,
         deprecated_storage_arg: bool,
     },
 }
@@ -151,10 +95,10 @@ fn server_address(webdriver_host: &str, webdriver_port: u16) -> ProgramResult<So
     let mut socket_addrs = match format!("{}:{}", webdriver_host, webdriver_port).to_socket_addrs()
     {
         Ok(addrs) => addrs.collect::<Vec<_>>(),
-        Err(e) => usage!("{}: {}:{}", e, webdriver_host, webdriver_port),
+        Err(e) => bail!("{}: {}:{}", e, webdriver_host, webdriver_port),
     };
     if socket_addrs.is_empty() {
-        usage!(
+        bail!(
             "Unable to resolve host: {}:{}",
             webdriver_host,
             webdriver_port
@@ -224,9 +168,7 @@ fn get_allowed_origins(allow_origins: Option<clap::parser::ValuesRef<Url>>) -> V
     allow_origins.into_iter().flatten().cloned().collect()
 }
 
-fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
-    let args = cmd.try_get_matches_from_mut(env::args())?;
-
+fn parse_args(args: &ArgMatches) -> ProgramResult<Operation> {
     if args.get_flag("help") {
         return Ok(Operation::Help);
     } else if args.get_flag("version") {
@@ -248,7 +190,7 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
         let s = args.get_one::<String>("webdriver_port").unwrap();
         match u16::from_str(s) {
             Ok(n) => n,
-            Err(e) => usage!("invalid --port: {}: {}", e, s),
+            Err(e) => bail!("invalid --port: {}: {}", e, s),
         }
     };
 
@@ -269,7 +211,7 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
             tempfile::tempdir()
         };
         if tmp_dir.is_err() {
-            usage!("Unable to write to temporary directory; consider --profile-root with a writeable directory")
+            bail!("Unable to write to temporary directory; consider --profile-root with a writeable directory")
         }
     }
 
@@ -277,7 +219,7 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
     let marionette_port = match args.get_one::<String>("marionette_port") {
         Some(s) => match u16::from_str(s) {
             Ok(n) => Some(n),
-            Err(e) => usage!("invalid --marionette-port: {}", e),
+            Err(e) => bail!("invalid --marionette-port: {}", e),
         },
         None => None,
     };
@@ -287,14 +229,14 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
     let websocket_port = match args.get_one::<String>("websocket_port") {
         Some(s) => match u16::from_str(s) {
             Ok(n) => n,
-            Err(e) => usage!("invalid --websocket-port: {}", e),
+            Err(e) => bail!("invalid --websocket-port: {}", e),
         },
         None => 9222,
     };
 
     let host = match parse_hostname(webdriver_host) {
         Ok(name) => name,
-        Err(e) => usage!("invalid --host {}: {}", webdriver_host, e),
+        Err(e) => bail!("invalid --host {}: {}", webdriver_host, e),
     };
 
     let allow_hosts = get_allowed_hosts(host, args.get_many("allow_hosts"));
@@ -314,6 +256,7 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
         allow_origins: allow_origins.clone(),
         jsdebugger: args.get_flag("jsdebugger"),
         android_storage,
+        system_access: args.get_flag("allow_system_access"),
     };
     Ok(Operation::Server {
         log_level,
@@ -322,12 +265,13 @@ fn parse_args(cmd: &mut Command) -> ProgramResult<Operation> {
         allow_origins,
         address,
         settings,
+        deprecated_enable_crash_reporter: args.get_flag("enable_crash_reporter"),
         deprecated_storage_arg: args.contains_id("android_storage"),
     })
 }
 
-fn inner_main(cmd: &mut Command) -> ProgramResult<()> {
-    match parse_args(cmd)? {
+fn inner_main(operation: Operation, cmd: &mut Command) -> ProgramResult<()> {
+    match operation {
         Operation::Help => print_help(cmd),
         Operation::Version => print_version(),
 
@@ -338,6 +282,7 @@ fn inner_main(cmd: &mut Command) -> ProgramResult<()> {
             allow_hosts,
             allow_origins,
             settings,
+            deprecated_enable_crash_reporter,
             deprecated_storage_arg,
         } => {
             if let Some(ref level) = log_level {
@@ -349,6 +294,10 @@ fn inner_main(cmd: &mut Command) -> ProgramResult<()> {
             if deprecated_storage_arg {
                 warn!("--android-storage argument is deprecated and will be removed soon.");
             };
+
+            if deprecated_enable_crash_reporter {
+                warn!("--enable-crash-reporter argument is deprecated and will be removed in the next version.");
+            }
 
             let handler = MarionetteHandler::new(settings);
             let listening = webdriver::server::start(
@@ -365,24 +314,34 @@ fn inner_main(cmd: &mut Command) -> ProgramResult<()> {
     Ok(())
 }
 
-fn main() {
-    use std::process::exit;
-
+fn main() -> ExitCode {
     let mut cmd = make_command();
 
-    // use std::process:Termination when it graduates
-    exit(match inner_main(&mut cmd) {
-        Ok(_) => EXIT_SUCCESS,
-
+    let args = match cmd.try_get_matches_from_mut(env::args()) {
+        Ok(args) => args,
         Err(e) => {
+            // Clap already says "error:" and don't repeat help.
             eprintln!("{}: {}", get_program_name(), e);
-            if !e.help_included() {
-                print_help(&mut cmd);
-            }
-
-            e.exit_code()
+            return ExitCode::from(EXIT_USAGE);
         }
-    });
+    };
+
+    let operation = match parse_args(&args) {
+        Ok(op) => op,
+        Err(e) => {
+            eprintln!("{}: error: {}", get_program_name(), e);
+            print_help(&mut cmd);
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    if let Err(e) = inner_main(operation, &mut cmd) {
+        eprintln!("{}: error: {}", get_program_name(), e);
+        print_help(&mut cmd);
+        return ExitCode::from(EXIT_UNAVAILABLE);
+    }
+
+    ExitCode::SUCCESS
 }
 
 fn make_command() -> Command {
@@ -407,6 +366,12 @@ fn make_command() -> Command {
                 .help("List of request origins to allow. These must be formatted as scheme://host:port. By default any request with an origin header is rejected. If --allow-origins is provided then only exactly those origins are allowed."),
         )
         .arg(
+            Arg::new("allow_system_access")
+                .long("allow-system-access")
+                .action(ArgAction::SetTrue)
+                .help("Enable privileged access to the application's parent process"),
+        )
+        .arg(
             Arg::new("android_storage")
                 .long("android-storage")
                 .value_parser(["auto", "app", "internal", "sdcard"])
@@ -427,6 +392,12 @@ fn make_command() -> Command {
                 .requires("marionette_port")
                 .action(ArgAction::SetTrue)
                 .help("Connect to an existing Firefox instance"),
+        )
+        .arg(
+            Arg::new("enable_crash_reporter")
+                .long("enable-crash-reporter")
+                .action(ArgAction::SetTrue)
+                .help("Enable the Firefox crash reporter for diagnostic purposes (deprecated)"),
         )
         .arg(
             Arg::new("help")

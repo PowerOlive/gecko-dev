@@ -4,18 +4,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use crate::frames::HFrame;
-use crate::{BufferedStream, Http3StreamType, RecvStream, Res};
+use std::collections::{HashMap, VecDeque};
+
 use neqo_common::{qtrace, Encoder};
 use neqo_transport::{Connection, StreamId, StreamType};
-use std::collections::{HashMap, VecDeque};
-use std::convert::TryFrom;
+
+use crate::{frames::HFrame, BufferedStream, Http3StreamType, RecvStream, Res};
 
 pub const HTTP3_UNI_STREAM_TYPE_CONTROL: u64 = 0x0;
 
 /// The local control stream, responsible for encoding frames and sending them
 #[derive(Debug)]
-pub(crate) struct ControlStreamLocal {
+pub struct ControlStreamLocal {
     stream: BufferedStream,
     /// `stream_id`s of outstanding request streams
     outstanding_priority_update: VecDeque<StreamId>,
@@ -63,7 +63,9 @@ impl ControlStreamLocal {
     ) -> Res<()> {
         // send all necessary priority updates
         while let Some(update_id) = self.outstanding_priority_update.pop_front() {
-            let Some(update_stream) = recv_conn.get_mut(&update_id) else { continue };
+            let Some(update_stream) = recv_conn.get_mut(&update_id) else {
+                continue;
+            };
 
             // can assert and unwrap here, because priority updates can only be added to
             // HttpStreams in [Http3Connection::queue_update_priority}
@@ -90,7 +92,7 @@ impl ControlStreamLocal {
 
     /// Create a control stream.
     pub fn create(&mut self, conn: &mut Connection) -> Res<()> {
-        qtrace!([self], "Create a control stream.");
+        qtrace!("[{self}] Create a control stream");
         self.stream.init(conn.stream_create(StreamType::UniDi)?);
         self.stream
             .buffer(&[u8::try_from(HTTP3_UNI_STREAM_TYPE_CONTROL).unwrap()]);

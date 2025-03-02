@@ -35,6 +35,8 @@ const TEST_URI = `
           }
         }
       }
+
+      border-color: blanchedalmond;
     }
   </style>
   <h1>Hello <i class="foo">nested</i> <em id="bar">rules</em>!</h1>
@@ -57,7 +59,12 @@ add_task(async function () {
   checkRuleViewContent(view, [
     { selector: "element", ancestorRulesData: null, declarations: [] },
     {
-      selector: `&`,
+      selector: "",
+      ancestorRulesData: [`body {`],
+      declarations: [{ name: "border-color", value: "blanchedalmond" }],
+    },
+    {
+      selector: ``,
       // prettier-ignore
       ancestorRulesData: [
         `body {`,
@@ -93,7 +100,7 @@ add_task(async function () {
   checkRuleViewContent(view, [
     { selector: "element", ancestorRulesData: null, declarations: [] },
     {
-      selector: `.foo`,
+      selector: `& .foo`,
       // prettier-ignore
       ancestorRulesData: [
         `body {`,
@@ -108,7 +115,7 @@ add_task(async function () {
   checkRuleViewContent(view, [
     { selector: "element", ancestorRulesData: null, declarations: [] },
     {
-      selector: `#bar`,
+      selector: `& #bar`,
       // prettier-ignore
       ancestorRulesData: [
         `body {`,
@@ -138,7 +145,7 @@ add_task(async function () {
   checkRuleViewContent(view, [
     { selector: "element", ancestorRulesData: null, declarations: [] },
     {
-      selector: `[href]`,
+      selector: `& [href]`,
       ancestorRulesData: [
         `body {`,
         `  @media screen {`,
@@ -165,7 +172,7 @@ function checkRuleViewContent(view, expectedRules) {
 
     const ruleInView = rulesInView[i];
     const selector = ruleInView.querySelector(
-      ".ruleview-selectorcontainer"
+      ".ruleview-selectors-container"
     ).innerText;
     is(selector, expectedRule.selector, `Expected selector for ${selector}`);
 

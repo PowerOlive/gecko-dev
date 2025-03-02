@@ -9,11 +9,11 @@ impl<T: VarULE + ?Sized> Bake for VarZeroVec<'_, T> {
     fn bake(&self, env: &CrateEnv) -> TokenStream {
         env.insert("zerovec");
         if self.is_empty() {
-            quote! { ::zerovec::VarZeroVec::new() }
+            quote! { zerovec::VarZeroVec::new() }
         } else {
             let bytes = databake::Bake::bake(&self.as_bytes(), env);
             // Safe because self.as_bytes is a safe input
-            quote! { unsafe { ::zerovec::VarZeroVec::from_bytes_unchecked(#bytes) } }
+            quote! { unsafe { zerovec::VarZeroVec::from_bytes_unchecked(#bytes) } }
         }
     }
 }
@@ -22,11 +22,11 @@ impl<T: VarULE + ?Sized> Bake for &VarZeroSlice<T> {
     fn bake(&self, env: &CrateEnv) -> TokenStream {
         env.insert("zerovec");
         if self.is_empty() {
-            quote! { ::zerovec::VarZeroSlice::new_empty() }
+            quote! { zerovec::VarZeroSlice::new_empty() }
         } else {
             let bytes = databake::Bake::bake(&self.as_bytes(), env);
             // Safe because self.as_bytes is a safe input
-            quote! { unsafe { ::zerovec::VarZeroSlice::from_bytes_unchecked(#bytes) } }
+            quote! { unsafe { zerovec::VarZeroSlice::from_bytes_unchecked(#bytes) } }
         }
     }
 }
@@ -38,11 +38,12 @@ fn test_baked_vec() {
         const: crate::VarZeroVec::new(),
         zerovec
     );
+
     test_bake!(
         VarZeroVec<str>,
         const: unsafe {
             crate::VarZeroVec::from_bytes_unchecked(
-                b"\x02\x01\0\x16\0M\x01\\\x11"
+                b"\x02\0\0\0\0\0\x05\0helloworld"
             )
         },
         zerovec
@@ -60,7 +61,7 @@ fn test_baked_slice() {
         &VarZeroSlice<str>,
         const: unsafe {
             crate::VarZeroSlice::from_bytes_unchecked(
-                b"\x02\x01\0\x16\0M\x01\\\x11"
+                b"\x02\0\0\0\0\0\x05\0helloworld"
             )
         },
         zerovec

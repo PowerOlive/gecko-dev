@@ -98,7 +98,7 @@ Bookmarks.prototype = {
       let rows = await MigrationUtils.getRowsFromDBWithoutLocks(
         dbPath,
         "Safari favicons",
-        `SELECT I.uuid, I.url AS favicon_url, P.url 
+        `SELECT I.uuid, I.url AS favicon_url, P.url
         FROM icon_info I
         INNER JOIN page_url P ON I.uuid = P.uuid;`
       );
@@ -106,7 +106,7 @@ Bookmarks.prototype = {
       if (rows) {
         // Convert the rows from our SQLite database into a map from bookmark url to uuid
         for (let row of rows) {
-          let uniqueURL = Services.io.newURI(row.getResultByName("url")).spec;
+          let uniqueURL = new URL(row.getResultByName("url")).href;
 
           // Normalize the URL by removing any trailing slashes. We'll make sure to do
           // the same when doing look-ups during a migration.
@@ -207,7 +207,7 @@ Bookmarks.prototype = {
         // They are imported under their own folder, created either under the
         // bookmarks menu (in the case of startup migration).
         let readingListTitle = await MigrationUtils.getLocalizedString(
-          "imported-safari-reading-list"
+          "migration-imported-safari-reading-list"
         );
         folderGuid = (
           await MigrationUtils.insertBookmarkWrapper({
@@ -253,7 +253,7 @@ Bookmarks.prototype = {
       parentGuid
     );
 
-    MigrationUtils.insertManyFavicons(favicons);
+    MigrationUtils.insertManyFavicons(favicons).catch(console.error);
   },
 
   /**
@@ -292,12 +292,9 @@ Bookmarks.prototype = {
       } else if (type == "WebBookmarkTypeLeaf" && entry.has("URLString")) {
         // Check we understand this URL before adding it:
         let url = entry.get("URLString");
-        try {
-          new URL(url);
-        } catch (ex) {
+        if (!URL.canParse(url)) {
           console.error(
-            `Ignoring ${url} when importing from Safari because of exception:`,
-            ex
+            `Ignoring ${url} when importing from Safari because it is not a valid URL.`
           );
           continue;
         }
@@ -425,16 +422,20 @@ async function GetHistoryResource() {
 
       let pageInfos = [];
       for (let row of historyRows) {
-        pageInfos.push({
-          title: row.getResultByName("history_title"),
-          url: new URL(row.getResultByName("history_url")),
-          visits: [
-            {
-              transition: lazy.PlacesUtils.history.TRANSITIONS.TYPED,
-              date: parseNSDate(row.getResultByName("history_time")),
-            },
-          ],
-        });
+        try {
+          pageInfos.push({
+            title: row.getResultByName("history_title"),
+            url: new URL(row.getResultByName("history_url")),
+            visits: [
+              {
+                transition: lazy.PlacesUtils.history.TRANSITIONS.TYPED,
+                date: parseNSDate(row.getResultByName("history_time")),
+              },
+            ],
+          });
+        } catch (e) {
+          console.error("Could not create a history row: ", e);
+        }
       }
       await MigrationUtils.insertVisitsWrapper(pageInfos);
 
@@ -628,7 +629,7 @@ export class SafariProfileMigrator extends MigratorBase {
     while (!(await this.hasPermissions())) {
       let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
       // The title (second arg) is not displayed on macOS, so leave it blank.
-      fp.init(win, "", Ci.nsIFilePicker.modeGetFolder);
+      fp.init(win?.browsingContext, "", Ci.nsIFilePicker.modeGetFolder);
       fp.filterIndex = 1;
       fp.displayDirectory = FileUtils.getDir("ULibDir", [""]);
       // Now wait for the filepicker to open and close. If the user picks
@@ -642,6 +643,16 @@ export class SafariProfileMigrator extends MigratorBase {
       }
     }
     return true;
+  }
+
+  async canGetPermissions() {
+    if (await MigrationUtils.canGetPermissionsOnPlatform()) {
+      const profileDir = FileUtils.getDir("ULibDir", ["Safari"]);
+      if (await IOUtils.exists(profileDir.path)) {
+        return profileDir.path;
+      }
+    }
+    return false;
   }
 
   get mainPreferencesPropertyList() {

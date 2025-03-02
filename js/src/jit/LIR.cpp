@@ -11,6 +11,7 @@
 #include <type_traits>
 
 #include "jit/JitSpewer.h"
+#include "jit/MIR-wasm.h"
 #include "jit/MIR.h"
 #include "jit/MIRGenerator.h"
 #include "js/Printf.h"
@@ -26,8 +27,7 @@ const char* const js::jit::LIROpNames[] = {
 };
 
 LIRGraph::LIRGraph(MIRGraph* mir)
-    : blocks_(),
-      constantPool_(mir->alloc()),
+    : constantPool_(mir->alloc()),
       constantPoolMap_(mir->alloc()),
       safepoints_(mir->alloc()),
       nonCallSafepoints_(mir->alloc()),
@@ -35,6 +35,7 @@ LIRGraph::LIRGraph(MIRGraph* mir)
       numInstructions_(1),  // First id is 1.
       localSlotsSize_(0),
       argumentSlotCount_(0),
+      extraSafepointUses_(0),
       mir_(*mir) {}
 
 bool LIRGraph::addConstantToPool(const Value& v, uint32_t* index) {
@@ -72,7 +73,7 @@ void LIRGraph::dump() {
 #endif
 
 LBlock::LBlock(MBasicBlock* from)
-    : block_(from), phis_(), entryMoveGroup_(nullptr), exitMoveGroup_(nullptr) {
+    : block_(from), entryMoveGroup_(nullptr), exitMoveGroup_(nullptr) {
   from->assignLir(this);
 }
 
@@ -250,6 +251,9 @@ bool LRecoverInfo::appendDefinition(MDefinition* def) {
 
 bool LRecoverInfo::appendResumePoint(MResumePoint* rp) {
   // Stores should be recovered first.
+  if (!rp->storesEmpty()) {
+    hasSideEffects_ = true;
+  }
   for (auto iter(rp->storesBegin()), end(rp->storesEnd()); iter != end;
        ++iter) {
     if (!appendDefinition(iter->operand)) {
@@ -454,12 +458,12 @@ UniqueChars LAllocation::toString() const {
             break;
           case MIRType::String:
             // If a JSContext is a available, output the actual string
-            if (JSContext* maybeCx = TlsContext.get()) {
-              Sprinter spr(maybeCx);
+            if (JSContext* cx = TlsContext.get()) {
+              Sprinter spr(cx);
               if (!spr.init()) {
                 oomUnsafe.crash("LAllocation::toString()");
               }
-              spr.putString(c->toString());
+              spr.putString(cx, c->toString());
               buf = spr.release();
             } else {
               buf = JS_smprintf("string");
@@ -490,7 +494,8 @@ UniqueChars LAllocation::toString() const {
         buf = JS_smprintf("%s", toFloatReg()->reg().name());
         break;
       case LAllocation::STACK_SLOT:
-        buf = JS_smprintf("stack:%u", toStackSlot()->slot());
+        buf = JS_smprintf("stack:%u(%u)", toStackSlot()->slot(),
+                          LStackSlot::ByteWidth(toStackSlot()->width()));
         break;
       case LAllocation::ARGUMENT_SLOT:
         buf = JS_smprintf("arg:%u", toArgument()->index());
@@ -651,7 +656,7 @@ void LNode::dump(GenericPrinter& out) {
       out.printf(" s=(");
       for (size_t i = 0; i < numSuccessors; i++) {
         MBasicBlock* succ = GetSuccessor(ins, i);
-        out.printf("block%u", succ->id());
+        out.printf("block %u", succ->id());
         if (i != numSuccessors - 1) {
           out.printf(", ");
         }

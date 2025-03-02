@@ -27,9 +27,6 @@ class JS_PUBLIC_API ContextOptions {
         wasmVerbose_(false),
         wasmBaseline_(true),
         wasmIon_(true),
-#define WASM_FEATURE(NAME, LOWER_NAME, STAGE, ...) wasm##NAME##_(STAGE == WasmFeatureStage::Default),
-        JS_FOR_WASM_FEATURES(WASM_FEATURE)
-#undef WASM_FEATURE
         testWasmAwaitTier2_(false),
         disableIon_(false),
         disableEvalSecurityChecks_(false),
@@ -37,10 +34,6 @@ class JS_PUBLIC_API ContextOptions {
         asyncStackCaptureDebuggeeOnly_(false),
         throwOnDebuggeeWouldRun_(true),
         dumpStackOnDebuggeeWouldRun_(false),
-#ifdef JS_ENABLE_SMOOSH
-        trackNotImplemented_(false),
-        trySmoosh_(false),
-#endif
         fuzzing_(false) {
   }
   // clang-format on
@@ -98,15 +91,6 @@ class JS_PUBLIC_API ContextOptions {
     return *this;
   }
 
-#define WASM_FEATURE(NAME, ...)                     \
-  bool wasm##NAME() const { return wasm##NAME##_; } \
-  ContextOptions& setWasm##NAME(bool flag) {        \
-    wasm##NAME##_ = flag;                           \
-    return *this;                                   \
-  }
-  JS_FOR_WASM_FEATURES(WASM_FEATURE)
-#undef WASM_FEATURE
-
   bool throwOnAsmJSValidationFailure() const {
     return compileOptions_.throwOnAsmJSValidationFailure();
   }
@@ -128,9 +112,9 @@ class JS_PUBLIC_API ContextOptions {
     return *this;
   }
 
-  bool importAssertions() const { return compileOptions_.importAssertions(); }
-  ContextOptions& setImportAssertions(bool enabled) {
-    compileOptions_.setImportAssertions(enabled);
+  bool importAttributes() const { return compileOptions_.importAttributes(); }
+  ContextOptions& setImportAttributes(bool enabled) {
+    compileOptions_.setImportAttributes(enabled);
     return *this;
   }
 
@@ -177,24 +161,6 @@ class JS_PUBLIC_API ContextOptions {
     return *this;
   }
 
-#ifdef JS_ENABLE_SMOOSH
-  // Track Number of Not Implemented Calls by writing to a file
-  bool trackNotImplemented() const { return trackNotImplemented_; }
-  ContextOptions& setTrackNotImplemented(bool flag) {
-    trackNotImplemented_ = flag;
-    return *this;
-  }
-
-  // Try compiling SmooshMonkey frontend first, and fallback to C++
-  // implementation when it fails.
-  bool trySmoosh() const { return trySmoosh_; }
-  ContextOptions& setTrySmoosh(bool flag) {
-    trySmoosh_ = flag;
-    return *this;
-  }
-
-#endif  // JS_ENABLE_SMOOSH
-
   bool fuzzing() const { return fuzzing_; }
   // Defined out-of-line because it depends on a compile-time option
   ContextOptions& setFuzzing(bool flag);
@@ -216,9 +182,6 @@ class JS_PUBLIC_API ContextOptions {
   bool wasmVerbose_ : 1;
   bool wasmBaseline_ : 1;
   bool wasmIon_ : 1;
-#define WASM_FEATURE(NAME, ...) bool wasm##NAME##_ : 1;
-  JS_FOR_WASM_FEATURES(WASM_FEATURE)
-#undef WASM_FEATURE
   bool testWasmAwaitTier2_ : 1;
 
   // JIT options.
@@ -230,10 +193,6 @@ class JS_PUBLIC_API ContextOptions {
   bool asyncStackCaptureDebuggeeOnly_ : 1;
   bool throwOnDebuggeeWouldRun_ : 1;
   bool dumpStackOnDebuggeeWouldRun_ : 1;
-#ifdef JS_ENABLE_SMOOSH
-  bool trackNotImplemented_ : 1;
-  bool trySmoosh_ : 1;
-#endif
   bool fuzzing_ : 1;
 
   // Compile options.

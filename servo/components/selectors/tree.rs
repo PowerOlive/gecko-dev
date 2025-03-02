@@ -17,6 +17,9 @@ use std::ptr::NonNull;
 pub struct OpaqueElement(NonNull<()>);
 
 unsafe impl Send for OpaqueElement {}
+// This should be safe given that we do not provide a way to recover
+// the original reference.
+unsafe impl Sync for OpaqueElement {}
 
 impl OpaqueElement {
     /// Creates a new OpaqueElement from an arbitrarily-typed pointer.
@@ -26,6 +29,17 @@ impl OpaqueElement {
                 ptr as *const T as *const () as *mut (),
             ))
         }
+    }
+
+    /// Creates a new OpaqueElement from a type-erased non-null pointer
+    pub fn from_non_null_ptr(ptr: NonNull<()>) -> Self {
+        Self(ptr)
+    }
+
+    /// Returns a const ptr to the contained reference. Unsafe especially
+    /// since Element can be recovered and potentially-mutated.
+    pub unsafe fn as_const_ptr<T>(&self) -> *const T {
+        self.0.as_ptr() as *const T
     }
 }
 
@@ -132,6 +146,11 @@ pub trait Element: Sized + Clone + Debug {
         &self,
         name: &<Self::Impl as SelectorImpl>::Identifier,
         case_sensitivity: CaseSensitivity,
+    ) -> bool;
+
+    fn has_custom_state(
+        &self,
+        name: &<Self::Impl as SelectorImpl>::Identifier,
     ) -> bool;
 
     /// Returns the mapping from the `exportparts` attribute in the reverse

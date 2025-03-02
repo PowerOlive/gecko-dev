@@ -34,7 +34,12 @@ MARKUPMAP(address, New_HyperText, roles::GROUPING)
 
 MARKUPMAP(article, New_HyperText, roles::ARTICLE, Attr(xmlroles, article))
 
-MARKUPMAP(aside, New_HyperText, roles::LANDMARK)
+MARKUPMAP(
+    aside,
+    [](Element* aElement, LocalAccessible* aContext) -> LocalAccessible* {
+      return new HTMLAsideAccessible(aElement, aContext->Document());
+    },
+    0)
 
 MARKUPMAP(blockquote, New_HyperText, roles::BLOCKQUOTE)
 
@@ -67,6 +72,8 @@ MARKUPMAP(dd, New_HTMLDtOrDd<HyperTextAccessible>, roles::DEFINITION)
 MARKUPMAP(del, New_HyperText, roles::CONTENT_DELETION)
 
 MARKUPMAP(details, New_HyperText, roles::DETAILS)
+
+MARKUPMAP(dfn, New_HyperText, roles::TERM)
 
 MARKUPMAP(dialog, New_HyperText, roles::DIALOG)
 
@@ -153,6 +160,8 @@ MARKUPMAP(
 
 MARKUPMAP(dt, New_HTMLDtOrDd<HTMLLIAccessible>, roles::TERM)
 
+MARKUPMAP(em, New_HyperText, roles::EMPHASIS)
+
 MARKUPMAP(
     figcaption,
     [](Element* aElement, LocalAccessible* aContext) -> LocalAccessible* {
@@ -206,6 +215,8 @@ MARKUPMAP(h4, New_HyperText, roles::HEADING)
 MARKUPMAP(h5, New_HyperText, roles::HEADING)
 
 MARKUPMAP(h6, New_HyperText, roles::HEADING)
+
+MARKUPMAP(hgroup, New_HyperText, roles::GROUPING)
 
 MARKUPMAP(
     hr,
@@ -342,6 +353,8 @@ MARKUPMAP(
     },
     0)
 
+MARKUPMAP(strong, New_HyperText, roles::STRONG)
+
 MARKUPMAP(sub, New_HyperText, roles::SUBSCRIPT)
 
 MARKUPMAP(
@@ -360,10 +373,10 @@ MARKUPMAP(
     },
     roles::TABLE)
 
-MARKUPMAP(time, New_HyperText, 0, Attr(xmlroles, time),
+MARKUPMAP(time, New_HyperText, roles::TIME, Attr(xmlroles, time),
           AttrFromDOM(datetime, datetime))
 
-MARKUPMAP(tbody, nullptr, roles::GROUPING)
+MARKUPMAP(tbody, nullptr, roles::ROWGROUP)
 
 MARKUPMAP(
     td,
@@ -379,7 +392,7 @@ MARKUPMAP(
     },
     0)
 
-MARKUPMAP(tfoot, nullptr, roles::GROUPING)
+MARKUPMAP(tfoot, nullptr, roles::ROWGROUP)
 
 MARKUPMAP(
     th,
@@ -391,13 +404,20 @@ MARKUPMAP(
     },
     0)
 
-MARKUPMAP(thead, nullptr, roles::GROUPING)
+MARKUPMAP(thead, nullptr, roles::ROWGROUP)
 
 MARKUPMAP(
     tr,
     [](Element* aElement, LocalAccessible* aContext) -> LocalAccessible* {
       if (aContext->IsTableRow()) {
         // A <tr> within a row isn't valid.
+        return nullptr;
+      }
+      const nsRoleMapEntry* roleMapEntry = aria::GetRoleMap(aElement);
+      if (roleMapEntry && roleMapEntry->role != roles::NOTHING &&
+          roleMapEntry->role != roles::ROW) {
+        // There is a valid ARIA role which isn't "row". Don't treat this as an
+        // HTML table row.
         return nullptr;
       }
       // Check if this <tr> is within a table. We check the grandparent because

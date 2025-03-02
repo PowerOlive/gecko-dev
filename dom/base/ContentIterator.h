@@ -39,14 +39,17 @@ class ContentIteratorBase {
    * (https://dom.spec.whatwg.org/#concept-tree-inclusive-descendant) of
    * aRoot.
    */
-  virtual nsresult Init(nsINode* aRoot);
+  [[nodiscard]] virtual nsresult Init(nsINode* aRoot);
 
-  virtual nsresult Init(dom::AbstractRange* aRange);
-  virtual nsresult Init(nsINode* aStartContainer, uint32_t aStartOffset,
-                        nsINode* aEndContainer, uint32_t aEndOffset);
-  virtual nsresult Init(const RawRangeBoundary& aStart,
-                        const RawRangeBoundary& aEnd);
-
+  [[nodiscard]] virtual nsresult Init(dom::AbstractRange* aRange);
+  [[nodiscard]] virtual nsresult Init(nsINode* aStartContainer,
+                                      uint32_t aStartOffset,
+                                      nsINode* aEndContainer,
+                                      uint32_t aEndOffset);
+  [[nodiscard]] virtual nsresult Init(const RawRangeBoundary& aStart,
+                                      const RawRangeBoundary& aEnd);
+  [[nodiscard]] virtual nsresult InitWithoutValidatingPoints(
+      const RawRangeBoundary& aStart, const RawRangeBoundary& aEnd);
   virtual void First();
   virtual void Last();
   virtual void Next();
@@ -56,7 +59,7 @@ class ContentIteratorBase {
 
   bool IsDone() const { return !mCurNode; }
 
-  virtual nsresult PositionAt(nsINode* aCurNode);
+  [[nodiscard]] virtual nsresult PositionAt(nsINode* aCurNode);
 
  protected:
   enum class Order {
@@ -76,32 +79,43 @@ class ContentIteratorBase {
    * - aStartOffset and aEndOffset are valid for its container.
    * - The start point and the end point are in document order.
    */
-  nsresult InitInternal(const RawRangeBoundary& aStart,
-                        const RawRangeBoundary& aEnd);
+  [[nodiscard]] nsresult InitInternal(const RawRangeBoundary& aStart,
+                                      const RawRangeBoundary& aEnd);
 
   // Recursively get the deepest first/last child of aRoot.  This will return
   // aRoot itself if it has no children.
   static nsINode* GetDeepFirstChild(nsINode* aRoot);
-  static nsIContent* GetDeepFirstChild(nsIContent* aRoot);
+  // If aAllowCrossShadowBoundary is true, it'll continue with the shadow tree
+  // when it reaches to a shadow host.
+  static nsIContent* GetDeepFirstChild(nsIContent* aRoot,
+                                       bool aAllowCrossShadowBoundary);
   static nsINode* GetDeepLastChild(nsINode* aRoot);
-  static nsIContent* GetDeepLastChild(nsIContent* aRoot);
+  // If aAllowCrossShadowBoundary is true, it'll continue with the shadow tree
+  // when it reaches to a shadow host.
+  static nsIContent* GetDeepLastChild(nsIContent* aRoot,
+                                      bool aAllowCrossShadowBoundary);
 
   // Get the next/previous sibling of aNode, or its parent's, or grandparent's,
   // etc.  Returns null if aNode and all its ancestors have no next/previous
   // sibling.
-  static nsIContent* GetNextSibling(nsINode* aNode);
-  static nsIContent* GetPrevSibling(nsINode* aNode);
+  //
+  // If aAllowCrossShadowBoundary is true, it'll continue with the shadow host
+  // when it reaches to a shadow root.
+  static nsIContent* GetNextSibling(nsINode* aNode,
+                                    bool aAllowCrossShadowBoundary = false);
+  static nsIContent* GetPrevSibling(nsINode* aNode,
+                                    bool aAllowCrossShadowBoundary = false);
 
   nsINode* NextNode(nsINode* aNode);
   nsINode* PrevNode(nsINode* aNode);
 
   void SetEmpty();
 
-  NodeType mCurNode;
-  NodeType mFirst;
-  NodeType mLast;
+  NodeType mCurNode = nullptr;
+  NodeType mFirst = nullptr;
+  NodeType mLast = nullptr;
   // See <https://dom.spec.whatwg.org/#concept-tree-inclusive-ancestor>.
-  NodeType mClosestCommonInclusiveAncestor;
+  NodeType mClosestCommonInclusiveAncestor = nullptr;
 
   Maybe<nsMutationGuard> mMutationGuard;
   Maybe<JS::AutoAssertNoGC> mAssertNoGC;
@@ -116,12 +130,29 @@ class ContentIteratorBase {
   friend void ImplCycleCollectionUnlink(ContentIteratorBase<T>&);
 };
 
+// Each concrete class of ContentIteratorBase<RefPtr<nsINode>> may be owned by
+// another class which may be owned by JS.  Therefore, all of them should be in
+// the cycle collection.  However, we cannot make non-refcountable classes only
+// with the macros.  So, we need to make them cycle collectable without the
+// macros.
 template <typename NodeType>
-void ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback&,
-                                 ContentIteratorBase<NodeType>&, const char*,
-                                 uint32_t aFlags = 0);
+void ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback& aCallback,
+                                 ContentIteratorBase<NodeType>& aField,
+                                 const char* aName, uint32_t aFlags = 0) {
+  ImplCycleCollectionTraverse(aCallback, aField.mCurNode, aName, aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mFirst, aName, aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mLast, aName, aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mClosestCommonInclusiveAncestor,
+                              aName, aFlags);
+}
+
 template <typename NodeType>
-void ImplCycleCollectionUnlink(ContentIteratorBase<NodeType>&);
+void ImplCycleCollectionUnlink(ContentIteratorBase<NodeType>& aField) {
+  ImplCycleCollectionUnlink(aField.mCurNode);
+  ImplCycleCollectionUnlink(aField.mFirst);
+  ImplCycleCollectionUnlink(aField.mLast);
+  ImplCycleCollectionUnlink(aField.mClosestCommonInclusiveAncestor);
+}
 
 using SafeContentIteratorBase = ContentIteratorBase<RefPtr<nsINode>>;
 using UnsafeContentIteratorBase = ContentIteratorBase<nsINode*>;
@@ -199,13 +230,40 @@ class ContentSubtreeIterator final : public SafeContentIteratorBase {
   /**
    * Not supported.
    */
-  virtual nsresult Init(nsINode* aRoot) override;
+  [[nodiscard]] virtual nsresult Init(nsINode* aRoot) override;
 
-  virtual nsresult Init(dom::AbstractRange* aRange) override;
-  virtual nsresult Init(nsINode* aStartContainer, uint32_t aStartOffset,
-                        nsINode* aEndContainer, uint32_t aEndOffset) override;
-  virtual nsresult Init(const RawRangeBoundary& aStartBoundary,
-                        const RawRangeBoundary& aEndBoundary) override;
+  [[nodiscard]] virtual nsresult Init(dom::AbstractRange* aRange) override;
+
+  /**
+   * Initialize the iterator with aRange that does correct things
+   * when the aRange's start and/or the end containers are
+   * in shadow dom.
+   *
+   * If both start and end containers are in light dom, the iterator
+   * won't do anything special.
+   *
+   * When the start container is in shadow dom, the iterator can
+   * find the correct start node by crossing the shadow
+   * boundary when needed.
+   *
+   * When the end container is in shadow dom, the iterator can find
+   * the correct end node by crossing the shadow boundary when
+   * needed. Also when the next node is an ancestor of
+   * the end node, it can correctly iterate into the
+   * subtree of it by crossing the shadow boundary.
+   *
+   * Examples of what nodes will be returned can be found
+   * at test_content_iterator_subtree_shadow_tree.html.
+   */
+  [[nodiscard]] nsresult InitWithAllowCrossShadowBoundary(
+      dom::AbstractRange* aRange);
+  [[nodiscard]] virtual nsresult Init(nsINode* aStartContainer,
+                                      uint32_t aStartOffset,
+                                      nsINode* aEndContainer,
+                                      uint32_t aEndOffset) override;
+  [[nodiscard]] virtual nsresult Init(
+      const RawRangeBoundary& aStartBoundary,
+      const RawRangeBoundary& aEndBoundary) override;
 
   void Next() override;
   void Prev() override;
@@ -214,7 +272,7 @@ class ContentSubtreeIterator final : public SafeContentIteratorBase {
   // Must override these because we don't do PositionAt
   void Last() override;
 
-  nsresult PositionAt(nsINode* aCurNode) override;
+  [[nodiscard]] nsresult PositionAt(nsINode* aCurNode) override;
 
   friend void ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback&,
                                           ContentSubtreeIterator&, const char*,
@@ -250,7 +308,7 @@ class ContentSubtreeIterator final : public SafeContentIteratorBase {
   /**
    * Callers must guarantee that mRange isn't nullptr and is positioned.
    */
-  nsresult InitWithRange();
+  [[nodiscard]] nsresult InitWithRange();
 
   // Returns the highest inclusive ancestor of aNode that's in the range
   // (possibly aNode itself).  Returns null if aNode is null, or is not itself
@@ -259,10 +317,18 @@ class ContentSubtreeIterator final : public SafeContentIteratorBase {
   // the range's start and end nodes will never be considered "in" it.
   nsIContent* GetTopAncestorInRange(nsINode* aNode) const;
 
+  bool IterAllowCrossShadowBoundary() const {
+    return mAllowCrossShadowBoundary == dom::AllowRangeCrossShadowBoundary::Yes;
+  }
+
   RefPtr<dom::AbstractRange> mRange;
 
   // See <https://dom.spec.whatwg.org/#concept-tree-inclusive-ancestor>.
   AutoTArray<nsIContent*, 8> mInclusiveAncestorsOfEndContainer;
+
+  // Whether this iterator allows to iterate nodes across shadow boundary.
+  dom::AllowRangeCrossShadowBoundary mAllowCrossShadowBoundary =
+      dom::AllowRangeCrossShadowBoundary::No;
 };
 
 }  // namespace mozilla

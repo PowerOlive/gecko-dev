@@ -27,7 +27,6 @@ interface nsINotificationStorageCallback : nsISupports
               in AString tag,
               in AString icon,
               in AString data,
-              in AString behavior,
               in AString serviceWorkerRegistrationScope);
 
   /**
@@ -68,25 +67,28 @@ interface nsINotificationStorage : nsISupports
   void put(in AString origin,
            in AString id,
            in AString title,
-           in AString dir,
+           in ACString dir,
            in AString lang,
            in AString body,
            in AString tag,
            in AString icon,
-           in AString alertName,
            in AString data,
-           in AString behavior,
            in AString serviceWorkerRegistrationScope);
 
   /**
    * Retrieve a list of notifications.
    *
    * @param origin: the origin/app for which to fetch notifications from
+   * @param scope: Used to limit for the specific scope.
+   *               Pass an empty string for unscoped notifications.
+   *               (See bug 1881812 for potential spec changes to how notifications
+   *               are associated with ServiceWorker registrations.)
    * @param tag: used to fetch only a specific tag
    * @param callback: nsINotificationStorageCallback, used for
    *                  returning notifications objects
    */
   void get(in AString origin,
+           in AString scope,
            in AString tag,
            in nsINotificationStorageCallback aCallback);
 
@@ -102,4 +104,8 @@ interface nsINotificationStorage : nsISupports
 
 %{C++
 #define NS_NOTIFICATION_STORAGE_CONTRACTID "@mozilla.org/notificationStorage;1"
+%}
+
+%{C++
+#define NS_MEMORY_NOTIFICATION_STORAGE_CONTRACTID "@mozilla.org/memoryNotificationStorage;1"
 %}

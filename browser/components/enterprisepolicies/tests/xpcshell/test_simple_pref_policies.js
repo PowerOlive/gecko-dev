@@ -227,6 +227,11 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.sessions": true,
       "privacy.clearOnShutdown.siteSettings": true,
       "privacy.clearOnShutdown.offlineApps": true,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": true,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": true,
+      "privacy.clearOnShutdown_v2.cache": true,
+      "privacy.clearOnShutdown_v2.siteSettings": true,
+      "privacy.clearOnShutdown_v2.formdata": true,
     },
   },
 
@@ -244,6 +249,11 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.sessions": false,
       "privacy.clearOnShutdown.siteSettings": false,
       "privacy.clearOnShutdown.offlineApps": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.siteSettings": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -261,6 +271,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": true,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -278,6 +292,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": true,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -295,6 +313,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -312,6 +334,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": true,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.formdata": true,
     },
   },
 
@@ -329,6 +355,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": true,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": true,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -346,6 +376,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": true,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -364,6 +398,11 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
       "privacy.clearOnShutdown.siteSettings": true,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
+      "privacy.clearOnShutdown_v2.siteSettings": true,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -382,6 +421,9 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
       "privacy.clearOnShutdown.offlineApps": true,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": false,
     },
   },
 
@@ -396,6 +438,7 @@ const POLICIES_TESTS = [
     lockedPrefs: {
       "privacy.sanitize.sanitizeOnShutdown": true,
       "privacy.clearOnShutdown.cache": true,
+      "privacy.clearOnShutdown_v2.cache": true,
     },
     unlockedPrefs: {
       "privacy.clearOnShutdown.cookies": false,
@@ -403,6 +446,9 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -418,12 +464,16 @@ const POLICIES_TESTS = [
       "privacy.sanitize.sanitizeOnShutdown": true,
       "privacy.clearOnShutdown.cache": true,
       "privacy.clearOnShutdown.cookies": false,
+      "privacy.clearOnShutdown_v2.cache": true,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
     },
     unlockedPrefs: {
       "privacy.clearOnShutdown.downloads": false,
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -442,6 +492,10 @@ const POLICIES_TESTS = [
       "privacy.clearOnShutdown.formdata": false,
       "privacy.clearOnShutdown.history": false,
       "privacy.clearOnShutdown.sessions": false,
+      "privacy.clearOnShutdown_v2.browsingHistoryAndDownloads": false,
+      "privacy.clearOnShutdown_v2.cookiesAndStorage": false,
+      "privacy.clearOnShutdown_v2.cache": true,
+      "privacy.clearOnShutdown_v2.formdata": false,
     },
   },
 
@@ -458,6 +512,19 @@ const POLICIES_TESTS = [
       "network.trr.mode": 5,
       "network.trr.uri": "https://example.com/provider",
       "network.trr.excluded-domains": "example.com,example.org",
+    },
+  },
+
+  // POLICY: DNSOverHTTPS Fallback off
+  {
+    policies: {
+      DNSOverHTTPS: {
+        Enabled: true,
+        Fallback: false,
+      },
+    },
+    unlockedPrefs: {
+      "network.trr.mode": 3,
     },
   },
 
@@ -570,12 +637,10 @@ const POLICIES_TESTS = [
     policies: {
       FirefoxHome: {
         Pocket: false,
-        Snippets: false,
         Locked: true,
       },
     },
     lockedPrefs: {
-      "browser.newtabpage.activity-stream.feeds.snippets": false,
       "browser.newtabpage.activity-stream.feeds.system.topstories": false,
     },
   },
@@ -604,13 +669,11 @@ const POLICIES_TESTS = [
   {
     policies: {
       UserMessaging: {
-        WhatsNew: false,
         SkipOnboarding: true,
         Locked: true,
       },
     },
     lockedPrefs: {
-      "browser.messaging-system.whatsNewPanel.enabled": false,
       "browser.aboutwelcome.enabled": false,
     },
   },
@@ -1019,6 +1082,81 @@ const POLICIES_TESTS = [
     lockedPrefs: {
       "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons": true,
       "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features": true,
+    },
+  },
+
+  // POLICY: AutofillAddressEnabled, AutofillCreditCardEnabled
+
+  {
+    policies: {
+      AutofillAddressEnabled: false,
+      AutofillCreditCardEnabled: false,
+    },
+    lockedPrefs: {
+      "extensions.formautofill.addresses.enabled": false,
+      "extensions.formautofill.creditCards.enabled": false,
+    },
+  },
+
+  // POLICY: Proxy - locking if no values are set
+  {
+    policies: {
+      Proxy: {
+        Locked: true,
+      },
+    },
+    lockedPrefs: {
+      "network.proxy.type": 5,
+    },
+  },
+
+  // POLICY: DisableEncryptedClientHello
+  {
+    policies: {
+      DisableEncryptedClientHello: true,
+    },
+    lockedPrefs: {
+      "network.dns.echconfig.enabled": false,
+      "network.dns.http3_echconfig.enabled": false,
+    },
+  },
+
+  // POLICY: PostQuantumKeyAgreementEnabled
+  {
+    policies: {
+      PostQuantumKeyAgreementEnabled: false,
+    },
+    lockedPrefs: {
+      "network.http.http3.enable_kyber": false,
+      "security.tls.enable_kyber": false,
+    },
+  },
+
+  // POLICY: HttpsOnlyMode
+  {
+    policies: {
+      HttpsOnlyMode: "enabled",
+    },
+    unlockedPrefs: {
+      "dom.security.https_only_mode": true,
+    },
+  },
+
+  {
+    policies: {
+      HttpsOnlyMode: "disallowed",
+    },
+    lockedPrefs: {
+      "dom.security.https_only_mode": false,
+    },
+  },
+
+  {
+    policies: {
+      HttpsOnlyMode: "force_enabled",
+    },
+    lockedPrefs: {
+      "dom.security.https_only_mode": true,
     },
   },
 ];

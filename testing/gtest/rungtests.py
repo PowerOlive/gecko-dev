@@ -12,16 +12,24 @@ import mozcrash
 import mozinfo
 import mozlog
 import mozprocess
+from mozfile import load_source
 from mozrunner.utils import get_stack_fixer_function
+
+HERE = os.path.abspath(os.path.dirname(__file__))
 
 log = mozlog.unstructured.getLogger("gtest")
 
 
 class GTests(object):
-    # Time (seconds) to wait for test process to complete
-    TEST_PROC_TIMEOUT = 2400
     # Time (seconds) in which process will be killed if it produces no output.
     TEST_PROC_NO_OUTPUT_TIMEOUT = 300
+
+    def gtest_timeout_value(self):
+        # Time (seconds) to wait for test process to complete
+        if mozinfo.info["tsan"]:
+            return 3600
+        else:
+            return 2400
 
     def run_gtest(
         self,
@@ -30,6 +38,8 @@ class GTests(object):
         cwd,
         symbols_path=None,
         utility_path=None,
+        enable_inc_origin_init=False,
+        filter_set=None,
     ):
         """
         Run a single C++ unit test program.
@@ -48,7 +58,7 @@ class GTests(object):
         Return True if the program exits with a zero status, False otherwise.
         """
         self.xre_path = xre_path
-        env = self.build_environment()
+        env = self.build_environment(enable_inc_origin_init, filter_set)
         log.info("Running gtest")
 
         if cwd and not os.path.isdir(cwd):
@@ -68,7 +78,9 @@ class GTests(object):
 
         def proc_timeout_handler(proc):
             GTests.run_gtest.timed_out = True
-            log.testFail("gtest | timed out after %d seconds", GTests.TEST_PROC_TIMEOUT)
+            log.testFail(
+                "gtest | timed out after %d seconds", self.gtest_timeout_value()
+            )
             mozcrash.kill_and_get_minidump(proc.pid, cwd, utility_path)
 
         def output_timeout_handler(proc):
@@ -84,7 +96,7 @@ class GTests(object):
             cwd=cwd,
             env=env,
             output_line_handler=output_line_handler,
-            timeout=GTests.TEST_PROC_TIMEOUT,
+            timeout=self.gtest_timeout_value(),
             timeout_handler=proc_timeout_handler,
             output_timeout=GTests.TEST_PROC_NO_OUTPUT_TIMEOUT,
             output_timeout_handler=output_timeout_handler,
@@ -127,7 +139,7 @@ class GTests(object):
 
         return env
 
-    def build_environment(self):
+    def build_environment(self, enable_inc_origin_init, filter_set):
         """
         Create and return a dictionary of all the appropriate env variables
         and values. On a remote system, we overload this to set different
@@ -178,6 +190,24 @@ class GTests(object):
         env["MOZ_WEBRENDER"] = "1"
         env["MOZ_ACCELERATED"] = "1"
 
+        if enable_inc_origin_init:
+            env["MOZ_ENABLE_INC_ORIGIN_INIT"] = "1"
+        else:
+            env["MOZ_ENABLE_INC_ORIGIN_INIT"] = "0"
+
+        if filter_set is not None:
+            filter_sets_mod_path = os.path.join(HERE, "gtest_filter_sets.py")
+            load_source("gtest_filter_sets", filter_sets_mod_path)
+
+            import gtest_filter_sets
+
+            gtest_filter_for_filter_set = gtest_filter_sets.get(filter_set)
+            if gtest_filter_for_filter_set:
+                env["GTEST_FILTER"] = gtest_filter_for_filter_set
+                log.info("Using gtest filter for %s", filter_set)
+            else:
+                log.info("Failed to get gtest filter for %s", filter_set)
+
         return env
 
 
@@ -210,6 +240,19 @@ class gtestOptions(argparse.ArgumentParser):
             dest="utility_path",
             default=None,
             help="path to a directory containing utility program binaries",
+        )
+        self.add_argument(
+            "--enable-inc-origin-init",
+            action="store_true",
+            dest="enable_inc_origin_init",
+            default=False,
+            help="enabling of incremental origin initialization in Gecko",
+        )
+        self.add_argument(
+            "--filter-set",
+            dest="filter_set",
+            default=None,
+            help="predefined gtest filter",
         )
         self.add_argument("args", nargs=argparse.REMAINDER)
 
@@ -250,6 +293,8 @@ def main():
             options.cwd,
             symbols_path=options.symbols_path,
             utility_path=options.utility_path,
+            enable_inc_origin_init=options.enable_inc_origin_init,
+            filter_set=options.filter_set,
         )
     except Exception as e:
         log.error(str(e))

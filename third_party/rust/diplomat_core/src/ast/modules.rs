@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 use quote::ToTokens;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use syn::{ImplItem, Item, ItemMod, UseTree, Visibility};
 
 use super::{
-    attrs, CustomType, Enum, Ident, Method, ModSymbol, Mutability, OpaqueStruct, Path, PathType,
-    RustLink, Struct, ValidityError,
+    AttrInheritContext, Attrs, CustomType, Enum, Ident, Method, ModSymbol, Mutability,
+    OpaqueStruct, Path, PathType, RustLink, Struct,
 };
 use crate::environment::*;
 
@@ -59,25 +59,17 @@ impl DiplomatStructAttribute {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
+#[non_exhaustive]
 pub struct Module {
     pub name: Ident,
     pub imports: Vec<(Path, Ident)>,
     pub declared_types: BTreeMap<Ident, CustomType>,
     pub sub_modules: Vec<Module>,
+    pub attrs: Attrs,
 }
 
 impl Module {
-    pub fn check_validity(&self, in_path: &Path, env: &Env, errors: &mut Vec<ValidityError>) {
-        self.declared_types.values().for_each(|t| {
-            t.check_validity(&in_path.sub_path(self.name.clone()), env, errors);
-        });
-
-        self.sub_modules.iter().for_each(|t| {
-            t.check_validity(&in_path.sub_path(self.name.clone()), env, errors);
-        });
-    }
-
     pub fn all_rust_links(&self) -> HashSet<&RustLink> {
         let mut rust_links = self
             .declared_types
@@ -92,7 +84,7 @@ impl Module {
     }
 
     pub fn insert_all_types(&self, in_path: Path, out: &mut Env) {
-        let mut mod_symbols = ModuleEnv::default();
+        let mut mod_symbols = ModuleEnv::new(self.attrs.clone());
 
         self.imports.iter().for_each(|(path, name)| {
             mod_symbols.insert(name.clone(), ModSymbol::Alias(path.clone()));
@@ -127,6 +119,12 @@ impl Module {
                 .iter()
                 .any(|a| a.path().to_token_stream().to_string() == "diplomat :: bridge");
 
+        let mod_attrs: Attrs = (&*input.attrs).into();
+
+        let impl_parent_attrs: Attrs =
+            mod_attrs.attrs_for_inheritance(AttrInheritContext::MethodOrImplFromModule);
+        let type_parent_attrs: Attrs = mod_attrs.attrs_for_inheritance(AttrInheritContext::Type);
+
         input
             .content
             .as_ref()
@@ -142,15 +140,15 @@ impl Module {
                 Item::Struct(strct) => {
                     if analyze_types {
                         let custom_type = match DiplomatStructAttribute::parse(&strct.attrs[..]) {
-                            Ok(None) => CustomType::Struct(Struct::new(strct, false)),
+                            Ok(None) => CustomType::Struct(Struct::new(strct, false, &type_parent_attrs)),
                             Ok(Some(DiplomatStructAttribute::Out)) => {
-                                CustomType::Struct(Struct::new(strct, true))
+                                CustomType::Struct(Struct::new(strct, true, &type_parent_attrs))
                             }
                             Ok(Some(DiplomatStructAttribute::Opaque)) => {
-                                CustomType::Opaque(OpaqueStruct::new(strct, Mutability::Immutable))
+                                CustomType::Opaque(OpaqueStruct::new(strct, Mutability::Immutable, &type_parent_attrs))
                             }
                             Ok(Some(DiplomatStructAttribute::OpaqueMut)) => {
-                                CustomType::Opaque(OpaqueStruct::new(strct, Mutability::Mutable))
+                                CustomType::Opaque(OpaqueStruct::new(strct, Mutability::Mutable, &type_parent_attrs))
                             }
                             Err(errors) => {
                                 panic!("Multiple conflicting Diplomat struct attributes, there can be at most one: {errors:?}");
@@ -163,8 +161,10 @@ impl Module {
 
                 Item::Enum(enm) => {
                     if analyze_types {
+                        let ident = (&enm.ident).into();
+                        let enm = Enum::new(enm, &type_parent_attrs);
                         custom_types_by_name
-                            .insert((&enm.ident).into(), CustomType::Enum(Enum::from(enm)));
+                            .insert(ident, CustomType::Enum(enm));
                     }
                 }
 
@@ -176,8 +176,9 @@ impl Module {
                             syn::Type::Path(s) => PathType::from(s),
                             _ => panic!("Self type not found"),
                         };
-                        let cfg_attrs: Vec<_> = attrs::extract_cfg_attrs(&imp.attrs).collect();
-
+                        let mut impl_attrs = impl_parent_attrs.clone();
+                        impl_attrs.add_attrs(&imp.attrs);
+                        let method_parent_attrs = impl_attrs.attrs_for_inheritance(AttrInheritContext::MethodFromImpl);
                         let mut new_methods = imp
                             .items
                             .iter()
@@ -186,7 +187,7 @@ impl Module {
                                 _ => None,
                             })
                             .filter(|m| matches!(m.vis, Visibility::Public(_)))
-                            .map(|m| Method::from_syn(m, self_path.clone(), Some(&imp.generics), &cfg_attrs))
+                            .map(|m| Method::from_syn(m, self_path.clone(), Some(&imp.generics), &method_parent_attrs))
                             .collect();
 
                         let self_ident = self_path.path.elements.last().unwrap();
@@ -215,6 +216,7 @@ impl Module {
             imports,
             declared_types: custom_types_by_name,
             sub_modules,
+            attrs: mod_attrs,
         }
     }
 }
@@ -242,27 +244,17 @@ fn extract_imports(base_path: &Path, use_tree: &UseTree, out: &mut Vec<(Path, Id
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
+#[non_exhaustive]
 pub struct File {
     pub modules: BTreeMap<String, Module>,
 }
 
 impl File {
-    /// Performs all necessary validity checks and returns any errors
-    ///
-    /// Environment should be passed in from `.all_types()`
-    pub fn check_validity(&self, env: &Env) -> Vec<ValidityError> {
-        let mut errors = vec![];
-        self.modules
-            .values()
-            .for_each(|t| t.check_validity(&Path::empty(), env, &mut errors));
-        errors
-    }
-
     /// Fuses all declared types into a single environment `HashMap`.
     pub fn all_types(&self) -> Env {
         let mut out = Env::default();
-        let mut top_symbols = ModuleEnv::default();
+        let mut top_symbols = ModuleEnv::new(Default::default());
 
         self.modules.values().for_each(|m| {
             m.insert_all_types(Path::empty(), &mut out);

@@ -10,17 +10,13 @@ use crate::values::computed::percentage::Percentage;
 use crate::values::generics::color::{
     GenericCaretColor, GenericColor, GenericColorMix, GenericColorOrAuto,
 };
-use cssparser::Color as CSSParserColor;
-use std::fmt;
+use std::fmt::{self, Write};
 use style_traits::{CssWriter, ToCss};
 
 pub use crate::values::specified::color::{ColorScheme, ForcedColorAdjust, PrintColorAdjust};
 
 /// The computed value of the `color` property.
 pub type ColorPropertyValue = AbsoluteColor;
-
-/// The computed value of `-moz-font-smoothing-background-color`.
-pub type MozFontSmoothingBackgroundColor = AbsoluteColor;
 
 /// A computed value for `<color>`.
 pub type Color = GenericColor<Percentage>;
@@ -35,7 +31,8 @@ impl ToCss for Color {
     {
         match *self {
             Self::Absolute(ref c) => c.to_css(dest),
-            Self::CurrentColor => cssparser::ToCss::to_css(&CSSParserColor::CurrentColor, dest),
+            Self::ColorFunction(ref color_function) => color_function.to_css(dest),
+            Self::CurrentColor => dest.write_str("currentcolor"),
             Self::ColorMix(ref m) => m.to_css(dest),
         }
     }
@@ -43,7 +40,7 @@ impl ToCss for Color {
 
 impl Color {
     /// A fully transparent color.
-    pub const TRANSPARENT: Self = Self::Absolute(AbsoluteColor::TRANSPARENT);
+    pub const TRANSPARENT_BLACK: Self = Self::Absolute(AbsoluteColor::TRANSPARENT_BLACK);
 
     /// An opaque black color.
     pub const BLACK: Self = Self::Absolute(AbsoluteColor::BLACK);
@@ -68,6 +65,9 @@ impl Color {
 
         match *self {
             Self::Absolute(c) => c,
+            Self::ColorFunction(ref color_function) => {
+                color_function.resolve_to_absolute(current_color)
+            },
             Self::CurrentColor => *current_color,
             Self::ColorMix(ref mix) => {
                 let left = mix.left.resolve_to_absolute(current_color);
@@ -87,7 +87,7 @@ impl Color {
 
 impl ToAnimatedZero for AbsoluteColor {
     fn to_animated_zero(&self) -> Result<Self, ()> {
-        Ok(Self::TRANSPARENT)
+        Ok(Self::TRANSPARENT_BLACK)
     }
 }
 

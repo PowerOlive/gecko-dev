@@ -3,76 +3,26 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 const BUNDLE_SRC =
-  "resource://activity-stream/aboutwelcome/aboutwelcome.bundle.js";
-const OPTIN_DEFAULT = {
-  id: "FAKESPOT_OPTIN_DEFAULT",
-  template: "multistage",
-  backdrop: "transparent",
-  transitions: true,
-  screens: [
-    {
-      id: "FS_OPT_IN",
-      content: {
-        position: "split",
-        title: { string_id: "shopping-onboarding-headline" },
-        subtitle: `Not all reviews are created equal. To help you find real reviews, from real people, Firefox can use AI technology to analyze this product’s reviews.`,
-        cta_paragraph: {
-          text: {
-            fontSize: "12px",
-            raw: "By selecting Analyze Reviews you agree to Fakespot terms of use.",
-          },
-        },
-        primary_button: {
-          label: "Analyze Reviews",
-          action: {
-            type: "SET_PREF",
-            data: {
-              pref: {
-                name: "browser.shopping.experience2023.optedIn",
-                value: 1,
-              },
-            },
-          },
-        },
-        secondary_button: {
-          label: "Not Now",
-          action: {
-            type: "SET_PREF",
-            data: {
-              pref: {
-                name: "browser.shopping.experience2023.active",
-                value: false,
-              },
-            },
-          },
-        },
-        info_text: {
-          raw: "Review quality check is available when you shop on Amazon, Best Buy, and Walmart.",
-        },
-      },
-    },
-  ],
-};
+  "chrome://browser/content/aboutwelcome/aboutwelcome.bundle.js";
 
 class Onboarding {
   constructor({ win } = {}) {
-    this.win = win;
     this.doc = win.document;
-    this.OnboardingSetup = false;
-
-    win.addEventListener("Update", async event => {
-      let { showOnboarding } = event.detail;
-      // Prepare showing opt-in message by including respective
-      // assets needed to render onboarding message
-      if (showOnboarding) {
-        this.showOptInMessage();
-      }
-    });
+    win.addEventListener("RenderWelcome", () => this._addScriptsAndRender());
   }
 
   async _addScriptsAndRender() {
-    const reactSrc = "resource://activity-stream/vendor/react.js";
-    const domSrc = "resource://activity-stream/vendor/react-dom.js";
+    const addStylesheet = href => {
+      if (this.doc.head.querySelector(`link[href="${href}"]`)) {
+        return;
+      }
+      const link = this.doc.head.appendChild(this.doc.createElement("link"));
+      link.rel = "stylesheet";
+      link.href = href;
+    };
+    addStylesheet("chrome://browser/content/aboutwelcome/aboutwelcome.css");
+    const reactSrc = "chrome://global/content/vendor/react.js";
+    const domSrc = "chrome://global/content/vendor/react-dom.js";
     // Add React script
     const getReactReady = async () => {
       return new Promise(resolve => {
@@ -91,46 +41,46 @@ class Onboarding {
         domScript.addEventListener("load", resolve);
       });
     };
+
+    const getDocumentReady = async () => {
+      new Promise(resolve => {
+        this.doc.addEventListener(
+          "readystatechange",
+          function onReadyStateChange() {
+            if (this.doc.readyState != "complete") {
+              return;
+            }
+            this.doc.removeEventListener(
+              "readystatechange",
+              onReadyStateChange
+            );
+            resolve();
+          }
+        );
+      });
+    };
+
+    let reactScript = this.doc.querySelector(`[src="${reactSrc}"]`);
+    let reactDomScript = this.doc.querySelector(`[src="${domSrc}"]`);
+
+    // If either script has already been added but hasn't finished
+    // loading yet, wait for the document's readyState to be complete.
+    if ((reactScript || reactDomScript) && this.doc.readyState != "complete") {
+      await getDocumentReady();
+    }
     // Load React, then React Dom
-    if (!this.doc.querySelector(`[src="${reactSrc}"]`)) {
+    if (!reactScript) {
       await getReactReady();
     }
-    if (!this.doc.querySelector(`[src="${domSrc}"]`)) {
+    if (!reactDomScript) {
       await getDomReady();
     }
+
     // Load the bundle to render the content as configured.
     this.doc.querySelector(`[src="${BUNDLE_SRC}"]`)?.remove();
     let bundleScript = this.doc.createElement("script");
     bundleScript.src = BUNDLE_SRC;
     this.doc.head.appendChild(bundleScript);
-
-    const addStylesheet = href => {
-      if (this.doc.querySelector(`link[href="${href}"]`)) {
-        return;
-      }
-      const link = this.doc.head.appendChild(this.doc.createElement("link"));
-      link.rel = "stylesheet";
-      link.href = href;
-    };
-
-    addStylesheet(
-      "chrome://activity-stream/content/aboutwelcome/aboutwelcome.css"
-    );
-  }
-
-  // TBD: Move windows function setup to child actor. See Bug 1843461
-  _setupWindowFunctions() {
-    this.win.AWGetFeatureConfig = () => OPTIN_DEFAULT;
-    this.win.AWFinish = () => {};
-  }
-
-  showOptInMessage() {
-    if (this.OnboardingSetup) {
-      return;
-    }
-    this._setupWindowFunctions();
-    this._addScriptsAndRender();
-    this.OnboardingSetup = true;
   }
 
   static getOnboarding() {

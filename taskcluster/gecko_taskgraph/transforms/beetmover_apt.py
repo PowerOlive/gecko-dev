@@ -21,8 +21,7 @@ transforms = TransformSequence()
 def beetmover_apt(config, tasks):
     product = (
         "firefox"
-        if not config.params["release_type"]  # try
-        or config.params["release_type"] == "nightly"
+        if config.params["release_type"] == "nightly"
         else config.params["release_product"]
     )
     filtered_tasks = filter_beetmover_apt_tasks(config, tasks, product)
@@ -41,7 +40,7 @@ def beetmover_apt(config, tasks):
             dependencies[dep.label] = dep.label
             gcs_sources.extend(generate_artifact_registry_gcs_sources(dep))
         description = f"Batch {index + 1} of beetmover APT submissions for the {config.params['release_type']} .deb packages"
-        platform = "firefox-release/opt"
+        platform = f"{product}-release/opt"
         treeherder = {
             "platform": platform,
             "tier": 1,

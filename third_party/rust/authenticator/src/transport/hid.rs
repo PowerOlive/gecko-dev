@@ -1,8 +1,6 @@
+use super::TestDevice;
 use crate::consts::{HIDCmd, CID_BROADCAST};
-
-use crate::ctap2::commands::{
-    CommandError, Request, RequestCtap1, RequestCtap2, Retryable, StatusCode,
-};
+use crate::ctap2::commands::{CommandError, RequestCtap1, RequestCtap2, Retryable, StatusCode};
 use crate::transport::errors::{ApduErrorStatus, HIDError};
 use crate::transport::{FidoDevice, FidoDeviceIO, FidoProtocol};
 use crate::u2ftypes::{U2FDeviceInfo, U2FHIDCont, U2FHIDInit, U2FHIDInitResp};
@@ -158,8 +156,11 @@ pub trait HIDDevice: FidoDevice + Read + Write {
     }
 }
 
-impl<T: HIDDevice> FidoDeviceIO for T {
-    fn send_msg_cancellable<Out, Req: Request<Out>>(
+#[cfg(not(test))]
+impl<T: HIDDevice> TestDevice for T {}
+
+impl<T: HIDDevice + TestDevice> FidoDeviceIO for T {
+    fn send_msg_cancellable<Out, Req: RequestCtap1<Output = Out> + RequestCtap2<Output = Out>>(
         &mut self,
         msg: &Req,
         keep_alive: &dyn Fn() -> bool,
@@ -180,11 +181,17 @@ impl<T: HIDDevice> FidoDeviceIO for T {
         keep_alive: &dyn Fn() -> bool,
     ) -> Result<Req::Output, HIDError> {
         debug!("sending {:?} to {:?}", msg, self);
+        #[cfg(test)]
+        {
+            if self.skip_serialization() {
+                return self.send_ctap2_unserialized(msg);
+            }
+        }
 
         let mut data = msg.wire_format()?;
         let mut buf: Vec<u8> = Vec::with_capacity(data.len() + 1);
         // CTAP2 command
-        buf.push(Req::command() as u8);
+        buf.push(msg.command() as u8);
         // payload
         buf.append(&mut data);
         let buf = buf;
@@ -203,6 +210,12 @@ impl<T: HIDDevice> FidoDeviceIO for T {
         keep_alive: &dyn Fn() -> bool,
     ) -> Result<Req::Output, HIDError> {
         debug!("sending {:?} to {:?}", msg, self);
+        #[cfg(test)]
+        {
+            if self.skip_serialization() {
+                return self.send_ctap1_unserialized(msg);
+            }
+        }
         let (data, add_info) = msg.ctap1_format()?;
 
         while keep_alive() {
@@ -217,7 +230,7 @@ impl<T: HIDDevice> FidoDeviceIO for T {
                 // This will bubble up error if status != no error
                 let status = ApduErrorStatus::from([status[0], status[1]]);
 
-                match msg.handle_response_ctap1(status, &data, &add_info) {
+                match msg.handle_response_ctap1(self, status, &data, &add_info) {
                     Ok(out) => return Ok(out),
                     Err(Retryable::Retry) => {
                         // sleep 100ms then loop again

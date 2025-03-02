@@ -47,9 +47,9 @@
 //! #    field3: ZeroVec<'a, u32>   
 //! # }
 //!
-//! // Must be repr(packed) for safety of VarULE!
+//! // Must be repr(C, packed) for safety of VarULE!
 //! // Must also only contain ULE types
-//! #[repr(packed)]
+//! #[repr(C, packed)]
 //! struct FooULE {
 //!     field1: <char as AsULE>::ULE,   
 //!     field2: <u32 as AsULE>::ULE,
@@ -57,9 +57,9 @@
 //! }
 //!
 //! // Safety (based on the safety checklist on the VarULE trait):
-//! //  1. FooULE does not include any uninitialized or padding bytes. (achieved by `#[repr(packed)]` on
+//! //  1. FooULE does not include any uninitialized or padding bytes. (achieved by `#[repr(C, packed)]` on
 //! //     a struct with only ULE fields)
-//! //  2. FooULE is aligned to 1 byte. (achieved by `#[repr(packed)]` on
+//! //  2. FooULE is aligned to 1 byte. (achieved by `#[repr(C, packed)]` on
 //! //     a struct with only ULE fields)
 //! //  3. The impl of `validate_byte_slice()` returns an error if any byte is not valid.
 //! //  4. The impl of `validate_byte_slice()` returns an error if the slice cannot be used in its entirety
@@ -129,8 +129,8 @@
 //! }
 //!
 //! fn main() {
-//!     let mut foos = vec![Foo {field1: 'u', field2: 983, field3: ZeroVec::alloc_from_slice(&[1212,2309,500,7000])},
-//!                         Foo {field1: 'l', field2: 1010, field3: ZeroVec::alloc_from_slice(&[1932, 0, 8888, 91237])}];
+//!     let mut foos = [Foo {field1: 'u', field2: 983, field3: ZeroVec::alloc_from_slice(&[1212,2309,500,7000])},
+//!                     Foo {field1: 'l', field2: 1010, field3: ZeroVec::alloc_from_slice(&[1932, 0, 8888, 91237])}];
 //!
 //!     let vzv = VarZeroVec::<_>::from(&foos);
 //!

@@ -22,7 +22,8 @@ namespace cricket {
 
 class MockIceController : public cricket::IceControllerInterface {
  public:
-  explicit MockIceController(const cricket::IceControllerFactoryArgs& args) {}
+  explicit MockIceController(
+      const cricket::IceControllerFactoryArgs& /* args */) {}
   ~MockIceController() override = default;
 
   MOCK_METHOD(void, SetIceConfig, (const cricket::IceConfig&), (override));
@@ -35,6 +36,10 @@ class MockIceController : public cricket::IceControllerInterface {
               OnConnectionDestroyed,
               (const cricket::Connection*),
               (override));
+  MOCK_METHOD(rtc::ArrayView<const cricket::Connection* const>,
+              GetConnections,
+              (),
+              (const, override));
   MOCK_METHOD(rtc::ArrayView<const cricket::Connection*>,
               connections,
               (),

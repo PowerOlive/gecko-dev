@@ -8,7 +8,9 @@
 #include "nss.h"
 #include "ssl.h"
 
+#include "api/audio/builtin_audio_processing_builder.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
+#include "api/environment/environment_factory.h"
 #include "api/scoped_refptr.h"
 #include "AudioSegment.h"
 #include "Canonicals.h"
@@ -28,6 +30,7 @@
 #include "SharedBuffer.h"
 #include "MediaTransportHandler.h"
 #include "WebrtcCallWrapper.h"
+#include "WebrtcEnvironmentWrapper.h"
 #include "PeerConnectionCtx.h"
 
 #define GTEST_HAS_RTTI 0
@@ -69,7 +72,7 @@ class FakeAudioTrack : public ProcessedMediaTrack {
 
   void Destroy() override {
     MutexAutoLock lock(mMutex);
-    MOZ_ASSERT(!mMainThreadDestroyed);
+    MOZ_RELEASE_ASSERT(!mMainThreadDestroyed);
     mMainThreadDestroyed = true;
     mTimer->Cancel();
     mTimer = nullptr;
@@ -79,14 +82,14 @@ class FakeAudioTrack : public ProcessedMediaTrack {
 
   void AddListener(MediaTrackListener* aListener) override {
     MutexAutoLock lock(mMutex);
-    MOZ_ASSERT(!mListener);
+    MOZ_RELEASE_ASSERT(!mListener);
     mListener = aListener;
   }
 
   RefPtr<GenericPromise> RemoveListener(
       MediaTrackListener* aListener) override {
     MutexAutoLock lock(mMutex);
-    MOZ_ASSERT(mListener == aListener);
+    MOZ_RELEASE_ASSERT(mListener == aListener);
     mListener = nullptr;
     return GenericPromise::CreateAndResolve(true, __func__);
   }
@@ -224,7 +227,7 @@ class LoopbackTransport : public MediaTransportHandler {
 
   void SendPacket(const std::string& aTransportId,
                   MediaPacket&& aPacket) override {
-    peer_->SignalPacketReceived(aTransportId, aPacket);
+    peer_->LoopbackPacketReceived(aTransportId, aPacket);
   }
 
   void SetState(const std::string& aTransportId, TransportLayer::State aState) {
@@ -236,21 +239,32 @@ class LoopbackTransport : public MediaTransportHandler {
     MediaTransportHandler::OnRtcpStateChange(aTransportId, aState);
   }
 
+  void LoopbackPacketReceived(const std::string& aTransportId,
+                              const MediaPacket& aPacket) {
+    if (aPacket.len() && aPacket.type() == MediaPacket::RTCP) {
+      ++rtcp_packets_received_;
+    }
+    SignalPacketReceived(aTransportId, aPacket);
+  }
+
+  int RtcpPacketsReceived() const { return rtcp_packets_received_; }
+
  private:
-  RefPtr<MediaTransportHandler> peer_;
+  RefPtr<LoopbackTransport> peer_;
+  std::atomic<int> rtcp_packets_received_{0};
 };
 
 class TestAgent {
  public:
-  explicit TestAgent(const RefPtr<SharedWebrtcState>& aSharedState)
+  explicit TestAgent(const RefPtr<WebrtcEnvironmentWrapper>& aEnvWrapper,
+                     const RefPtr<SharedWebrtcState>& aSharedState)
       : control_(aSharedState->mCallWorkerThread),
         audio_config_(109, "opus", 48000, 2, false),
         call_(WebrtcCallWrapper::Create(
-            mozilla::dom::RTCStatsTimestampMaker::Create(), nullptr,
-            aSharedState)),
+            aEnvWrapper, mozilla::dom::RTCStatsTimestampMaker::Create(),
+            nullptr, aSharedState)),
         audio_conduit_(
             AudioSessionConduit::Create(call_, test_utils->sts_target())),
-        audio_pipeline_(),
         transport_(new LoopbackTransport) {
     Unused << WaitFor(InvokeAsync(call_->mCallThread, __func__, [&] {
       audio_conduit_->InitControl(&control_);
@@ -326,9 +340,7 @@ class TestAgent {
 
   int GetAudioRtcpCountSent() { return audio_pipeline_->RtcpPacketsSent(); }
 
-  int GetAudioRtcpCountReceived() {
-    return audio_pipeline_->RtcpPacketsReceived();
-  }
+  int GetAudioRtcpCountReceived() { return transport_->RtcpPacketsReceived(); }
 
  protected:
   ConcreteControl control_;
@@ -345,8 +357,9 @@ class TestAgent {
 
 class TestAgentSend : public TestAgent {
  public:
-  explicit TestAgentSend(const RefPtr<SharedWebrtcState>& aSharedState)
-      : TestAgent(aSharedState) {
+  explicit TestAgentSend(const RefPtr<WebrtcEnvironmentWrapper>& aEnvWrapper,
+                         const RefPtr<SharedWebrtcState>& aSharedState)
+      : TestAgent(aEnvWrapper, aSharedState) {
     control_.Update([&](auto& aControl) {
       aControl.mAudioSendCodec = Some(audio_config_);
     });
@@ -374,8 +387,9 @@ class TestAgentSend : public TestAgent {
 
 class TestAgentReceive : public TestAgent {
  public:
-  explicit TestAgentReceive(const RefPtr<SharedWebrtcState>& aSharedState)
-      : TestAgent(aSharedState) {
+  explicit TestAgentReceive(const RefPtr<WebrtcEnvironmentWrapper>& aEnvWrapper,
+                            const RefPtr<SharedWebrtcState>& aSharedState)
+      : TestAgent(aEnvWrapper, aSharedState) {
     control_.Update([&](auto& aControl) {
       std::vector<AudioCodecConfig> codecs;
       codecs.push_back(audio_config_);
@@ -423,11 +437,13 @@ void WaitFor(TimeDuration aDuration) {
       "WaitFor(TimeDuration aDuration)"_ns, [&] { return done; });
 }
 
-webrtc::AudioState::Config CreateAudioStateConfig() {
+webrtc::AudioState::Config CreateAudioStateConfig(
+    const webrtc::Environment& aEnv) {
   webrtc::AudioState::Config audio_state_config;
   audio_state_config.audio_mixer = webrtc::AudioMixerImpl::Create();
-  webrtc::AudioProcessingBuilder audio_processing_builder;
-  audio_state_config.audio_processing = audio_processing_builder.Create();
+
+  webrtc::BuiltinAudioProcessingBuilder audio_processing_builder;
+  audio_state_config.audio_processing = audio_processing_builder.Build(aEnv);
   audio_state_config.audio_device_module = new webrtc::FakeAudioDeviceModule();
   return audio_state_config;
 }
@@ -438,13 +454,16 @@ class MediaPipelineTest : public ::testing::Test {
       : main_task_queue_(
             WrapUnique<TaskQueueWrapper<DeletionPolicy::NonBlocking>>(
                 new MainAsCurrent())),
+        env_wrapper_(WebrtcEnvironmentWrapper::Create(
+            mozilla::dom::RTCStatsTimestampMaker::Create())),
         shared_state_(MakeAndAddRef<SharedWebrtcState>(
-            AbstractThread::MainThread(), CreateAudioStateConfig(),
+            AbstractThread::MainThread(),
+            CreateAudioStateConfig(env_wrapper_->Environment()),
             already_AddRefed(
                 webrtc::CreateBuiltinAudioDecoderFactory().release()),
-            WrapUnique(new webrtc::NoTrialsConfig()))),
-        p1_(shared_state_),
-        p2_(shared_state_) {}
+            WrapUnique(new webrtc::MozTrialsConfig()))),
+        p1_(env_wrapper_, shared_state_),
+        p2_(env_wrapper_, shared_state_) {}
 
   ~MediaPipelineTest() {
     p1_.Shutdown();
@@ -559,6 +578,7 @@ class MediaPipelineTest : public ::testing::Test {
   // main_task_queue_ has this type to make sure it goes through Delete() when
   // we're destroyed.
   UniquePtr<TaskQueueWrapper<DeletionPolicy::NonBlocking>> main_task_queue_;
+  const RefPtr<WebrtcEnvironmentWrapper> env_wrapper_;
   const RefPtr<SharedWebrtcState> shared_state_;
   TestAgentSend p1_;
   TestAgentReceive p2_;
@@ -590,6 +610,15 @@ TEST_F(MediaPipelineFilterTest, TestSSRCFilter) {
   EXPECT_FALSE(Filter(filter, 556, 110));
 }
 
+TEST_F(MediaPipelineFilterTest, TestSSRCFilterOverridesPayloadTypeFilter) {
+  MediaPipelineFilter filter;
+  filter.AddRemoteSSRC(555);
+  filter.AddUniqueReceivePT(110);
+  // We have a configured ssrc; do not allow payload type matching.
+  EXPECT_FALSE(Filter(filter, 556, 110));
+  EXPECT_TRUE(Filter(filter, 555, 110));
+}
+
 #define SSRC(ssrc)                                                    \
   ((ssrc >> 24) & 0xFF), ((ssrc >> 16) & 0xFF), ((ssrc >> 8) & 0xFF), \
       (ssrc & 0xFF)
@@ -619,9 +648,14 @@ TEST_F(MediaPipelineFilterTest, TestMidFilter) {
 
 TEST_F(MediaPipelineFilterTest, TestPayloadTypeFilter) {
   MediaPipelineFilter filter;
-  filter.AddUniquePT(110);
+  filter.AddUniqueReceivePT(110);
   EXPECT_TRUE(Filter(filter, 555, 110));
   EXPECT_FALSE(Filter(filter, 556, 111));
+  // Matching based on unique payload type causes us to learn the ssrc.
+  EXPECT_TRUE(Filter(filter, 555, 98));
+  // Once we have learned an SSRC, do _not_ learn new ones based on payload
+  // type.
+  EXPECT_FALSE(Filter(filter, 557, 110));
 }
 
 TEST_F(MediaPipelineFilterTest, TestSSRCMovedWithMid) {
@@ -643,7 +677,7 @@ TEST_F(MediaPipelineFilterTest, TestRemoteSDPNoSSRCs) {
   MediaPipelineFilter filter;
   const auto mid = Some(std::string("mid0"));
   filter.SetRemoteMediaStreamId(mid);
-  filter.AddUniquePT(111);
+  filter.AddUniqueReceivePT(111);
   EXPECT_TRUE(Filter(filter, 555, 110, mid));
   EXPECT_TRUE(Filter(filter, 555, 110));
 

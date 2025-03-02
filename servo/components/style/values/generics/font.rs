@@ -5,7 +5,8 @@
 //! Generic types for font stuff.
 
 use crate::parser::{Parse, ParserContext};
-use crate::One;
+use crate::values::animated::ToAnimatedZero;
+use crate::{One, Zero};
 use byteorder::{BigEndian, ReadBytesExt};
 use cssparser::Parser;
 use std::fmt::{self, Write};
@@ -28,6 +29,7 @@ pub trait TaggedFontValue {
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
+    ToAnimatedValue,
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
@@ -76,6 +78,7 @@ where
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
+    ToAnimatedValue,
     ToComputedValue,
     ToCss,
     ToResolvedValue,
@@ -97,7 +100,7 @@ impl<T> TaggedFontValue for VariationValue<T> {
 
 /// A value both for font-variation-settings and font-feature-settings.
 #[derive(
-    Clone, Debug, Eq, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToCss, ToResolvedValue, ToShmem,
+    Clone, Debug, Eq, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToAnimatedValue, ToCss, ToResolvedValue, ToShmem,
 )]
 #[css(comma)]
 pub struct FontSettings<T>(#[css(if_empty = "normal", iterable)] pub Box<[T]>);
@@ -146,6 +149,7 @@ impl<T: Parse> Parse for FontSettings<T> {
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
+    ToAnimatedValue,
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
@@ -204,40 +208,18 @@ impl Parse for FontTag {
     ToResolvedValue,
     ToShmem,
 )]
+#[value_info(other_values = "normal")]
 pub enum FontStyle<Angle> {
-    #[animation(error)]
-    Normal,
-    #[animation(error)]
-    Italic,
+    // Note that 'oblique 0deg' represents 'normal', and will serialize as such.
     #[value_info(starts_with_keyword)]
     Oblique(Angle),
+    #[animation(error)]
+    Italic,
 }
 
-/// A generic value that holds either a generic Number or the keyword
-/// `from-font`; used for values of font-size-adjust.
-#[repr(u8)]
-#[derive(
-    Animate,
-    Clone,
-    ComputeSquaredDistance,
-    Copy,
-    Debug,
-    MallocSizeOf,
-    Parse,
-    PartialEq,
-    SpecifiedValueInfo,
-    ToAnimatedValue,
-    ToAnimatedZero,
-    ToComputedValue,
-    ToResolvedValue,
-    ToCss,
-    ToShmem,
-)]
-pub enum GenericNumberOrFromFont<N> {
-    /// An explicitly-specified number.
-    Number(N),
-    /// The from-font keyword: resolve the number from font metrics.
-    FromFont,
+impl<Angle: Zero> FontStyle<Angle> {
+    /// Return the 'normal' value, which is represented as 'oblique 0deg'.
+    pub fn normal() -> Self { Self::Oblique(Angle::zero()) }
 }
 
 /// A generic value for the `font-size-adjust` property.
@@ -264,7 +246,7 @@ pub enum GenericNumberOrFromFont<N> {
 pub enum GenericFontSizeAdjust<Factor> {
     #[animation(error)]
     None,
-    // 'ex-height' is the implied basis, so the keyword can be omitted
+    #[value_info(starts_with_keyword)]
     ExHeight(Factor),
     #[value_info(starts_with_keyword)]
     CapHeight(Factor),
@@ -292,5 +274,52 @@ impl<Factor: ToCss> ToCss for GenericFontSizeAdjust<Factor> {
 
         dest.write_str(prefix)?;
         value.to_css(dest)
+    }
+}
+
+/// A generic value for the `line-height` property.
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToCss,
+    ToShmem,
+    Parse,
+)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[repr(C, u8)]
+pub enum GenericLineHeight<N, L> {
+    /// `normal`
+    Normal,
+    /// `-moz-block-height`
+    #[cfg(feature = "gecko")]
+    #[parse(condition = "ParserContext::in_ua_sheet")]
+    MozBlockHeight,
+    /// `<number>`
+    Number(N),
+    /// `<length-percentage>`
+    Length(L),
+}
+
+pub use self::GenericLineHeight as LineHeight;
+
+impl<N, L> ToAnimatedZero for LineHeight<N, L> {
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Err(())
+    }
+}
+
+impl<N, L> LineHeight<N, L> {
+    /// Returns `normal`.
+    #[inline]
+    pub fn normal() -> Self {
+        LineHeight::Normal
     }
 }

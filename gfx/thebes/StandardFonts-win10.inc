@@ -6,7 +6,6 @@
 // from https://docs.microsoft.com/en-us/typography/fonts/windows_10_font_list
 // TODO: check whether we need to list legacy styled family names like "... Light".
 static const char* kBaseFonts[] = {
-  "AlternateGothic2 BT",
   "Arial",
   "Arial Black",
   "Bahnschrift",
@@ -28,7 +27,6 @@ static const char* kBaseFonts[] = {
   "Gabriola",
   "Gadugi",
   "Georgia",
-  "HoloLens MDL2 Assets",
   "Impact",
   "Javanese Text",
   "Leelawadee UI",
@@ -103,7 +101,7 @@ static const char* kBaseFonts[] = {
 
 // Additional fonts provided by language-pack installation.
 static const char* kLangPackFonts[] = {
-  "Aharoni Bold",  // Hebrew Supplemental Fonts
+  "Aharoni",  // Hebrew Supplemental Fonts
   "Aldhabi",  // Arabic Script Supplemental Fonts
   "Andalus",  // Arabic Script Supplemental Fonts
   "Angsana New",  // Thai Supplemental Fonts
@@ -161,6 +159,7 @@ static const char* kLangPackFonts[] = {
   "MingLiU",  // Chinese (Traditional) Supplemental Fonts
   "MingLiU_HKSCS",  // Chinese (Traditional) Supplemental Fonts
   "Miriam",  // Hebrew Supplemental Fonts
+  "Miriam Fixed",  // Hebrew Supplemental Fonts
   "MoolBoran",  // Khmer Supplemental Fonts
   "MS Mincho",  // Japanese Supplemental Fonts
   "MS PMincho",  // Japanese Supplemental Fonts
@@ -178,7 +177,7 @@ static const char* kLangPackFonts[] = {
   "Simplified Arabic",  // Arabic Script Supplemental Fonts
   "Traditional Arabic",  // Arabic Script Supplemental Fonts
   "Tunga",  // Kannada Supplemental Fonts
-  "UD Digi Kyokasho",  // Japanese Supplemental Fonts
+  "UD Digi Kyokasho N-B",  // Japanese Supplemental Fonts
   "UD Digi Kyokasho N-R",  // Japanese Supplemental Fonts
   "UD Digi Kyokasho NK-B",  // Japanese Supplemental Fonts
   "UD Digi Kyokasho NK-R",  // Japanese Supplemental Fonts

@@ -60,6 +60,20 @@ nsresult nsLookAndFeel::GetSystemColors() {
   return NS_OK;
 }
 
+nsresult nsLookAndFeel::GetKeyboardLayoutImpl(nsACString& aLayout) {
+  if (!jni::IsAvailable()) {
+    return NS_ERROR_FAILURE;
+  }
+
+  auto layoutStr = java::GeckoAppShell::GetKeyboardLayout();
+  if (!layoutStr) {
+    return NS_ERROR_FAILURE;
+  }
+
+  aLayout.Assign(layoutStr->ToCString());
+  return NS_OK;
+}
+
 void nsLookAndFeel::NativeInit() {
   EnsureInitSystemColors();
   EnsureInitShowPassword();
@@ -253,7 +267,10 @@ nsresult nsLookAndFeel::NativeGetColor(ColorID aID, ColorScheme aColorScheme,
       break;
     case ColorID::Marktext:
     case ColorID::Mark:
+    case ColorID::MozAutofillBackground:
     case ColorID::SpellCheckerUnderline:
+    case ColorID::TargetTextBackground:
+    case ColorID::TargetTextForeground:
       aColor = GetStandinForNativeColor(aID, aColorScheme);
       break;
     default:
@@ -269,6 +286,14 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
   nsresult rv = NS_OK;
 
   switch (aID) {
+    case IntID::ScrollbarFadeBeginDelay:
+      aResult = 450;
+      break;
+
+    case IntID::ScrollbarFadeDuration:
+      aResult = 300;
+      break;
+
     case IntID::ScrollButtonLeftMouseButtonAction:
       aResult = 0;
       break;
@@ -290,10 +315,6 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = 1;
       break;
 
-    case IntID::ShowCaretDuringSelection:
-      aResult = 0;
-      break;
-
     case IntID::SelectTextfieldsOnKeyFocus:
       // Select textfield content when focused by kbd
       // used by EventStateManager::sTextfieldSelectModel
@@ -302,10 +323,6 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
 
     case IntID::SubmenuDelay:
       aResult = 200;
-      break;
-
-    case IntID::TooltipDelay:
-      aResult = 500;
       break;
 
     case IntID::MenusCanOverlapOSBar:
@@ -338,8 +355,11 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
       aResult = java::GeckoSystemStateListener::PrefersReducedMotion();
       break;
 
+    case IntID::UseAccessibilityTheme:
+    // If high contrast is enabled, enable prefers-reduced-transparency media
+    // query as well as there is no dedicated option.
     case IntID::PrefersReducedTransparency:
-      aResult = 0;
+      aResult = java::GeckoSystemStateListener::PrefersContrast();
       break;
 
     case IntID::InvertedColors:
@@ -376,6 +396,10 @@ nsresult nsLookAndFeel::NativeGetInt(IntID aID, int32_t& aResult) {
     case IntID::TouchDeviceSupportPresent:
       // Touch support is always enabled on android.
       aResult = 1;
+      break;
+
+    case IntID::PointingDeviceKinds:
+      aResult = java::GeckoAppShell::GetPointingDeviceKinds();
       break;
 
     default:

@@ -435,7 +435,7 @@ export function nsPlacesExpiration() {
   );
 
   this._dbInitializedPromise = lazy.PlacesUtils.withConnectionWrapper(
-    "PlacesExpiration.jsm: setup",
+    "PlacesExpiration.sys.mjs: setup",
     async db => {
       await db.execute(
         `CREATE TEMP TABLE expiration_notify (
@@ -528,13 +528,13 @@ nsPlacesExpiration.prototype = {
     } else if (aTopic == TOPIC_TESTING_MODE) {
       this._testingMode = true;
     } else if (aTopic == lazy.PlacesUtils.TOPIC_INIT_COMPLETE) {
-      const placesObserver = new PlacesWeakCallbackWrapper(
+      this._placesObserver = new PlacesWeakCallbackWrapper(
         // History status is clean after a clear history.
         () => {
           this.status = STATUS.CLEAN;
         }
       );
-      PlacesObservers.addListener(["history-cleared"], placesObserver);
+      PlacesObservers.addListener(["history-cleared"], this._placesObserver);
     }
   },
 
@@ -758,7 +758,7 @@ nsPlacesExpiration.prototype = {
     try {
       let notifications = [];
       await lazy.PlacesUtils.withConnectionWrapper(
-        "PlacesExpiration.jsm: expire",
+        "PlacesExpiration.sys.mjs: expire",
         async db => {
           await db.executeTransaction(async () => {
             for (let queryType in EXPIRATION_QUERIES) {
@@ -786,15 +786,10 @@ nsPlacesExpiration.prototype = {
     }
 
     if (this._mostRecentExpiredVisitDays) {
-      try {
-        Services.telemetry
-          .getHistogramById("PLACES_MOST_RECENT_EXPIRED_VISIT_DAYS")
-          .add(this._mostRecentExpiredVisitDays);
-      } catch (ex) {
-        console.error("Unable to report telemetry.");
-      } finally {
-        delete this._mostRecentExpiredVisitDays;
-      }
+      Glean.places.mostRecentExpiredVisit.accumulateSingleSample(
+        this._mostRecentExpiredVisitDays
+      );
+      delete this._mostRecentExpiredVisitDays;
     }
 
     if ("_expectedResultsCount" in this) {
@@ -812,13 +807,9 @@ nsPlacesExpiration.prototype = {
         // Avoid reporting the common cases where the database is clean, or
         // a single step is needed.
         if (oldStatus == STATUS.DIRTY) {
-          try {
-            Services.telemetry
-              .getHistogramById("PLACES_EXPIRATION_STEPS_TO_CLEAN2")
-              .add(this._telemetrySteps);
-          } catch (ex) {
-            console.error("Unable to report telemetry.");
-          }
+          Glean.places.expirationStepsToClean.accumulateSingleSample(
+            this._telemetrySteps
+          );
         }
         this._telemetrySteps = 1;
       }

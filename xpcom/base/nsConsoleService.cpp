@@ -57,6 +57,8 @@ static const bool gLoggingBuffered = true;
 static bool gLoggingToDebugger = true;
 #endif  // XP_WIN
 
+static mozilla::LazyLogModule gPageMessagesLog("PageMessages");
+
 nsConsoleService::MessageElement::~MessageElement() = default;
 
 nsConsoleService::nsConsoleService()
@@ -191,7 +193,8 @@ nsresult nsConsoleService::MaybeForwardScriptError(nsIConsoleMessage* aMessage,
     return NS_ERROR_FAILURE;
   }
 
-  nsAutoString msg, sourceName, sourceLine;
+  nsAutoString msg;
+  nsAutoCString sourceName;
   nsCString category;
   uint32_t lineNum, colNum, flags;
   uint64_t innerWindowId;
@@ -200,8 +203,6 @@ nsresult nsConsoleService::MaybeForwardScriptError(nsIConsoleMessage* aMessage,
   rv = scriptError->GetErrorMessage(msg);
   NS_ENSURE_SUCCESS(rv, rv);
   rv = scriptError->GetSourceName(sourceName);
-  NS_ENSURE_SUCCESS(rv, rv);
-  rv = scriptError->GetSourceLine(sourceLine);
   NS_ENSURE_SUCCESS(rv, rv);
 
   rv = scriptError->GetCategory(getter_Copies(category));
@@ -219,9 +220,9 @@ nsresult nsConsoleService::MaybeForwardScriptError(nsIConsoleMessage* aMessage,
   rv = scriptError->GetInnerWindowID(&innerWindowId);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  *sent = contentParent->SendScriptError(
-      msg, sourceName, sourceLine, lineNum, colNum, flags, category,
-      fromPrivateWindow, innerWindowId, fromChromeContext);
+  *sent = contentParent->SendScriptError(msg, sourceName, lineNum, colNum,
+                                         flags, category, fromPrivateWindow,
+                                         innerWindowId, fromChromeContext);
   return NS_OK;
 }
 
@@ -375,6 +376,34 @@ nsresult nsConsoleService::LogMessageWithMode(
     if (mListeners.Count() > 0) {
       r = new LogMessageRunnable(aMessage, this);
     }
+
+    // Avoid MOG_LOG-ing messages sent from the content process,
+    // where ContentParent will pass SupressLog output mode.
+    if (aOutputMode == OutputToLog) {
+      uint32_t logLevel = 0;
+      aMessage->GetLogLevel(&logLevel);
+
+      LogLevel mozLogLevel = LogLevel::Info;
+      switch (logLevel) {
+        case nsIConsoleMessage::debug:
+          mozLogLevel = LogLevel::Debug;
+          break;
+        case nsIConsoleMessage::info:
+          mozLogLevel = LogLevel::Info;
+          break;
+        case nsIConsoleMessage::warn:
+          mozLogLevel = LogLevel::Warning;
+          break;
+        case nsIConsoleMessage::error:
+          mozLogLevel = LogLevel::Error;
+          break;
+      }
+      if (MOZ_LOG_TEST(gPageMessagesLog, mozLogLevel)) {
+        nsCString msg;
+        aMessage->ToString(msg);
+        MOZ_LOG(gPageMessagesLog, mozLogLevel, ("%s", msg.get()));
+      }
+    }
   }
 
   if (retiredMessage) {
@@ -389,7 +418,7 @@ nsresult nsConsoleService::LogMessageWithMode(
     // avoid failing in XPCShell tests
     nsCOMPtr<nsIThread> mainThread = do_GetMainThread();
     if (mainThread) {
-      SchedulerGroup::Dispatch(TaskCategory::Other, r.forget());
+      SchedulerGroup::Dispatch(r.forget());
     }
   }
 

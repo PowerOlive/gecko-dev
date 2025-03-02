@@ -89,9 +89,7 @@ class OpeningGeometrySink : public ID2D1SimplifiedGeometrySink {
     EnsureFigureEnded();
     return mSink->AddBeziers(aSegments, aCount);
   }
-  STDMETHOD(Close)() { /* Should never be called! */
-    return S_OK;
-  }
+  STDMETHOD(Close)() { /* Should never be called! */ return S_OK; }
   STDMETHOD_(void, SetSegmentFlags)(D2D1_PATH_SEGMENT aFlags) {
     return mSink->SetSegmentFlags(aFlags);
   }
@@ -188,10 +186,10 @@ void PathBuilderD2D::Arc(const Point& aOrigin, Float aRadius, Float aStartAngle,
   // XXX - Workaround for now, D2D does not appear to do the desired thing when
   // the angle sweeps a complete circle.
   bool fullCircle = false;
-  if (aEndAngle - aStartAngle >= 2 * M_PI) {
+  if (aEndAngle - aStartAngle >= 1.9999 * M_PI) {
     fullCircle = true;
     aEndAngle = Float(aStartAngle + M_PI * 1.9999);
-  } else if (aStartAngle - aEndAngle >= 2 * M_PI) {
+  } else if (aStartAngle - aEndAngle >= 1.9999 * M_PI) {
     fullCircle = true;
     aStartAngle = Float(aEndAngle + M_PI * 1.9999);
   }

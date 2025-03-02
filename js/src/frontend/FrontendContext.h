@@ -15,7 +15,6 @@
 
 #include "js/AllocPolicy.h"  // SystemAllocPolicy, AllocFunction
 #include "js/ErrorReport.h"  // JSErrorCallback, JSErrorFormatString
-#include "js/Modules.h"      // JS::ImportAssertionVector
 #include "js/Stack.h"  // JS::NativeStackSize, JS::NativeStackLimit, JS::NativeStackLimitMax
 #include "js/Vector.h"          // Vector
 #include "vm/ErrorReporting.h"  // CompileError
@@ -83,8 +82,6 @@ class FrontendContext {
 
   js::SharedScriptDataTableHolder* scriptDataTableHolder_;
 
-  JS::ImportAssertionVector supportedImportAssertions_;
-
   // Limit pointer for checking native stack consumption.
   //
   // The pointer is calculated based on the stack base of the current thread
@@ -99,6 +96,10 @@ class FrontendContext {
 #ifdef DEBUG
   // The thread ID where the native stack limit is set.
   mozilla::Maybe<size_t> stackLimitThreadId_;
+
+  // The stack pointer where the AutoCheckRecursionLimit check is performed
+  // last time.
+  void* previousStackPointer_ = nullptr;
 #endif
 
  protected:
@@ -113,8 +114,7 @@ class FrontendContext {
       : alloc_(this),
         nameCollectionPool_(nullptr),
         ownNameCollectionPool_(false),
-        scriptDataTableHolder_(&js::globalSharedScriptDataTableHolder),
-        supportedImportAssertions_() {}
+        scriptDataTableHolder_(&js::globalSharedScriptDataTableHolder) {}
   ~FrontendContext();
 
   void setStackQuota(JS::NativeStackSize stackSize);
@@ -151,12 +151,6 @@ class FrontendContext {
   //   * Main-thread-specific operation, such as operating on JSAtom
   //   * Optional operation, such as providing better error message
   JSContext* maybeCurrentJSContext() { return maybeCx_; }
-
-  const JS::ImportAssertionVector& getSupportedImportAssertions() const {
-    return supportedImportAssertions_;
-  }
-  bool setSupportedImportAssertions(
-      const JS::ImportAssertionVector& supportedImportAssertions);
 
   enum class Warning { Suppress, Report };
 
@@ -218,6 +212,10 @@ class FrontendContext {
   void assertNativeStackLimitThread();
 #endif
 
+#ifdef DEBUG
+  void checkAndUpdateFrontendContextRecursionLimit(void* sp);
+#endif
+
  private:
   void ReportOutOfMemory();
   void addPendingOutOfMemory();
@@ -233,7 +231,7 @@ class MOZ_STACK_CLASS AutoReportFrontendContext : public FrontendContext {
  public:
   explicit AutoReportFrontendContext(JSContext* cx,
                                      Warning warning = Warning::Report)
-      : FrontendContext(), cx_(cx), warning_(warning) {
+      : cx_(cx), warning_(warning) {
     setCurrentJSContext(cx_);
     MOZ_ASSERT(cx_ == maybeCx_);
   }
@@ -267,8 +265,7 @@ class ManualReportFrontendContext : public FrontendContext {
 #endif
 
  public:
-  explicit ManualReportFrontendContext(JSContext* cx)
-      : FrontendContext(), cx_(cx) {
+  explicit ManualReportFrontendContext(JSContext* cx) : cx_(cx) {
     setCurrentJSContext(cx_);
   }
 

@@ -11,12 +11,8 @@
 //! # Examples
 //!
 //! ```
+//! use icu::locid::extensions::unicode::{attribute, key, value, Unicode};
 //! use icu::locid::Locale;
-//! use icu::locid::{
-//!     extensions::unicode::Unicode,
-//!     extensions_unicode_attribute as attribute,
-//!     extensions_unicode_key as key, extensions_unicode_value as value,
-//! };
 //!
 //! let loc: Locale = "en-US-u-foobar-hc-h12".parse().expect("Parsing failed.");
 //!
@@ -36,15 +32,20 @@ mod key;
 mod keywords;
 mod value;
 
-use alloc::vec;
-pub use attribute::Attribute;
+use core::cmp::Ordering;
+
+#[doc(inline)]
+pub use attribute::{attribute, Attribute};
 pub use attributes::Attributes;
-pub use key::Key;
+#[doc(inline)]
+pub use key::{key, Key};
 pub use keywords::Keywords;
-pub use value::Value;
+#[doc(inline)]
+pub use value::{value, Value};
 
 use crate::parser::ParserError;
 use crate::parser::SubtagIterator;
+use crate::shortvec::ShortBoxSlice;
 use litemap::LiteMap;
 
 /// Unicode Extensions provide information about user preferences in a given locale.
@@ -63,10 +64,8 @@ use litemap::LiteMap;
 /// # Examples
 ///
 /// ```
+/// use icu::locid::extensions::unicode::{key, value};
 /// use icu::locid::Locale;
-/// use icu::locid::{
-///     extensions_unicode_key as key, extensions_unicode_value as value,
-/// };
 ///
 /// let loc: Locale =
 ///     "de-u-hc-h12-ca-buddhist".parse().expect("Parsing failed.");
@@ -137,12 +136,22 @@ impl Unicode {
         self.attributes.clear();
     }
 
-    pub(crate) fn try_from_iter(iter: &mut SubtagIterator) -> Result<Self, ParserError> {
-        let mut attributes = vec![];
-        let mut keywords = LiteMap::new();
+    pub(crate) fn as_tuple(&self) -> (&Attributes, &Keywords) {
+        (&self.attributes, &self.keywords)
+    }
 
-        let mut current_keyword = None;
-        let mut current_type = vec![];
+    /// Returns an ordering suitable for use in [`BTreeSet`].
+    ///
+    /// The ordering may or may not be equivalent to string ordering, and it
+    /// may or may not be stable across ICU4X releases.
+    ///
+    /// [`BTreeSet`]: alloc::collections::BTreeSet
+    pub fn total_cmp(&self, other: &Self) -> Ordering {
+        self.as_tuple().cmp(&other.as_tuple())
+    }
+
+    pub(crate) fn try_from_iter(iter: &mut SubtagIterator) -> Result<Self, ParserError> {
+        let mut attributes = ShortBoxSlice::new();
 
         while let Some(subtag) = iter.peek() {
             if let Ok(attr) = Attribute::try_from_bytes(subtag) {
@@ -155,17 +164,22 @@ impl Unicode {
             iter.next();
         }
 
+        let mut keywords = LiteMap::new();
+
+        let mut current_keyword = None;
+        let mut current_value = ShortBoxSlice::new();
+
         while let Some(subtag) = iter.peek() {
             let slen = subtag.len();
             if slen == 2 {
                 if let Some(kw) = current_keyword.take() {
-                    keywords.try_insert(kw, Value::from_vec_unchecked(current_type));
-                    current_type = vec![];
+                    keywords.try_insert(kw, Value::from_short_slice_unchecked(current_value));
+                    current_value = ShortBoxSlice::new();
                 }
                 current_keyword = Some(Key::try_from_bytes(subtag)?);
             } else if current_keyword.is_some() {
                 match Value::parse_subtag(subtag) {
-                    Ok(Some(t)) => current_type.push(t),
+                    Ok(Some(t)) => current_value.push(t),
                     Ok(None) => {}
                     Err(_) => break,
                 }
@@ -176,7 +190,7 @@ impl Unicode {
         }
 
         if let Some(kw) = current_keyword.take() {
-            keywords.try_insert(kw, Value::from_vec_unchecked(current_type));
+            keywords.try_insert(kw, Value::from_short_slice_unchecked(current_value));
         }
 
         // Ensure we've defined at least one attribute or keyword
@@ -186,7 +200,7 @@ impl Unicode {
 
         Ok(Self {
             keywords: keywords.into(),
-            attributes: Attributes::from_vec_unchecked(attributes),
+            attributes: Attributes::from_short_slice_unchecked(attributes),
         })
     }
 

@@ -19,10 +19,12 @@
 #include "api/audio_codecs/audio_encoder_factory.h"
 #include "api/audio_options.h"
 #include "api/data_channel_interface.h"
+#include "api/field_trials_view.h"
 #include "api/jsep.h"
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
+#include "api/rtp_parameters.h"
 #include "api/rtp_receiver_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/sequence_checker.h"
@@ -33,7 +35,6 @@
 #include "pc/test/fake_video_track_renderer.h"
 #include "rtc_base/third_party/sigslot/sigslot.h"
 #include "rtc_base/thread.h"
-#include "test/scoped_key_value_config.h"
 
 class PeerConnectionTestWrapper
     : public webrtc::PeerConnectionObserver,
@@ -52,7 +53,8 @@ class PeerConnectionTestWrapper
   bool CreatePc(
       const webrtc::PeerConnectionInterface::RTCConfiguration& config,
       rtc::scoped_refptr<webrtc::AudioEncoderFactory> audio_encoder_factory,
-      rtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory);
+      rtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory,
+      std::unique_ptr<webrtc::FieldTrialsView> field_trials = nullptr);
 
   rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> pc_factory()
       const {
@@ -63,6 +65,10 @@ class PeerConnectionTestWrapper
   rtc::scoped_refptr<webrtc::DataChannelInterface> CreateDataChannel(
       const std::string& label,
       const webrtc::DataChannelInit& init);
+
+  std::optional<webrtc::RtpCodecCapability> FindFirstSendCodecWithName(
+      cricket::MediaType media_type,
+      const std::string& name) const;
 
   void WaitForNegotiation();
 
@@ -95,10 +101,10 @@ class PeerConnectionTestWrapper
   void AddIceCandidate(const std::string& sdp_mid,
                        int sdp_mline_index,
                        const std::string& candidate);
-  void WaitForCallEstablished();
-  void WaitForConnection();
-  void WaitForAudio();
-  void WaitForVideo();
+  bool WaitForCallEstablished();
+  bool WaitForConnection();
+  bool WaitForAudio();
+  bool WaitForVideo();
   void GetAndAddUserMedia(bool audio,
                           const cricket::AudioOptions& audio_options,
                           bool video);
@@ -125,7 +131,6 @@ class PeerConnectionTestWrapper
   bool CheckForAudio();
   bool CheckForVideo();
 
-  webrtc::test::ScopedKeyValueConfig field_trials_;
   std::string name_;
   rtc::SocketServer* const socket_server_;
   rtc::Thread* const network_thread_;

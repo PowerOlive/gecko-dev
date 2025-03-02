@@ -19,13 +19,16 @@ EXAMPLE_TESTS_DIR = os.path.join(HERE, "data", "samples")
 EXAMPLE_TEST = os.path.join(EXAMPLE_TESTS_DIR, "perftest_example.js")
 EXAMPLE_XPCSHELL_TEST = Path(EXAMPLE_TESTS_DIR, "test_xpcshell.js")
 EXAMPLE_XPCSHELL_TEST2 = Path(EXAMPLE_TESTS_DIR, "test_xpcshell_flavor2.js")
+EXAMPLE_MOCHITEST_TEST = Path(EXAMPLE_TESTS_DIR, "test_mochitest.html")
+EXAMPLE_MOCHITEST_TEST2 = Path(EXAMPLE_TESTS_DIR, "test_mochitest_multiscript.html")
 EXAMPLE_WPT_TEST = Path(EXAMPLE_TESTS_DIR, "test_perftest_WPT_init_file.js")
+EXAMPLE_SHELL_TEST = HERE / "data" / "samples" / "perftest_custom.sh"
 BT_DATA = Path(HERE, "data", "browsertime-results", "browsertime.json")
 BT_DATA_VIDEO = Path(HERE, "data", "browsertime-results-video", "browsertime.json")
 DMG = Path(HERE, "data", "firefox.dmg")
 MOZINFO = Path(HERE, "data", "mozinfo.json")
-EXAMPLE_ANDROID_STARTUP_TEST = Path(
-    EXAMPLE_TESTS_DIR, "test_perftest_android_startup.js"
+MOCHITEST_DATA = Path(
+    HERE, "data", "perfherder-metrics-samples", "mochitest-metrics-sample.json"
 )
 
 

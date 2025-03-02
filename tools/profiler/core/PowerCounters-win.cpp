@@ -12,8 +12,6 @@
 // LogSeverity, defined by setupapi.h to DWORD, messes with other code.
 #undef LogSeverity
 
-#undef NTDDI_VERSION
-#define NTDDI_VERSION NTDDI_WINBLUE
 #include <emi.h>
 
 using namespace mozilla;
@@ -25,8 +23,7 @@ class PowerMeterChannel final : public BaseProfilerCount {
  public:
   explicit PowerMeterChannel(const WCHAR* aChannelName, ULONGLONG aInitialValue,
                              ULONGLONG aInitialTime)
-      : BaseProfilerCount(nullptr, nullptr, nullptr, "power",
-                          "Power utilization"),
+      : BaseProfilerCount(nullptr, "power", "Power utilization"),
         mChannelName(NS_ConvertUTF16toUTF8(aChannelName)),
         mPreviousValue(aInitialValue),
         mPreviousTime(aInitialTime),
@@ -214,13 +211,13 @@ class PowerMeterDevice {
   void AppendCountersTo(PowerCounters::CountVector& aCounters) {
     if (aCounters.reserve(aCounters.length() + mChannels.length())) {
       for (auto& channel : mChannels) {
-        aCounters.infallibleAppend(channel.get());
+        aCounters.infallibleAppend(channel);
       }
     }
   }
 
  private:
-  Vector<UniquePtr<PowerMeterChannel>, 4> mChannels;
+  Vector<PowerMeterChannel*, 4> mChannels;
   HANDLE mHandle = INVALID_HANDLE_VALUE;
   UniquePtr<EMI_CHANNEL_MEASUREMENT_DATA[]> mDataBuffer;
 };
@@ -303,7 +300,9 @@ PowerCounters::PowerCounters() {
   }
 }
 
-PowerCounters::~PowerCounters() { mCounters.clear(); }
+// This default destructor can not be defined in the header file as it depends
+// on the full definition of PowerMeterDevice which lives in this file.
+PowerCounters::~PowerCounters() {}
 
 void PowerCounters::Sample() {
   for (auto& device : mPowerMeterDevices) {

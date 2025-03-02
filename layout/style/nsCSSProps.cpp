@@ -108,7 +108,7 @@ void nsCSSProps::Init() {
 
   gPropertyIDLNameTable = new nsTHashMap<nsCStringHashKey, nsCSSPropertyID>;
   for (nsCSSPropertyID p = nsCSSPropertyID(0);
-       size_t(p) < ArrayLength(kIDLNameTable); p = nsCSSPropertyID(p + 1)) {
+       size_t(p) < std::size(kIDLNameTable); p = nsCSSPropertyID(p + 1)) {
     if (kIDLNameTable[p]) {
       gPropertyIDLNameTable->InsertOrUpdate(
           nsDependentCString(kIDLNameTable[p]), p);
@@ -156,10 +156,6 @@ nsCSSFontDesc nsCSSProps::LookupFontDesc(const nsACString& aFontDesc) {
   MOZ_ASSERT(gFontDescTable, "no lookup table, needs addref");
   nsCSSFontDesc which = nsCSSFontDesc(gFontDescTable->Lookup(aFontDesc));
 
-  if (which == eCSSFontDesc_Display &&
-      !StaticPrefs::layout_css_font_display_enabled()) {
-    which = eCSSFontDesc_UNKNOWN;
-  }
   return which;
 }
 

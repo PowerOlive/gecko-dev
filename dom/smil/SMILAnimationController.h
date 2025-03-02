@@ -45,6 +45,8 @@ class SMILAnimationController final : public SMILTimeContainer,
  public:
   explicit SMILAnimationController(mozilla::dom::Document* aDoc);
 
+  using DiscardArray = nsTObserverArray<RefPtr<dom::Element>>;
+
   // Clears mDocument pointer. (Called by our mozilla::dom::Document when it's
   // going away)
   void Disconnect();
@@ -107,8 +109,8 @@ class SMILAnimationController final : public SMILTimeContainer,
     return mMightHavePendingStyleUpdates;
   }
 
-  bool PreTraverse();
-  bool PreTraverseInSubtree(mozilla::dom::Element* aRoot);
+  void PreTraverse();
+  void PreTraverseInSubtree(mozilla::dom::Element* aRoot);
 
  protected:
   ~SMILAnimationController();
@@ -139,12 +141,13 @@ class SMILAnimationController final : public SMILTimeContainer,
 
   void DoMilestoneSamples();
 
-  static void SampleTimedElement(mozilla::dom::SVGAnimationElement* aElement,
+  static void SampleTimedElement(dom::SVGAnimationElement* aElement,
+                                 DiscardArray& aDiscards,
                                  TimeContainerHashtable* aActiveContainers);
 
   static void AddAnimationToCompositorTable(
       mozilla::dom::SVGAnimationElement* aElement,
-      SMILCompositorTable* aCompositorTable, bool& aStyleFlushNeeded);
+      SMILCompositorTable* aCompositorTable);
 
   static bool GetTargetIdentifierForAnimation(
       mozilla::dom::SVGAnimationElement* aAnimElem,

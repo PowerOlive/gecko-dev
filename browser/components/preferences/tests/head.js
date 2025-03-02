@@ -5,16 +5,24 @@ const { PermissionTestUtils } = ChromeUtils.importESModule(
   "resource://testing-common/PermissionTestUtils.sys.mjs"
 );
 
+ChromeUtils.defineLazyGetter(this, "QuickSuggestTestUtils", () => {
+  const { QuickSuggestTestUtils: module } = ChromeUtils.importESModule(
+    "resource://testing-common/QuickSuggestTestUtils.sys.mjs"
+  );
+  module.init(this);
+  return module;
+});
+
 const kDefaultWait = 2000;
 
 function is_element_visible(aElement, aMsg) {
   isnot(aElement, null, "Element should not be null, when checking visibility");
-  ok(!BrowserTestUtils.is_hidden(aElement), aMsg);
+  ok(!BrowserTestUtils.isHidden(aElement), aMsg);
 }
 
 function is_element_hidden(aElement, aMsg) {
   isnot(aElement, null, "Element should not be null, when checking visibility");
-  ok(BrowserTestUtils.is_hidden(aElement), aMsg);
+  ok(BrowserTestUtils.isHidden(aElement), aMsg);
 }
 
 function open_preferences(aCallback) {
@@ -45,7 +53,7 @@ function openAndLoadSubDialog(
 }
 
 function promiseLoadSubDialog(aURL) {
-  return new Promise((resolve, reject) => {
+  return new Promise(resolve => {
     content.gSubDialog._dialogStack.addEventListener(
       "dialogopen",
       function dialogopen(aEvent) {
@@ -98,7 +106,9 @@ async function openPreferencesViaOpenPreferencesAPI(aPane, aOptions) {
     ? "sync-pane-loaded"
     : "privacy-pane-loaded";
   let finalPrefPaneLoaded = TestUtils.topicObserved(finalPaneEvent, () => true);
-  gBrowser.selectedTab = BrowserTestUtils.addTab(gBrowser, "about:blank");
+  gBrowser.selectedTab = BrowserTestUtils.addTab(gBrowser, "about:blank", {
+    allowInheritPrincipal: true,
+  });
   openPreferences(aPane, aOptions);
   let newTabBrowser = gBrowser.selectedBrowser;
 
@@ -203,7 +213,8 @@ class DefinitionServer {
       id: "test-feature",
       // These l10n IDs are just random so we have some text to display
       title: "experimental-features-media-jxl",
-      description: "pane-experimental-description2",
+      group: "experimental-features-group-customize-browsing",
+      description: "pane-experimental-description3",
       restartRequired: false,
       type: "boolean",
       preference: "test.feature",
@@ -331,4 +342,111 @@ async function mockDefaultFxAInstance() {
   registerCleanupFunction(unmock);
 
   return { mock, unmock };
+}
+
+/**
+ * Runs a test that checks the visibility of the Firefox Suggest preferences UI.
+ * An initial Suggest enabled status is set and visibility is checked. Then a
+ * Nimbus experiment is installed that enables or disables Suggest and
+ * visibility is checked again. Finally the page is reopened and visibility is
+ * checked again.
+ *
+ * @param {boolean} initialSuggestEnabled
+ *   Whether Suggest should be enabled initially.
+ * @param {object} initialExpected
+ *   The expected visibility after setting the initial enabled status. It should
+ *   be an object that can be passed to `assertSuggestVisibility()`.
+ * @param {object} nimbusVariables
+ *   An object mapping Nimbus variable names to values.
+ * @param {object} newExpected
+ *   The expected visibility after installing the Nimbus experiment. It should
+ *   be an object that can be passed to `assertSuggestVisibility()`.
+ * @param {string} pane
+ *   The pref pane to open.
+ */
+async function doSuggestVisibilityTest({
+  initialSuggestEnabled,
+  initialExpected,
+  nimbusVariables,
+  newExpected = initialExpected,
+  pane = "search",
+}) {
+  info(
+    "Running Suggest visibility test: " +
+      JSON.stringify(
+        {
+          initialSuggestEnabled,
+          initialExpected,
+          nimbusVariables,
+          newExpected,
+        },
+        null,
+        2
+      )
+  );
+
+  // Set the initial enabled status.
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.urlbar.quicksuggest.enabled", initialSuggestEnabled]],
+  });
+
+  // Open prefs and check the initial visibility.
+  await openPreferencesViaOpenPreferencesAPI(pane, { leaveOpen: true });
+  await assertSuggestVisibility(initialExpected);
+
+  // Install a Nimbus experiment.
+  await QuickSuggestTestUtils.withExperiment({
+    valueOverrides: nimbusVariables,
+    callback: async () => {
+      // Check visibility again.
+      await assertSuggestVisibility(newExpected);
+
+      // To make sure visibility is properly updated on load, close the tab,
+      // open the prefs again, and check visibility.
+      gBrowser.removeCurrentTab();
+      await openPreferencesViaOpenPreferencesAPI(pane, { leaveOpen: true });
+      await assertSuggestVisibility(newExpected);
+    },
+  });
+
+  gBrowser.removeCurrentTab();
+  await SpecialPowers.popPrefEnv();
+}
+
+/**
+ * Checks the visibility of the Suggest UI.
+ *
+ * @param {object} expectedByElementId
+ *   An object that maps IDs of elements in the current tab to objects with the
+ *   following properties:
+ *
+ *   {bool} isVisible
+ *     Whether the element is expected to be visible.
+ *   {string} l10nId
+ *     The expected l10n ID of the element. Optional.
+ */
+async function assertSuggestVisibility(expectedByElementId) {
+  let doc = gBrowser.selectedBrowser.contentDocument;
+  for (let [elementId, { isVisible, l10nId }] of Object.entries(
+    expectedByElementId
+  )) {
+    let element = doc.getElementById(elementId);
+    await TestUtils.waitForCondition(
+      () => BrowserTestUtils.isVisible(element) == isVisible,
+      "Waiting for element visbility: " +
+        JSON.stringify({ elementId, isVisible })
+    );
+    Assert.strictEqual(
+      BrowserTestUtils.isVisible(element),
+      isVisible,
+      "Element should have expected visibility: " + elementId
+    );
+    if (l10nId) {
+      Assert.equal(
+        element.dataset.l10nId,
+        l10nId,
+        "The l10n ID should be correct for element: " + elementId
+      );
+    }
+  }
 }

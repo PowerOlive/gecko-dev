@@ -12,6 +12,7 @@
 #include "nsCOMArray.h"
 #include "nsThreadUtils.h"
 #include "mozilla/dom/File.h"
+#include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/PFilePickerParent.h"
 
 class nsIFile;
@@ -20,8 +21,12 @@ namespace mozilla::dom {
 
 class FilePickerParent : public PFilePickerParent {
  public:
-  FilePickerParent(const nsString& aTitle, const nsIFilePicker::Mode& aMode)
-      : mTitle(aTitle), mMode(aMode), mResult(nsIFilePicker::returnOK) {}
+  FilePickerParent(const nsString& aTitle, const nsIFilePicker::Mode& aMode,
+                   BrowsingContext* aBrowsingContext)
+      : mTitle(aTitle),
+        mMode(aMode),
+        mBrowsingContext(aBrowsingContext),
+        mResult(nsIFilePicker::returnOK) {}
 
  private:
   virtual ~FilePickerParent();
@@ -62,7 +67,7 @@ class FilePickerParent : public PFilePickerParent {
 
    private:
     virtual ~FilePickerShownCallback() = default;
-    FilePickerParent* mFilePickerParent;
+    RefPtr<FilePickerParent> mFilePickerParent;
   };
 
  private:
@@ -70,7 +75,7 @@ class FilePickerParent : public PFilePickerParent {
 
   // This runnable is used to do some I/O operation on a separate thread.
   class IORunnable : public Runnable {
-    FilePickerParent* mFilePickerParent;
+    RefPtr<FilePickerParent> mFilePickerParent;
     nsTArray<nsCOMPtr<nsIFile>> mFiles;
     nsTArray<BlobImplOrString> mResults;
     nsCOMPtr<nsIEventTarget> mEventTarget;
@@ -91,6 +96,7 @@ class FilePickerParent : public PFilePickerParent {
 
   nsString mTitle;
   nsIFilePicker::Mode mMode;
+  RefPtr<mozilla::dom::BrowsingContext> mBrowsingContext;
   nsIFilePicker::ResultCode mResult;
 };
 

@@ -16,6 +16,12 @@
 #include "Shutdown.h"
 #include "nsCategoryCache.h"
 
+// Filename of the database.
+#define DATABASE_FILENAME u"places.sqlite"_ns
+// Filename of the icons database.
+#define DATABASE_FAVICONS_FILENAME u"favicons.sqlite"_ns
+#define DATABASE_FAVICONS_SCHEMANAME "favicons"_ns
+
 // Fired after Places inited.
 #define TOPIC_PLACES_INIT_COMPLETE "places-init-complete"
 // This topic is received when the profile is about to be lost.  Places does
@@ -202,7 +208,11 @@ class Database final : public nsIObserver, public nsSupportsWeakReference {
     mozilla::Unused << EnsureConnection();
     return mTagsRootId;
   }
-  nsresult RecalculateOriginFrecencyStatsInternal();
+
+  /**
+   * Initializes additional SQLite functions, defined in SQLFunctions.h
+   */
+  static nsresult InitFunctions(mozIStorageConnection*);
 
  protected:
   /**
@@ -280,11 +290,6 @@ class Database final : public nsIObserver, public nsSupportsWeakReference {
                                bool shouldReparentRoots);
 
   /**
-   * Initializes additionale SQLite functions, defined in SQLFunctions.h
-   */
-  nsresult InitFunctions();
-
-  /**
    * Initializes temp entities, like triggers, tables, views...
    */
   nsresult InitTempEntities();
@@ -309,6 +314,8 @@ class Database final : public nsIObserver, public nsSupportsWeakReference {
   nsresult MigrateV73Up();
   nsresult MigrateV74Up();
   nsresult MigrateV75Up();
+  nsresult MigrateV77Up();
+  nsresult MigrateV78Up();
 
   nsresult UpdateBookmarkRootTitles();
 

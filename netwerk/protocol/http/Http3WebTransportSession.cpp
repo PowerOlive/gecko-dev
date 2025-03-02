@@ -331,8 +331,10 @@ void Http3WebTransportSession::Close(nsresult aResult) {
   mRecvState = RECV_DONE;
   mSendState = SEND_DONE;
 
-  mSession->CloseWebTransportConn();
-  mSession = nullptr;
+  if (mSession) {
+    mSession->CloseWebTransportConn();
+    mSession = nullptr;
+  }
 }
 
 void Http3WebTransportSession::OnSessionClosed(bool aCleanly, uint32_t aStatus,
@@ -445,7 +447,10 @@ Http3WebTransportSession::OnIncomingWebTransportStream(
     return nullptr;
   }
 
-  mListener->OnIncomingStreamAvailableInternal(stream);
+  if (nsCOMPtr<WebTransportSessionEventListenerInternal> listener =
+          do_QueryInterface(mListener)) {
+    listener->OnIncomingStreamAvailableInternal(stream);
+  }
   return stream.forget();
 }
 
@@ -468,7 +473,10 @@ void Http3WebTransportSession::OnDatagramReceived(nsTArray<uint8_t>&& aData) {
     return;
   }
 
-  mListener->OnDatagramReceivedInternal(std::move(aData));
+  if (nsCOMPtr<WebTransportSessionEventListenerInternal> listener =
+          do_QueryInterface(mListener)) {
+    listener->OnDatagramReceivedInternal(std::move(aData));
+  }
 }
 
 void Http3WebTransportSession::GetMaxDatagramSize() {

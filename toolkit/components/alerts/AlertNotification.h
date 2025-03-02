@@ -53,7 +53,7 @@ class AlertImageRequest final : public imgINotificationObserver,
   nsCOMPtr<imgIRequest> mRequest;
 };
 
-class AlertNotification final : public nsIAlertNotification {
+class AlertNotification : public nsIAlertNotification {
  public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIALERTNOTIFICATION
@@ -63,6 +63,9 @@ class AlertNotification final : public nsIAlertNotification {
   virtual ~AlertNotification();
 
  private:
+  nsresult InitId();
+
+  nsString mId;
   nsString mName;
   nsString mImageURL;
   nsString mTitle;

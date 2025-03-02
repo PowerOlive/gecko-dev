@@ -15,7 +15,7 @@ ChromeUtils.defineLazyGetter(
   lazy,
   "filenamesRegex",
   () =>
-    /^bookmarks-([0-9-]+)(?:_([0-9]+)){0,1}(?:_([a-z0-9=+-]{24})){0,1}\.(json(lz4)?)$/i
+    /^bookmarks-([0-9-]+)(?:_([0-9]+)){0,1}(?:_([a-z0-9=_+-]{24,})){0,1}\.(json(lz4)?)$/i
 );
 
 async function limitBackups(aMaxBackups, backupFiles) {
@@ -276,13 +276,7 @@ export var PlacesBackups = {
     }
     let backupAge = Math.round((profileLastUse - lastBackupTime) / 86400000);
     // Telemetry the age of the last available backup.
-    try {
-      Services.telemetry
-        .getHistogramById("PLACES_BACKUPS_DAYSFROMLAST")
-        .add(backupAge);
-    } catch (ex) {
-      console.error(new Error("Unable to report telemetry."));
-    }
+    Glean.places.backupsDaysfromlast.accumulateSingleSample(backupAge);
     return backupAge <= maxDays;
   },
 
@@ -497,7 +491,7 @@ export var PlacesBackups = {
    *         * children: array of child items in a folder
    */
   async getBookmarksTree() {
-    let startTime = Date.now();
+    let timerId = Glean.places.backupsBookmarkstree.start();
     let root = await lazy.PlacesUtils.promiseBookmarksTree(
       lazy.PlacesUtils.bookmarks.rootGuid,
       {
@@ -505,13 +499,7 @@ export var PlacesBackups = {
       }
     );
 
-    try {
-      Services.telemetry
-        .getHistogramById("PLACES_BACKUPS_BOOKMARKSTREE_MS")
-        .add(Date.now() - startTime);
-    } catch (ex) {
-      console.error("Unable to report telemetry.");
-    }
+    Glean.places.backupsBookmarkstree.stopAndAccumulate(timerId);
     return [root, root.itemsCount];
   },
 };

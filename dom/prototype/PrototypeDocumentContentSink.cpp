@@ -48,10 +48,12 @@
 #include "mozilla/dom/ProcessingInstruction.h"
 #include "mozilla/dom/XMLStylesheetProcessingInstruction.h"
 #include "mozilla/dom/ScriptLoader.h"
+#include "mozilla/dom/nsCSPUtils.h"
 #include "mozilla/LoadInfo.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ProfilerLabels.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/Try.h"
 
 #include "nsXULPrototypeCache.h"
 #include "nsXULElement.h"
@@ -109,7 +111,7 @@ nsresult PrototypeDocumentContentSink::Init(Document* aDoc, nsIURI* aURI,
   mDocument->SetMayStartLayout(false);
 
   // Get the URI.  this should match the uri used for the OnNewURI call in
-  // nsDocShell::CreateContentViewer.
+  // nsDocShell::CreateDocumentViewer.
   nsresult rv = NS_GetFinalChannelURI(aChannel, getter_AddRefs(mDocumentURI));
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -174,8 +176,7 @@ void PrototypeDocumentContentSink::ContinueInterruptedParsingAsync() {
   nsCOMPtr<nsIRunnable> ev = NewRunnableMethod(
       "PrototypeDocumentContentSink::ContinueInterruptedParsingIfEnabled", this,
       &PrototypeDocumentContentSink::ContinueInterruptedParsingIfEnabled);
-
-  mDocument->Dispatch(mozilla::TaskCategory::Other, ev.forget());
+  mDocument->Dispatch(ev.forget());
 }
 
 //----------------------------------------------------------------------
@@ -283,6 +284,7 @@ nsresult PrototypeDocumentContentSink::PrepareToWalk() {
 
   // Notify document that the load is beginning
   mDocument->BeginLoad();
+  MOZ_ASSERT(!mDocument->HasChildren());
 
   // Get the prototype's root element and initialize the context
   // stack for the prototype walk.
@@ -303,15 +305,13 @@ nsresult PrototypeDocumentContentSink::PrepareToWalk() {
     return NS_OK;
   }
 
-  nsINode* nodeToInsertBefore = mDocument->GetFirstChild();
-
   const nsTArray<RefPtr<nsXULPrototypePI> >& processingInstructions =
       mCurrentPrototype->GetProcessingInstructions();
 
   uint32_t total = processingInstructions.Length();
   for (uint32_t i = 0; i < total; ++i) {
     rv = CreateAndInsertPI(processingInstructions[i], mDocument,
-                           nodeToInsertBefore);
+                           /* aInProlog */ true);
     if (NS_FAILED(rv)) return rv;
   }
 
@@ -350,7 +350,7 @@ nsresult PrototypeDocumentContentSink::PrepareToWalk() {
 }
 
 nsresult PrototypeDocumentContentSink::CreateAndInsertPI(
-    const nsXULPrototypePI* aProtoPI, nsINode* aParent, nsINode* aBeforeThis) {
+    const nsXULPrototypePI* aProtoPI, nsINode* aParent, bool aInProlog) {
   MOZ_ASSERT(aProtoPI, "null ptr");
   MOZ_ASSERT(aParent, "null ptr");
 
@@ -363,13 +363,17 @@ nsresult PrototypeDocumentContentSink::CreateAndInsertPI(
     MOZ_ASSERT(LinkStyle::FromNode(*node),
                "XML Stylesheet node does not implement LinkStyle!");
     auto* pi = static_cast<XMLStylesheetProcessingInstruction*>(node.get());
-    rv = InsertXMLStylesheetPI(aProtoPI, aParent, aBeforeThis, pi);
+    rv = InsertXMLStylesheetPI(aProtoPI, aParent, pi);
   } else {
+    // Handles the special <?csp ?> PI, which will be handled before
+    // creating any element with potential inline style or scripts.
+    if (aInProlog && aProtoPI->mTarget.EqualsLiteral("csp")) {
+      CSP_ApplyMetaCSPToDoc(*aParent->OwnerDoc(), aProtoPI->mData);
+    }
+
     // No special processing, just add the PI to the document.
     ErrorResult error;
-    aParent->InsertChildBefore(node->AsContent(),
-                               aBeforeThis ? aBeforeThis->AsContent() : nullptr,
-                               false, error);
+    aParent->AppendChildTo(node->AsContent(), false, error);
     rv = error.StealNSResult();
   }
 
@@ -377,7 +381,7 @@ nsresult PrototypeDocumentContentSink::CreateAndInsertPI(
 }
 
 nsresult PrototypeDocumentContentSink::InsertXMLStylesheetPI(
-    const nsXULPrototypePI* aProtoPI, nsINode* aParent, nsINode* aBeforeThis,
+    const nsXULPrototypePI* aProtoPI, nsINode* aParent,
     XMLStylesheetProcessingInstruction* aPINode) {
   // We want to be notified when the style sheet finishes loading, so
   // disable style sheet loading for now.
@@ -385,8 +389,7 @@ nsresult PrototypeDocumentContentSink::InsertXMLStylesheetPI(
   aPINode->OverrideBaseURI(mCurrentPrototype->GetURI());
 
   ErrorResult rv;
-  aParent->InsertChildBefore(
-      aPINode, aBeforeThis ? aBeforeThis->AsContent() : nullptr, false, rv);
+  aParent->AppendChildTo(aPINode, false, rv);
   if (rv.Failed()) {
     return rv.StealNSResult();
   }
@@ -453,7 +456,7 @@ nsresult PrototypeDocumentContentSink::ResumeWalk() {
     nsContentUtils::ReportToConsoleNonLocalized(
         u"Failed to load document from prototype document."_ns,
         nsIScriptError::errorFlag, "Prototype Document"_ns, mDocument,
-        mDocumentURI);
+        SourceLocation{mDocumentURI.get()});
   }
   return rv;
 }
@@ -588,22 +591,22 @@ nsresult PrototypeDocumentContentSink::ResumeWalkInternal() {
         case nsXULPrototypeNode::eType_PI: {
           auto* piProto = static_cast<nsXULPrototypePI*>(childproto);
 
-          // <?xml-stylesheet?> doesn't have an effect
-          // outside the prolog, like it used to. Issue a warning.
+          // <?xml-stylesheet?> and <?csp?> don't have an effect
+          // outside the prolog, issue a warning.
 
-          if (piProto->mTarget.EqualsLiteral("xml-stylesheet")) {
+          if (piProto->mTarget.EqualsLiteral("xml-stylesheet") ||
+              piProto->mTarget.EqualsLiteral("csp")) {
             AutoTArray<nsString, 1> params = {piProto->mTarget};
 
-            nsContentUtils::ReportToConsole(nsIScriptError::warningFlag,
-                                            "XUL Document"_ns, nullptr,
-                                            nsContentUtils::eXUL_PROPERTIES,
-                                            "PINotInProlog", params, docURI);
+            nsContentUtils::ReportToConsole(
+                nsIScriptError::warningFlag, "XUL Document"_ns, nullptr,
+                nsContentUtils::eXUL_PROPERTIES, "PINotInProlog2", params,
+                SourceLocation(docURI.get()));
           }
 
-          nsIContent* parent = element.get();
-          if (parent) {
+          if (nsIContent* parent = element.get()) {
             // an inline script could have removed the root element
-            rv = CreateAndInsertPI(piProto, parent, nullptr);
+            rv = CreateAndInsertPI(piProto, parent, /* aInProlog */ false);
             NS_ENSURE_SUCCESS(rv, rv);
           }
         } break;
@@ -651,7 +654,7 @@ nsresult PrototypeDocumentContentSink::DoneWalking() {
     mDocument->SetReadyStateInternal(Document::READYSTATE_INTERACTIVE);
     mDocument->NotifyPossibleTitleChange(false);
 
-    nsContentUtils::DispatchEventOnlyToChrome(mDocument, ToSupports(mDocument),
+    nsContentUtils::DispatchEventOnlyToChrome(mDocument, mDocument,
                                               u"MozBeforeInitialXULLayout"_ns,
                                               CanBubble::eYes, Cancelable::eNo);
   }
@@ -669,7 +672,15 @@ nsresult PrototypeDocumentContentSink::DoneWalking() {
     nsXULPrototypeCache::GetInstance()->HasPrototype(mDocumentURI,
                                                      &isCachedOnDisk);
     if (!isCachedOnDisk) {
-      nsXULPrototypeCache::GetInstance()->WritePrototype(mCurrentPrototype);
+      if (!mDocument->GetDocumentElement() ||
+          (mDocument->GetDocumentElement()->NodeInfo()->Equals(
+               nsGkAtoms::parsererror) &&
+           mDocument->GetDocumentElement()->NodeInfo()->NamespaceEquals(
+               nsDependentAtomString(nsGkAtoms::nsuri_parsererror)))) {
+        nsXULPrototypeCache::GetInstance()->RemovePrototype(mDocumentURI);
+      } else {
+        nsXULPrototypeCache::GetInstance()->WritePrototype(mCurrentPrototype);
+      }
     }
   }
 
@@ -1035,9 +1046,10 @@ nsresult PrototypeDocumentContentSink::CreateElementFromPrototype(
     const bool isRoot = !aParent;
     // If it's a XUL element, it'll be lightweight until somebody
     // monkeys with it.
-    rv = nsXULElement::CreateFromPrototype(aPrototype, doc, true, isRoot,
-                                           getter_AddRefs(result));
-    if (NS_FAILED(rv)) return rv;
+    result = nsXULElement::CreateFromPrototype(aPrototype, doc, isRoot);
+    if (!result) {
+      return NS_ERROR_OUT_OF_MEMORY;
+    }
   } else {
     // If it's not a XUL element, it's gonna be heavyweight no matter
     // what. So we need to copy everything out of the prototype

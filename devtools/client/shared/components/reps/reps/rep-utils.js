@@ -67,8 +67,12 @@ define(function (require, exports, module) {
   const uneatLastUrlCharsRegex = /(?:[),;.!?`'"]|[.!?]\)|\)[.!?])$/;
 
   const ELLIPSIS = "\u2026";
-  const dom = require("devtools/client/shared/vendor/react-dom-factories");
+  const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
   const { span } = dom;
+
+  const {
+    JSON_NUMBER,
+  } = require("resource://devtools/client/shared/components/reps/reps/constants.js");
 
   function escapeNewLines(value) {
     return value.replace(/\r/gm, "\\r").replace(/\n/gm, "\\n");
@@ -448,15 +452,10 @@ define(function (require, exports, module) {
    *         Whether the token is a URL.
    */
   function isURL(token) {
-    try {
-      if (!validProtocols.test(token)) {
-        return false;
-      }
-      new URL(token);
-      return true;
-    } catch (e) {
+    if (!validProtocols.test(token)) {
       return false;
     }
+    return URL.canParse(token);
   }
 
   /**
@@ -548,16 +547,69 @@ define(function (require, exports, module) {
       }, {});
   }
 
+  /**
+   * Append has-rtl-char to className if passed string has RTL chars.
+   * has-rtl-char is used in reps.css to set `unicode-bidi: isolate` on the element.
+   * It's important to only apply it when needed as this CSS property can have an
+   * important impact on performance (See Bug 1879806)
+   *
+   * @param {String} className: The className want to set on an element
+   * @param {String} strToCheck: The string for which we want to check if it has RTL chars
+   * @returns {String}
+   */
+  function appendRTLClassNameIfNeeded(className = "", strToCheck) {
+    if (
+      // The JSONViewer, which uses some Reps component, doesn't have access to Services.
+      typeof Services == "undefined" ||
+      !Services?.intl?.stringHasRTLChars(strToCheck)
+    ) {
+      return className;
+    }
+    return `${className} has-rtl-char`;
+  }
+
+  /**
+   * Parse JSON string and handle numbers that would be lossily parsed (e.g. 1516340399466235648).
+   * Such numbers are represented by an object with the following properties:
+   * - type: JSON_NUMBER , so the object can be rendered by the JsonNumber Rep
+   * - source: The original number in the JSON string (e.g. `1e2`)
+   * - parsedValue: The parsed number  (e.g. for `1e2` it will be `100`)
+   *
+   * @param {String} str: The JSON string
+   * @returns {*} The parsed JSON
+   */
+  function parseJsonLossless(str) {
+    return JSON.parse(str, (key, parsedValue, { source }) => {
+      // Parsed numbers might be different than the source, for example
+      // JSON.parse("1516340399466235648") returns 1516340399466235600.
+      if (
+        typeof parsedValue === "number" &&
+        source !== parsedValue.toString() &&
+        // `(-0).toString()` returns "0", but the value is correctly parsed as -0, so we
+        // shouldn't render JSON_NUMBER here.
+        source !== "-0"
+      ) {
+        // In such case, we want to show the actual source, as well as an indication
+        // to the user that the parsed value might be different.
+        return { source, type: JSON_NUMBER, parsedValue };
+      }
+
+      return parsedValue;
+    });
+  }
+
   module.exports = {
     interleave,
     isURL,
     cropString,
     containsURL,
     rawCropString,
+    appendRTLClassNameIfNeeded,
     sanitizeString,
     escapeString,
     wrapRender,
     cropMultipleLines,
+    parseJsonLossless,
     parseURLParams,
     parseURLEncodedText,
     getFileName,

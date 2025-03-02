@@ -9,6 +9,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Deferred: "chrome://remote/content/shared/Sync.sys.mjs",
   HttpServer: "chrome://remote/content/server/httpd.sys.mjs",
   Log: "chrome://remote/content/shared/Log.sys.mjs",
+  PollPromise: "chrome://remote/content/shared/Sync.sys.mjs",
+  RecommendedPreferences:
+    "chrome://remote/content/shared/RecommendedPreferences.sys.mjs",
   WebDriverBiDi: "chrome://remote/content/webdriver-bidi/WebDriverBiDi.sys.mjs",
 });
 
@@ -31,7 +34,6 @@ const DEFAULT_PORT = 9222;
 
 const isRemote =
   Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_CONTENT;
-
 class RemoteAgentParentProcess {
   #allowHosts;
   #allowOrigins;
@@ -148,6 +150,59 @@ class RemoteAgentParentProcess {
   }
 
   /**
+   * Handle the --remote-debugging-port command line argument.
+   *
+   * @param {nsICommandLine} cmdLine
+   *     Instance of the command line interface.
+   *
+   * @returns {boolean}
+   *     Return `true` if the command line argument has been found.
+   */
+  #handleRemoteDebuggingPortFlag(cmdLine) {
+    let enabled = false;
+
+    try {
+      // Catch cases when the argument, and a port have been specified.
+      const port = cmdLine.handleFlagWithParam("remote-debugging-port", false);
+      if (port !== null) {
+        enabled = true;
+
+        // In case of an invalid port keep the default port
+        const parsed = Number(port);
+        if (!isNaN(parsed)) {
+          this.#port = parsed;
+        }
+      }
+    } catch (e) {
+      // If no port has been given check for the existence of the argument.
+      enabled = cmdLine.handleFlag("remote-debugging-port", false);
+    }
+
+    return enabled;
+  }
+
+  #handleAllowHostsFlag(cmdLine) {
+    try {
+      const hosts = cmdLine.handleFlagWithParam("remote-allow-hosts", false);
+      return hosts.split(",");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  #handleAllowOriginsFlag(cmdLine) {
+    try {
+      const origins = cmdLine.handleFlagWithParam(
+        "remote-allow-origins",
+        false
+      );
+      return origins.split(",");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
    * Check if the provided URI's host is an IP address.
    *
    * @param {nsIURI} uri
@@ -162,17 +217,6 @@ class RemoteAgentParentProcess {
       return e.result == Cr.NS_ERROR_HOST_IS_IP_ADDRESS;
     }
     return false;
-  }
-
-  handle(cmdLine) {
-    // remote-debugging-port has to be consumed in nsICommandLineHandler:handle
-    // to avoid issues on macos. See Marionette.jsm::handle() for more details.
-    // TODO: remove after Bug 1724251 is fixed.
-    try {
-      cmdLine.handleFlagWithParam("remote-debugging-port", false);
-    } catch (e) {
-      cmdLine.handleFlag("remote-debugging-port", false);
-    }
   }
 
   async #listen(port) {
@@ -221,15 +265,33 @@ class RemoteAgentParentProcess {
     }
 
     try {
-      // Bug 1783938: httpd.js refuses connections when started on a IPv4
-      // address. As workaround start on localhost and add another identity
-      // for that IP address.
       this.#server = new lazy.HttpServer();
       const host = isIPv4Host ? DEFAULT_HOST : this.#host;
-      this.server._start(port, host);
-      this.#port = this.server._port;
+
+      let error;
+      await lazy.PollPromise(
+        (resolve, reject) => {
+          try {
+            this.server._start(port, host);
+            this.#port = this.server._port;
+            resolve();
+          } catch (e) {
+            error = e;
+            lazy.logger.debug(`Could not bind to port ${port} (${error.name})`);
+            reject();
+          }
+        },
+        { interval: 250, timeout: 5000 }
+      );
+
+      if (!this.#server._socket) {
+        throw new Error(`Failed to start HTTP server on port ${port}`);
+      }
 
       if (isIPv4Host) {
+        // Bug 1783938: httpd.js refuses connections when started on a IPv4
+        // address. As workaround start on localhost and add another identity
+        // for that IP address.
         this.server.identity.add("http", this.#host, this.#port);
       }
 
@@ -238,7 +300,12 @@ class RemoteAgentParentProcess {
       await Promise.all([this.#webDriverBiDi?.start(), this.#cdp?.start()]);
     } catch (e) {
       await this.#stop();
-      lazy.logger.error(`Unable to start remote agent: ${e.message}`, e);
+      lazy.logger.error(
+        `Unable to start the RemoteAgent: ${e.message}, closing`,
+        e
+      );
+
+      Services.startup.quit(Ci.nsIAppStartup.eForceQuit);
     }
   }
 
@@ -316,56 +383,14 @@ class RemoteAgentParentProcess {
     }
   }
 
-  /**
-   * Handle the --remote-debugging-port command line argument.
-   *
-   * @param {nsICommandLine} cmdLine
-   *     Instance of the command line interface.
-   *
-   * @returns {boolean}
-   *     Return `true` if the command line argument has been found.
-   */
-  handleRemoteDebuggingPortFlag(cmdLine) {
-    let enabled = false;
-
+  handle(cmdLine) {
+    // remote-debugging-port has to be consumed in nsICommandLineHandler:handle
+    // to avoid issues on macos. See Marionette.sys.mjs::handle() for more details.
+    // TODO: remove after Bug 1724251 is fixed.
     try {
-      // Catch cases when the argument, and a port have been specified.
-      const port = cmdLine.handleFlagWithParam("remote-debugging-port", false);
-      if (port !== null) {
-        enabled = true;
-
-        // In case of an invalid port keep the default port
-        const parsed = Number(port);
-        if (!isNaN(parsed)) {
-          this.#port = parsed;
-        }
-      }
+      cmdLine.handleFlagWithParam("remote-debugging-port", false);
     } catch (e) {
-      // If no port has been given check for the existence of the argument.
-      enabled = cmdLine.handleFlag("remote-debugging-port", false);
-    }
-
-    return enabled;
-  }
-
-  handleAllowHostsFlag(cmdLine) {
-    try {
-      const hosts = cmdLine.handleFlagWithParam("remote-allow-hosts", false);
-      return hosts.split(",");
-    } catch (e) {
-      return null;
-    }
-  }
-
-  handleAllowOriginsFlag(cmdLine) {
-    try {
-      const origins = cmdLine.handleFlagWithParam(
-        "remote-allow-origins",
-        false
-      );
-      return origins.split(",");
-    } catch (e) {
-      return null;
+      cmdLine.handleFlag("remote-debugging-port", false);
     }
   }
 
@@ -382,17 +407,23 @@ class RemoteAgentParentProcess {
       case "command-line-startup":
         Services.obs.removeObserver(this, topic);
 
-        this.#enabled = this.handleRemoteDebuggingPortFlag(subject);
+        this.#enabled = this.#handleRemoteDebuggingPortFlag(subject);
 
         if (this.#enabled) {
+          // Add annotation to crash report to indicate whether the
+          // Remote Agent was active.
+          Services.appinfo.annotateCrashReport("RemoteAgent", true);
+
+          this.#allowHosts = this.#handleAllowHostsFlag(subject);
+          this.#allowOrigins = this.#handleAllowOriginsFlag(subject);
+
           Services.obs.addObserver(this, "final-ui-startup");
-
-          this.#allowHosts = this.handleAllowHostsFlag(subject);
-          this.#allowOrigins = this.handleAllowOriginsFlag(subject);
-
           Services.obs.addObserver(this, "browser-idle-startup-tasks-finished");
           Services.obs.addObserver(this, "mail-idle-startup-tasks-finished");
           Services.obs.addObserver(this, "quit-application");
+
+          // Apply the common set of preferences for all supported protocols
+          lazy.RecommendedPreferences.applyPreferences();
 
           // With Bug 1717899 we will extend the lifetime of the Remote Agent to
           // the whole Firefox session, which will be identical to Marionette. For
@@ -484,12 +515,6 @@ class RemoteAgentParentProcess {
 }
 
 class RemoteAgentContentProcess {
-  #classID;
-
-  constructor() {
-    this.#classID = Components.ID("{8f685a9d-8181-46d6-a71d-869289099c6d}");
-  }
-
   get running() {
     let reply = Services.cpmm.sendSyncMessage("RemoteAgent:IsRunning");
     if (!reply.length) {

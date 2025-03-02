@@ -12,7 +12,6 @@
 #include "nsAccessibilityService.h"
 #include "NotificationController.h"
 #include "States.h"
-#include "nsIScrollableFrame.h"
 #include "mozilla/dom/DocumentInlines.h"
 
 #ifdef A11Y_LOG
@@ -121,16 +120,6 @@ inline void DocAccessible::CreateSubtree(LocalAccessible* aChild) {
     logging::Tree("TREE", "Created subtree", aChild);
   }
 #endif
-
-  // Fire events for ARIA elements.
-  if (aChild->HasARIARole()) {
-    roles::Role role = aChild->ARIARole();
-    if (role == roles::MENUPOPUP) {
-      FireDelayedEvent(nsIAccessibleEvent::EVENT_MENUPOPUP_START, aChild);
-    } else if (role == roles::ALERT) {
-      FireDelayedEvent(nsIAccessibleEvent::EVENT_ALERT, aChild);
-    }
-  }
 
   // XXX: do we really want to send focus to focused DOM node not taking into
   // account active item?

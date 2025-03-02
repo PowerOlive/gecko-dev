@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
+import React, { Component } from "devtools/client/shared/vendor/react";
 import {
   div,
   input,
@@ -11,27 +11,30 @@ import {
   form,
   datalist,
   option,
-} from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../../utils/connect";
+  span,
+} from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 import { features } from "../../utils/prefs";
+import AccessibleImage from "../shared/AccessibleImage";
 
-import { objectInspector } from "devtools/client/shared/components/reps/index";
+import * as objectInspector from "resource://devtools/client/shared/components/object-inspector/index.js";
 
-import actions from "../../actions";
+import actions from "../../actions/index";
 import {
   getExpressions,
-  getExpressionError,
   getAutocompleteMatchset,
-} from "../../selectors";
+  getSelectedSource,
+  isMapScopesEnabled,
+  getIsCurrentThreadPaused,
+  getSelectedFrame,
+  getOriginalFrameScope,
+} from "../../selectors/index";
 import { getExpressionResultGripAndFront } from "../../utils/expressions";
 
-import { CloseButton } from "../shared/Button";
+import { CloseButton } from "../shared/Button/index";
 
-import "./Expressions.css";
-
-const { debounce } = require("devtools/shared/debounce");
-const classnames = require("devtools/client/shared/classnames.js");
+const { debounce } = require("resource://devtools/shared/debounce.js");
 
 const { ObjectInspector } = objectInspector;
 
@@ -43,7 +46,6 @@ class Expressions extends Component {
       editing: false,
       editIndex: -1,
       inputValue: "",
-      focused: false,
     };
   }
 
@@ -53,9 +55,7 @@ class Expressions extends Component {
       autocomplete: PropTypes.func.isRequired,
       autocompleteMatches: PropTypes.array,
       clearAutocomplete: PropTypes.func.isRequired,
-      clearExpressionError: PropTypes.func.isRequired,
       deleteExpression: PropTypes.func.isRequired,
-      expressionError: PropTypes.bool.isRequired,
       expressions: PropTypes.array.isRequired,
       highlightDomElement: PropTypes.func.isRequired,
       onExpressionAdded: PropTypes.func.isRequired,
@@ -64,6 +64,8 @@ class Expressions extends Component {
       showInput: PropTypes.bool.isRequired,
       unHighlightDomElement: PropTypes.func.isRequired,
       updateExpression: PropTypes.func.isRequired,
+      isOriginalVariableMappingDisabled: PropTypes.bool,
+      isLoadingOriginalVariables: PropTypes.bool,
     };
   }
 
@@ -78,15 +80,16 @@ class Expressions extends Component {
   }
 
   clear = () => {
-    this.setState(() => {
-      this.props.clearExpressionError();
-      return { editing: false, editIndex: -1, inputValue: "", focused: false };
-    });
+    this.setState(() => ({
+      editing: false,
+      editIndex: -1,
+      inputValue: "",
+    }));
   };
 
   // FIXME: https://bugzilla.mozilla.org/show_bug.cgi?id=1774507
   UNSAFE_componentWillReceiveProps(nextProps) {
-    if (this.state.editing && !nextProps.expressionError) {
+    if (this.state.editing) {
       this.clear();
     }
 
@@ -98,18 +101,24 @@ class Expressions extends Component {
   }
 
   shouldComponentUpdate(nextProps, nextState) {
-    const { editing, inputValue, focused } = this.state;
-    const { expressions, expressionError, showInput, autocompleteMatches } =
-      this.props;
+    const { editing, inputValue } = this.state;
+    const {
+      expressions,
+      showInput,
+      autocompleteMatches,
+      isLoadingOriginalVariables,
+      isOriginalVariableMappingDisabled,
+    } = this.props;
 
     return (
       autocompleteMatches !== nextProps.autocompleteMatches ||
       expressions !== nextProps.expressions ||
-      expressionError !== nextProps.expressionError ||
+      isLoadingOriginalVariables !== nextProps.isLoadingOriginalVariables ||
+      isOriginalVariableMappingDisabled !==
+        nextProps.isOriginalVariableMappingDisabled ||
       editing !== nextState.editing ||
       inputValue !== nextState.inputValue ||
-      nextProps.showInput !== showInput ||
-      focused !== nextState.focused
+      nextProps.showInput !== showInput
     );
   }
 
@@ -123,7 +132,7 @@ class Expressions extends Component {
     if (!prevState.editing && this.state.editing) {
       _input.setSelectionRange(0, _input.value.length);
       _input.focus();
-    } else if (this.props.showInput && !this.state.focused) {
+    } else if (this.props.showInput) {
       _input.focus();
     }
   }
@@ -162,17 +171,11 @@ class Expressions extends Component {
   };
 
   hideInput = () => {
-    this.setState({ focused: false });
     this.props.onExpressionAdded();
-    this.props.clearExpressionError();
   };
 
   createElement = element => {
     return document.createElement(element);
-  };
-
-  onFocus = () => {
-    this.setState({ focused: true });
   };
 
   onBlur() {
@@ -188,24 +191,58 @@ class Expressions extends Component {
   };
 
   handleNewSubmit = async e => {
-    const { inputValue } = this.state;
     e.preventDefault();
     e.stopPropagation();
 
-    this.props.clearExpressionError();
     await this.props.addExpression(this.state.inputValue);
     this.setState({
       editing: false,
       editIndex: -1,
-      inputValue: this.props.expressionError ? inputValue : "",
+      inputValue: "",
     });
 
     this.props.clearAutocomplete();
   };
 
+  renderExpressionsNotification() {
+    const { isOriginalVariableMappingDisabled, isLoadingOriginalVariables } =
+      this.props;
+
+    if (isOriginalVariableMappingDisabled) {
+      return div(
+        {
+          className: "pane-info no-original-scopes-info",
+          "aria-role": "status",
+        },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "sourcemap" })
+        ),
+        span(
+          { className: "message" },
+          L10N.getStr("expressions.noOriginalScopes")
+        )
+      );
+    }
+
+    if (isLoadingOriginalVariables) {
+      return div(
+        { className: "pane-info" },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "loader" })
+        ),
+        span(
+          { className: "message" },
+          L10N.getStr("scopes.loadingOriginalScopes")
+        )
+      );
+    }
+    return null;
+  }
+
   renderExpression = (expression, index) => {
     const {
-      expressionError,
       openLink,
       openElementInInspector,
       highlightDomElement,
@@ -215,7 +252,7 @@ class Expressions extends Component {
     const { editing, editIndex } = this.state;
     const { input: _input, updating } = expression;
     const isEditingExpr = editing && editIndex === index;
-    if (isEditingExpr || (isEditingExpr && expressionError)) {
+    if (isEditingExpr) {
       return this.renderExpressionEditInput(expression);
     }
 
@@ -249,7 +286,7 @@ class Expressions extends Component {
           roots: [root],
           autoExpandDepth: 0,
           disableWrap: true,
-          openLink: openLink,
+          openLink,
           createElement: this.createElement,
           onDoubleClick: (items, { depth }) => {
             if (depth === 0) {
@@ -315,31 +352,19 @@ class Expressions extends Component {
   }
 
   renderNewExpressionInput() {
-    const { expressionError } = this.props;
-    const { editing, inputValue, focused } = this.state;
-    const error = editing === false && expressionError === true;
-    const placeholder = error
-      ? L10N.getStr("expressions.errorMsg")
-      : L10N.getStr("expressions.placeholder");
+    const { editing, inputValue } = this.state;
     return form(
       {
-        className: classnames(
-          "expression-input-container expression-input-form",
-          {
-            focused,
-            error,
-          }
-        ),
+        className: "expression-input-container expression-input-form",
         onSubmit: this.handleNewSubmit,
       },
       input({
         className: "input-expression",
         type: "text",
-        placeholder: placeholder,
+        placeholder: L10N.getStr("expressions.placeholder2"),
         onChange: this.handleChange,
         onBlur: this.hideInput,
         onKeyDown: this.handleKeyDown,
-        onFocus: this.onFocus,
         value: !editing ? inputValue : "",
         ref: c => (this._input = c),
         ...(features.autocompleteExpression && {
@@ -357,30 +382,19 @@ class Expressions extends Component {
   }
 
   renderExpressionEditInput(expression) {
-    const { expressionError } = this.props;
-    const { inputValue, editing, focused } = this.state;
-    const error = editing === true && expressionError === true;
+    const { inputValue, editing } = this.state;
     return form(
       {
         key: expression.input,
-        className: classnames(
-          "expression-input-container expression-input-form",
-          {
-            focused,
-            error,
-          }
-        ),
+        className: "expression-input-container expression-input-form",
         onSubmit: e => this.handleExistingSubmit(e, expression),
       },
       input({
-        className: classnames("input-expression", {
-          error,
-        }),
+        className: "input-expression",
         type: "text",
         onChange: this.handleChange,
         onBlur: this.clear,
         onKeyDown: this.handleKeyDown,
-        onFocus: this.onFocus,
         value: editing ? inputValue : expression.input,
         ref: c => (this._input = c),
         ...(features.autocompleteExpression && {
@@ -400,25 +414,49 @@ class Expressions extends Component {
   render() {
     const { expressions } = this.props;
 
-    if (expressions.length === 0) {
-      return this.renderNewExpressionInput();
-    }
-
-    return this.renderExpressions();
+    return div(
+      { className: "pane" },
+      this.renderExpressionsNotification(),
+      expressions.length === 0
+        ? this.renderNewExpressionInput()
+        : this.renderExpressions()
+    );
   }
 }
 
-const mapStateToProps = state => ({
-  autocompleteMatches: getAutocompleteMatchset(state),
-  expressions: getExpressions(state),
-  expressionError: getExpressionError(state),
-});
+const mapStateToProps = state => {
+  const selectedFrame = getSelectedFrame(state);
+  const selectedSource = getSelectedSource(state);
+  const isPaused = getIsCurrentThreadPaused(state);
+  const mapScopesEnabled = isMapScopesEnabled(state);
+  const expressions = getExpressions(state);
+
+  const selectedSourceIsNonPrettyPrintedOriginal =
+    selectedSource?.isOriginal && !selectedSource?.isPrettyPrinted;
+
+  let isOriginalVariableMappingDisabled, isLoadingOriginalVariables;
+
+  if (selectedSourceIsNonPrettyPrintedOriginal) {
+    isOriginalVariableMappingDisabled = isPaused && !mapScopesEnabled;
+    isLoadingOriginalVariables =
+      isPaused &&
+      mapScopesEnabled &&
+      !expressions.length &&
+      !getOriginalFrameScope(state, selectedFrame)?.scope;
+  }
+
+  return {
+    isOriginalVariableMappingDisabled,
+    isLoadingOriginalVariables,
+    autocompleteMatches: getAutocompleteMatchset(state),
+    expressions,
+  };
+};
 
 export default connect(mapStateToProps, {
   autocomplete: actions.autocomplete,
   clearAutocomplete: actions.clearAutocomplete,
   addExpression: actions.addExpression,
-  clearExpressionError: actions.clearExpressionError,
   updateExpression: actions.updateExpression,
   deleteExpression: actions.deleteExpression,
   openLink: actions.openLink,

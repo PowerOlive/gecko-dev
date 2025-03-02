@@ -4,16 +4,31 @@
 
 "use strict";
 
-define(function (require, exports, module) {
-  const { render } = require("devtools/client/shared/vendor/react-dom");
-  const { createFactories } = require("devtools/client/shared/react-utils");
+define(function (require) {
+  const {
+    render,
+  } = require("resource://devtools/client/shared/vendor/react-dom.js");
+  const {
+    createFactories,
+  } = require("resource://devtools/client/shared/react-utils.js");
   const { MainTabbedArea } = createFactories(
-    require("devtools/client/jsonview/components/MainTabbedArea")
+    require("resource://devtools/client/jsonview/components/MainTabbedArea.js")
   );
-  const TreeViewClass = require("devtools/client/shared/components/tree/TreeView");
+  const TreeViewClass = require("resource://devtools/client/shared/components/tree/TreeView.js");
+  const {
+    JSON_NUMBER,
+  } = require("resource://devtools/client/shared/components/reps/reps/constants.js");
+  const {
+    parseJsonLossless,
+  } = require("resource://devtools/client/shared/components/reps/reps/rep-utils.js");
 
   const AUTO_EXPAND_MAX_SIZE = 100 * 1024;
   const AUTO_EXPAND_MAX_LEVEL = 7;
+  const TABS = {
+    JSON: 0,
+    RAW_DATA: 1,
+    HEADERS: 2,
+  };
 
   let prettyURL;
   let theApp;
@@ -74,7 +89,7 @@ define(function (require, exports, module) {
       theApp.setState({ searchFilter: value });
     },
 
-    onPrettify(data) {
+    onPrettify() {
       if (input.json instanceof Error) {
         // Cannot prettify invalid JSON
         return;
@@ -83,7 +98,24 @@ define(function (require, exports, module) {
         theApp.setState({ jsonText: input.jsonText });
       } else {
         if (!input.jsonPretty) {
-          input.jsonPretty = new Text(JSON.stringify(input.json, null, "  "));
+          input.jsonPretty = new Text(
+            JSON.stringify(
+              input.json,
+              (key, value) => {
+                if (value?.type === JSON_NUMBER) {
+                  return JSON.rawJSON(value.source);
+                }
+
+                // By default, -0 will be stringified as `0`, so we need to handle it
+                if (Object.is(value, -0)) {
+                  return JSON.rawJSON("-0");
+                }
+
+                return value;
+              },
+              "  "
+            )
+          );
         }
         theApp.setState({ jsonText: input.jsonPretty });
       }
@@ -91,12 +123,12 @@ define(function (require, exports, module) {
       input.prettified = !input.prettified;
     },
 
-    onCollapse(data) {
+    onCollapse() {
       input.expandedNodes.clear();
       theApp.forceUpdate();
     },
 
-    onExpand(data) {
+    onExpand() {
       input.expandedNodes = TreeViewClass.getExpandedNodes(input.json);
       theApp.setState({ expandedNodes: input.expandedNodes });
     },
@@ -147,7 +179,7 @@ define(function (require, exports, module) {
     if (document.readyState == "loading") {
       // If the JSON has not been loaded yet, render the Raw Data tab first.
       input.json = {};
-      input.activeTab = 1;
+      input.activeTab = TABS.RAW_DATA;
       return new Promise(resolve => {
         document.addEventListener("DOMContentLoaded", resolve, { once: true });
       })
@@ -156,7 +188,7 @@ define(function (require, exports, module) {
           // Now update the state and switch to the JSON tab.
           await appIsReady;
           theApp.setState({
-            activeTab: 0,
+            activeTab: TABS.JSON,
             json: input.json,
             expandedNodes: input.expandedNodes,
           });
@@ -166,9 +198,11 @@ define(function (require, exports, module) {
     // If the JSON has been loaded, parse it immediately before loading the app.
     const jsonString = input.jsonText.textContent;
     try {
-      input.json = JSON.parse(jsonString);
+      input.json = parseJsonLossless(jsonString);
     } catch (err) {
       input.json = err;
+      // Display the raw data tab for invalid json
+      input.activeTab = TABS.RAW_DATA;
     }
 
     // Expand the document by default if its size isn't bigger than 100KB.

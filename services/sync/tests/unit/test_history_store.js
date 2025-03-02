@@ -15,16 +15,6 @@ const TIMESTAMP1 = (Date.now() - 103406528) * 1000;
 const TIMESTAMP2 = (Date.now() - 6592903) * 1000;
 const TIMESTAMP3 = (Date.now() - 123894) * 1000;
 
-function promiseOnVisitObserved() {
-  return new Promise(res => {
-    let listener = new PlacesWeakCallbackWrapper(events => {
-      PlacesObservers.removeListener(["page-visited"], listener);
-      res();
-    });
-    PlacesObservers.addListener(["page-visited"], listener);
-  });
-}
-
 function isDateApproximately(actual, expected, skewMillis = 1000) {
   let lowerBound = expected - skewMillis;
   let upperBound = expected + skewMillis;
@@ -82,7 +72,7 @@ add_task(async function test_store() {
     date: TIMESTAMP2,
     type: Ci.nsINavHistoryService.TRANSITION_TYPED,
   };
-  let onVisitObserved = promiseOnVisitObserved();
+  let onVisitObserved = PlacesTestUtils.waitForNotification(["page-visited"]);
   let updatedRec = await store.createRecord(fxguid);
   updatedRec.cleartext.title = "Hol Dir Firefox!";
   updatedRec.cleartext.visits.push(secondvisit);
@@ -109,7 +99,7 @@ add_task(async function test_store_create() {
   _("Create a brand new record through the store.");
   tbguid = Utils.makeGUID();
   tburi = CommonUtils.makeURI("http://getthunderbird.com");
-  let onVisitObserved = promiseOnVisitObserved();
+  let onVisitObserved = PlacesTestUtils.waitForNotification(["page-visited"]);
   let record = await store.createRecord(tbguid);
   record.cleartext = {
     id: tbguid,
@@ -179,9 +169,6 @@ add_task(async function test_invalid_records() {
           TIMESTAMP3 +
           ")"
       );
-      // Trigger the update to the moz_origin tables by deleting the added rows
-      // from moz_updateoriginsinsert_temp
-      await db.executeCached("DELETE FROM moz_updateoriginsinsert_temp");
       // Add the corresponding visit to retain database coherence.
       await db.execute(
         "INSERT INTO moz_historyvisits " +

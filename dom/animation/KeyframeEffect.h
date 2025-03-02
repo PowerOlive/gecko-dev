@@ -15,6 +15,8 @@
 #include "nsRefPtrHashtable.h"
 #include "nsTArray.h"
 #include "nsWrapperCache.h"
+#include "mozilla/AnimatedPropertyID.h"
+#include "mozilla/AnimatedPropertyIDSet.h"
 #include "mozilla/AnimationPerformanceWarning.h"
 #include "mozilla/AnimationPropertySegment.h"
 #include "mozilla/AnimationTarget.h"
@@ -55,7 +57,7 @@ struct AnimationPropertyDetails;
 }  // namespace dom
 
 struct AnimationProperty {
-  nsCSSPropertyID mProperty = eCSSProperty_UNKNOWN;
+  AnimatedPropertyID mProperty;
 
   // If true, the propery is currently being animated on the compositor.
   //
@@ -74,7 +76,7 @@ struct AnimationProperty {
 
   // The copy constructor/assignment doesn't copy mIsRunningOnCompositor and
   // mPerformanceWarning.
-  AnimationProperty() = default;
+  AnimationProperty() : mProperty(eCSSProperty_UNKNOWN) {};
   AnimationProperty(const AnimationProperty& aOther)
       : mProperty(aOther.mProperty), mSegments(aOther.mSegments.Clone()) {}
   AnimationProperty& operator=(const AnimationProperty& aOther) {
@@ -148,14 +150,15 @@ class KeyframeEffect : public AnimationEffect {
 
   Element* GetTarget() const { return mTarget.mElement.get(); }
   NonOwningAnimationTarget GetAnimationTarget() const {
-    return NonOwningAnimationTarget(mTarget.mElement, mTarget.mPseudoType);
+    return NonOwningAnimationTarget(mTarget.mElement, mTarget.mPseudoRequest);
   }
   void GetPseudoElement(nsAString& aRetVal) const {
-    if (mTarget.mPseudoType == PseudoStyleType::NotPseudo) {
+    if (mTarget.mPseudoRequest.IsNotPseudo()) {
       SetDOMStringToNull(aRetVal);
       return;
     }
-    aRetVal = nsCSSPseudoElements::PseudoTypeAsString(mTarget.mPseudoType);
+    aRetVal =
+        nsCSSPseudoElements::PseudoRequestAsString(mTarget.mPseudoRequest);
   }
 
   // These two setters call GetTargetComputedStyle which is not safe to use when
@@ -164,7 +167,7 @@ class KeyframeEffect : public AnimationEffect {
   // that to update the properties rather than calling
   // GetComputedStyle.
   void SetTarget(Element* aTarget) {
-    UpdateTarget(aTarget, mTarget.mPseudoType);
+    UpdateTarget(aTarget, mTarget.mPseudoRequest);
   }
   void SetPseudoElement(const nsAString& aPseudoElement, ErrorResult& aRv);
 
@@ -199,7 +202,7 @@ class KeyframeEffect : public AnimationEffect {
 
   // Returns the set of properties affected by this effect regardless of
   // whether any of these properties is overridden by an !important rule.
-  nsCSSPropertyIDSet GetPropertySet() const;
+  AnimatedPropertyIDSet GetPropertySet() const;
 
   // Returns true if the effect includes a property in |aPropertySet| regardless
   // of whether any property in the set is overridden by an !important rule.
@@ -220,12 +223,12 @@ class KeyframeEffect : public AnimationEffect {
   // properties where an !important rule on another transform property may
   // cause all transform properties to be run on the main thread. That check is
   // performed by GetPropertiesForCompositor.
-  bool HasEffectiveAnimationOfProperty(nsCSSPropertyID aProperty,
+  bool HasEffectiveAnimationOfProperty(const AnimatedPropertyID& aProperty,
                                        const EffectSet& aEffect) const {
     return GetEffectiveAnimationOfProperty(aProperty, aEffect) != nullptr;
   }
   const AnimationProperty* GetEffectiveAnimationOfProperty(
-      nsCSSPropertyID aProperty, const EffectSet& aEffect) const;
+      const AnimatedPropertyID&, const EffectSet&) const;
 
   // Similar to HasEffectiveAnimationOfProperty, above, but for
   // an nsCSSPropertyIDSet. Returns true if this keyframe effect has at least
@@ -273,7 +276,7 @@ class KeyframeEffect : public AnimationEffect {
   // AnimationEffect for the current time except any properties contained
   // in |aPropertiesToSkip|.
   void ComposeStyle(StyleAnimationValueMap& aComposeResult,
-                    const nsCSSPropertyIDSet& aPropertiesToSkip);
+                    const InvertibleAnimatedPropertyIDSet& aPropertiesToSkip);
 
   // Returns true if at least one property is being animated on compositor.
   bool IsRunningOnCompositor() const;
@@ -325,7 +328,7 @@ class KeyframeEffect : public AnimationEffect {
   // |aFrame| is used for calculation of scale values.
   bool ContainsAnimatedScale(const nsIFrame* aFrame) const;
 
-  AnimationValue BaseStyle(nsCSSPropertyID aProperty) const {
+  AnimationValue BaseStyle(const AnimatedPropertyID& aProperty) const {
     AnimationValue result;
     bool hasProperty = false;
     // We cannot use getters_AddRefs on StyleAnimationValue because it is
@@ -379,7 +382,8 @@ class KeyframeEffect : public AnimationEffect {
   nsTArray<AnimationProperty> BuildProperties(const ComputedStyle* aStyle);
 
   // Helper for SetTarget() and SetPseudoElement().
-  void UpdateTarget(Element* aElement, PseudoStyleType aPseudoType);
+  void UpdateTarget(Element* aElement,
+                    const PseudoStyleRequest& aPseudoRequest);
 
   // This effect is registered with its target element so long as:
   //
@@ -453,7 +457,8 @@ class KeyframeEffect : public AnimationEffect {
   // least one animation value that is composited with the underlying value
   // (i.e. it uses the additive or accumulate composite mode).
   using BaseValuesHashmap =
-      nsRefPtrHashtable<nsUint32HashKey, StyleAnimationValue>;
+      nsRefPtrHashtable<nsGenericHashKey<AnimatedPropertyID>,
+                        StyleAnimationValue>;
   BaseValuesHashmap mBaseValues;
 
  private:

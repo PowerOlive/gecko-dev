@@ -2,6 +2,7 @@
 //!
 //! Enabled with the `"hir"` Cargo feature
 
+mod attrs;
 mod defs;
 mod elision;
 mod lifetimes;
@@ -12,6 +13,7 @@ mod primitives;
 mod ty_position;
 mod type_context;
 mod types;
+pub use attrs::*;
 pub use defs::*;
 pub(super) use elision::*;
 pub use lifetimes::*;
@@ -23,7 +25,7 @@ pub use ty_position::*;
 pub use type_context::*;
 pub use types::*;
 
-pub use lowering::LoweringError;
+pub use lowering::{ErrorAndContext, ErrorContext, LoweringError};
 
 pub use crate::ast::Docs;
 pub use strck_ident::rust::{Ident, IdentBuf};

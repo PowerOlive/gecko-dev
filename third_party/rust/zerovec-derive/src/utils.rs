@@ -2,7 +2,7 @@
 // called LICENSE at the top level of the ICU4X source tree
 // (online at: https://github.com/unicode-org/icu4x/blob/main/LICENSE ).
 
-use quote::quote;
+use quote::{quote, ToTokens};
 
 use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
@@ -11,14 +11,38 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Error, Field, Fields, Ident, Index, Result, Token};
 
-// Check that there are repr attributes satisfying the given predicate
-pub fn has_valid_repr(attrs: &[Attribute], predicate: impl Fn(&Ident) -> bool + Copy) -> bool {
-    attrs.iter().filter(|a| a.path().is_ident("repr")).any(|a| {
-        a.parse_args::<IdentListAttribute>()
-            .ok()
-            .and_then(|s| s.idents.iter().find(|s| predicate(s)).map(|_| ()))
-            .is_some()
-    })
+#[derive(Default)]
+pub struct ReprInfo {
+    pub c: bool,
+    pub transparent: bool,
+    pub u8: bool,
+    pub packed: bool,
+}
+
+impl ReprInfo {
+    pub fn compute(attrs: &[Attribute]) -> Self {
+        let mut info = ReprInfo::default();
+        for attr in attrs.iter().filter(|a| a.path().is_ident("repr")) {
+            if let Ok(pieces) = attr.parse_args::<IdentListAttribute>() {
+                for piece in pieces.idents.iter() {
+                    if piece == "C" || piece == "c" {
+                        info.c = true;
+                    } else if piece == "transparent" {
+                        info.transparent = true;
+                    } else if piece == "packed" {
+                        info.packed = true;
+                    } else if piece == "u8" {
+                        info.u8 = true;
+                    }
+                }
+            }
+        }
+        info
+    }
+
+    pub fn cpacked_or_transparent(self) -> bool {
+        (self.c && self.packed) || self.transparent
+    }
 }
 
 // An attribute that is a list of idents
@@ -60,7 +84,7 @@ pub fn repr_for(f: &Fields) -> TokenStream2 {
     if f.len() == 1 {
         quote!(transparent)
     } else {
-        quote!(packed)
+        quote!(C, packed)
     }
 }
 
@@ -148,6 +172,24 @@ impl<'a> FieldInfo<'a> {
             quote!()
         }
     }
+
+    /// Produce a name for a getter for the field
+    pub fn getter(&self) -> TokenStream2 {
+        if let Some(ref i) = self.field.ident {
+            quote!(#i)
+        } else {
+            suffixed_ident("field", self.index, self.field.span()).into_token_stream()
+        }
+    }
+
+    /// Produce a prose name for the field for use in docs
+    pub fn getter_doc_name(&self) -> String {
+        if let Some(ref i) = self.field.ident {
+            format!("the unsized `{i}` field")
+        } else {
+            format!("tuple struct field #{}", self.index)
+        }
+    }
 }
 
 /// Extracts all `zerovec::name(..)` attribute
@@ -200,6 +242,30 @@ pub fn extract_zerovec_attributes(attrs: &mut Vec<Attribute>) -> Vec<Attribute> 
     ret
 }
 
+/// Extract attributes from field, and return them
+///
+/// Only current field attribute is `zerovec::varule(VarUleType)`
+pub fn extract_field_attributes(attrs: &mut Vec<Attribute>) -> Result<Option<Ident>> {
+    let mut zerovec_attrs = extract_zerovec_attributes(attrs);
+    let varule = extract_parenthetical_zerovec_attrs(&mut zerovec_attrs, "varule")?;
+
+    if varule.len() > 1 {
+        return Err(Error::new(
+            varule[1].span(),
+            "Found multiple #[zerovec::varule()] on one field",
+        ));
+    }
+
+    if !zerovec_attrs.is_empty() {
+        return Err(Error::new(
+            zerovec_attrs[1].span(),
+            "Found unusable #[zerovec::] attrs on field, only #[zerovec::varule()] supported",
+        ));
+    }
+
+    Ok(varule.first().cloned())
+}
+
 #[derive(Default, Copy, Clone)]
 pub struct ZeroVecAttrs {
     pub skip_kv: bool,
@@ -210,7 +276,7 @@ pub struct ZeroVecAttrs {
     pub hash: bool,
 }
 
-/// Removes all known zerovec:: attributes from attrs and validates them
+/// Removes all known zerovec:: attributes from struct attrs and validates them
 pub fn extract_attributes_common(
     attrs: &mut Vec<Attribute>,
     span: Span,
@@ -223,7 +289,7 @@ pub fn extract_attributes_common(
 
     let name = if is_var { "make_varule" } else { "make_ule" };
 
-    if let Some(attr) = zerovec_attrs.get(0) {
+    if let Some(attr) = zerovec_attrs.first() {
         return Err(Error::new(
             attr.span(),
             format!("Found unknown or duplicate attribute for #[{name}]"),

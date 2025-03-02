@@ -17,7 +17,6 @@ const { TestUtils } = ChromeUtils.importESModule(
   "resource://testing-common/TestUtils.sys.mjs"
 );
 
-const ENABLED_PREF = "messaging-system.rsexperimentloader.enabled";
 const RUN_INTERVAL_PREF = "app.normandy.run_interval_seconds";
 const STUDIES_OPT_OUT_PREF = "app.shield.optoutstudies.enabled";
 const UPLOAD_PREF = "datareporting.healthreport.uploadEnabled";
@@ -42,17 +41,7 @@ add_task(async function test_lazy_pref_getters() {
     `should set intervalInSeconds to the value of ${RUN_INTERVAL_PREF}`
   );
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  equal(
-    loader.enabled,
-    true,
-    `should set enabled to the value of ${ENABLED_PREF}`
-  );
-  Services.prefs.setBoolPref(ENABLED_PREF, false);
-  equal(loader.enabled, false);
-
   Services.prefs.clearUserPref(RUN_INTERVAL_PREF);
-  Services.prefs.clearUserPref(ENABLED_PREF);
 });
 
 add_task(async function test_init() {
@@ -60,18 +49,9 @@ add_task(async function test_init() {
   sinon.stub(loader, "setTimer");
   sinon.stub(loader, "updateRecipes").resolves();
 
-  Services.prefs.setBoolPref(ENABLED_PREF, false);
-  await loader.init();
-  equal(
-    loader.setTimer.callCount,
-    0,
-    `should not initialize if ${ENABLED_PREF} pref is false`
-  );
-
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init();
+  await loader.enable();
   ok(loader.setTimer.calledOnce, "should call .setTimer");
-  ok(loader.updateRecipes.calledOnce, "should call .updatpickeRecipes");
+  ok(loader.updateRecipes.calledOnce, "should call .updateRecipes");
 });
 
 add_task(async function test_init_with_opt_in() {
@@ -80,24 +60,15 @@ add_task(async function test_init_with_opt_in() {
   sinon.stub(loader, "updateRecipes").resolves();
 
   Services.prefs.setBoolPref(STUDIES_OPT_OUT_PREF, false);
-  await loader.init();
+  await loader.enable();
   equal(
     loader.setTimer.callCount,
     0,
     `should not initialize if ${STUDIES_OPT_OUT_PREF} pref is false`
   );
 
-  Services.prefs.setBoolPref(ENABLED_PREF, false);
-  await loader.init();
-  equal(
-    loader.setTimer.callCount,
-    0,
-    `should not initialize if ${ENABLED_PREF} pref is false`
-  );
-
   Services.prefs.setBoolPref(STUDIES_OPT_OUT_PREF, true);
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init();
+  await loader.enable();
   ok(loader.setTimer.calledOnce, "should call .setTimer");
   ok(loader.updateRecipes.calledOnce, "should call .updateRecipes");
 });
@@ -111,25 +82,27 @@ add_task(async function test_updateRecipes() {
   const FAIL_FILTER_RECIPE = ExperimentFakes.recipe("foo", {
     targeting: "false",
   });
-  sinon.stub(loader, "setTimer");
   sinon.spy(loader, "updateRecipes");
 
   sinon
-    .stub(loader.remoteSettingsClient, "get")
+    .stub(loader.remoteSettingsClients.experiments, "get")
     .resolves([PASS_FILTER_RECIPE, FAIL_FILTER_RECIPE]);
   sinon.stub(loader.manager, "onRecipe").resolves();
   sinon.stub(loader.manager, "onFinalize");
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init();
+  await loader.enable();
   ok(loader.updateRecipes.calledOnce, "should call .updateRecipes");
   equal(
     loader.manager.onRecipe.callCount,
-    1,
-    "should call .onRecipe only for recipes that pass"
+    2,
+    "should call .onRecipe only for all recipes"
   );
   ok(
-    loader.manager.onRecipe.calledWith(PASS_FILTER_RECIPE, "rs-loader"),
+    loader.manager.onRecipe.calledWith(PASS_FILTER_RECIPE, "rs-loader", true),
+    "should call .onRecipe with argument data"
+  );
+  ok(
+    loader.manager.onRecipe.calledWith(FAIL_FILTER_RECIPE, "rs-loader", false),
     "should call .onRecipe with argument data"
   );
 });
@@ -143,22 +116,20 @@ add_task(async function test_updateRecipes_someMismatch() {
   const FAIL_FILTER_RECIPE = ExperimentFakes.recipe("foo", {
     targeting: "false",
   });
-  sinon.stub(loader, "setTimer");
   sinon.spy(loader, "updateRecipes");
 
   sinon
-    .stub(loader.remoteSettingsClient, "get")
+    .stub(loader.remoteSettingsClients.experiments, "get")
     .resolves([PASS_FILTER_RECIPE, FAIL_FILTER_RECIPE]);
   sinon.stub(loader.manager, "onRecipe").resolves();
   sinon.stub(loader.manager, "onFinalize");
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init();
+  await loader.enable();
   ok(loader.updateRecipes.calledOnce, "should call .updateRecipes");
   equal(
     loader.manager.onRecipe.callCount,
-    1,
-    "should call .onRecipe only for recipes that pass"
+    2,
+    "should call .onRecipe only for all recipes"
   );
   ok(loader.manager.onFinalize.calledOnce, "Should call onFinalize.");
   ok(
@@ -181,15 +152,16 @@ add_task(async function test_updateRecipes_forFirstStartup() {
   const PASS_FILTER_RECIPE = ExperimentFakes.recipe("foo", {
     targeting: "isFirstStartup",
   });
-  sinon.stub(loader.remoteSettingsClient, "get").resolves([PASS_FILTER_RECIPE]);
+  sinon
+    .stub(loader.remoteSettingsClients.experiments, "get")
+    .resolves([PASS_FILTER_RECIPE]);
   sinon.stub(loader.manager, "onRecipe").resolves();
   sinon.stub(loader.manager, "onFinalize");
   sinon
     .stub(loader.manager, "createTargetingContext")
     .returns({ isFirstStartup: true });
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init({ isFirstStartup: true });
+  await loader.enable({ isFirstStartup: true });
 
   ok(loader.manager.onRecipe.calledOnce, "should pass the targeting filter");
 });
@@ -199,17 +171,21 @@ add_task(async function test_updateRecipes_forNoneFirstStartup() {
   const PASS_FILTER_RECIPE = ExperimentFakes.recipe("foo", {
     targeting: "isFirstStartup",
   });
-  sinon.stub(loader.remoteSettingsClient, "get").resolves([PASS_FILTER_RECIPE]);
+  sinon
+    .stub(loader.remoteSettingsClients.experiments, "get")
+    .resolves([PASS_FILTER_RECIPE]);
   sinon.stub(loader.manager, "onRecipe").resolves();
   sinon.stub(loader.manager, "onFinalize");
   sinon
     .stub(loader.manager, "createTargetingContext")
     .returns({ isFirstStartup: false });
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init({ isFirstStartup: true });
+  await loader.enable({ isFirstStartup: true });
 
-  ok(loader.manager.onRecipe.notCalled, "should not pass the targeting filter");
+  ok(
+    loader.manager.onRecipe.calledOnce,
+    "should call onRecipe once regardless of targetting match"
+  );
 });
 
 add_task(async function test_checkTargeting() {
@@ -266,11 +242,12 @@ add_task(async function test_optIn_debug_disabled() {
   info("Testing users cannot opt-in when nimbus.debug is false");
 
   const loader = ExperimentFakes.rsLoader();
-  sinon.stub(loader, "setTimer");
   sinon.stub(loader, "updateRecipes").resolves();
 
   const recipe = ExperimentFakes.recipe("foo");
-  sinon.stub(loader.remoteSettingsClient, "get").resolves([recipe]);
+  sinon
+    .stub(loader.remoteSettingsClients.experiments, "get")
+    .resolves([recipe]);
 
   Services.prefs.setBoolPref(DEBUG_PREF, false);
   Services.prefs.setBoolPref(UPLOAD_PREF, true);
@@ -297,11 +274,12 @@ add_task(async function test_optIn_studies_disabled() {
   const prefs = [UPLOAD_PREF, STUDIES_OPT_OUT_PREF];
 
   const loader = ExperimentFakes.rsLoader();
-  sinon.stub(loader, "setTimer");
   sinon.stub(loader, "updateRecipes").resolves();
 
   const recipe = ExperimentFakes.recipe("foo");
-  sinon.stub(loader.remoteSettingsClient, "get").resolves([recipe]);
+  sinon
+    .stub(loader.remoteSettingsClients.experiments, "get")
+    .resolves([recipe]);
 
   Services.prefs.setBoolPref(DEBUG_PREF, true);
 
@@ -331,17 +309,17 @@ add_task(async function test_enrollment_changed_notification() {
   const PASS_FILTER_RECIPE = ExperimentFakes.recipe("foo", {
     targeting: "true",
   });
-  sinon.stub(loader, "setTimer");
   sinon.spy(loader, "updateRecipes");
   const enrollmentChanged = TestUtils.topicObserved(
     "nimbus:enrollments-updated"
   );
-  sinon.stub(loader.remoteSettingsClient, "get").resolves([PASS_FILTER_RECIPE]);
+  sinon
+    .stub(loader.remoteSettingsClients.experiments, "get")
+    .resolves([PASS_FILTER_RECIPE]);
   sinon.stub(loader.manager, "onRecipe").resolves();
   sinon.stub(loader.manager, "onFinalize");
 
-  Services.prefs.setBoolPref(ENABLED_PREF, true);
-  await loader.init();
+  await loader.enable();
   await enrollmentChanged;
   ok(loader.updateRecipes.called, "should call .updateRecipes");
 });
@@ -354,9 +332,9 @@ add_task(async function test_experiment_optin_targeting() {
   const loader = ExperimentFakes.rsLoader();
   const manager = loader.manager;
 
-  await loader.init();
   await manager.onStartup();
   await manager.store.ready();
+  await loader.enable();
 
   const recipe = ExperimentFakes.recipe("foo", { targeting: "false" });
 

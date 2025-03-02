@@ -59,11 +59,11 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
   NS_IMETHOD GetInputStream(const char* aMimeType,
                             const nsAString& aEncoderOptions,
                             nsIInputStream** aStream) override;
-  already_AddRefed<mozilla::gfx::SourceSurface> GetSurfaceSnapshot(
+  already_AddRefed<gfx::SourceSurface> GetSurfaceSnapshot(
       gfxAlphaType* aOutAlphaType) override;
 
   void SetOpaqueValueFromOpaqueAttr(bool aOpaqueAttrValue) override {}
-  bool GetIsOpaque() override { return true; }
+  bool GetIsOpaque() override;
 
   void ResetBitmap() override { Unconfigure(); }
 
@@ -78,21 +78,31 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
     return nullptr;
   }
 
+  Maybe<layers::SurfaceDescriptor> GetFrontBuffer(WebGLFramebufferJS*,
+                                                  const bool) override;
+
+  already_AddRefed<layers::FwdTransactionTracker> UseCompositableForwarder(
+      layers::CompositableForwarder* aForwarder) override;
+
+  bool IsOffscreenCanvas() { return !!mOffscreenCanvas; }
+
  public:
   void GetCanvas(dom::OwningHTMLCanvasElementOrOffscreenCanvas&) const;
 
-  void Configure(const dom::GPUCanvasConfiguration& aDesc);
+  void Configure(const dom::GPUCanvasConfiguration& aConfig);
   void Unconfigure();
 
   RefPtr<Texture> GetCurrentTexture(ErrorResult& aRv);
   void MaybeQueueSwapChainPresent();
-  void SwapChainPresent();
+  Maybe<layers::SurfaceDescriptor> SwapChainPresent();
   void ForceNewFrame();
+  void InvalidateCanvasContent();
 
  private:
   gfx::IntSize mCanvasSize;
   std::unique_ptr<dom::GPUCanvasConfiguration> mConfig;
   bool mPendingSwapChainPresent = false;
+  bool mWaitingCanvasRendererInitialized = false;
 
   RefPtr<WebGPUChild> mBridge;
   RefPtr<Texture> mTexture;
@@ -100,6 +110,9 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
 
   Maybe<layers::RemoteTextureId> mLastRemoteTextureId;
   Maybe<layers::RemoteTextureOwnerId> mRemoteTextureOwnerId;
+  RefPtr<layers::FwdTransactionTracker> mFwdTransactionTracker;
+  bool mUseExternalTextureInSwapChain = false;
+  bool mNewTextureRequested = false;
 };
 
 }  // namespace webgpu

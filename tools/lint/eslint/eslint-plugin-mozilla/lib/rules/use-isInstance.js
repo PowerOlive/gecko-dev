@@ -11,6 +11,7 @@
 const fs = require("fs");
 
 const { maybeGetMemberPropertyName } = require("../helpers");
+const helpers = require("../helpers");
 
 const privilegedGlobals = Object.keys(
   require("../environments/privileged.js").globals
@@ -81,10 +82,7 @@ function pointsToDOMInterface(currentScope, node) {
  */
 function isChromeContext(context) {
   const filename = context.getFilename();
-  const isChromeFileName =
-    filename.endsWith(".sys.mjs") ||
-    filename.endsWith(".jsm") ||
-    filename.endsWith(".jsm.js");
+  const isChromeFileName = filename.endsWith(".sys.mjs");
   if (isChromeFileName) {
     return true;
   }
@@ -111,7 +109,7 @@ function isChromeContext(context) {
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/use-isInstance.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/use-isInstance.html",
     },
     fixable: "code",
     messages: {
@@ -135,7 +133,7 @@ module.exports = {
         const { operator, right } = node;
         if (
           operator === "instanceof" &&
-          pointsToDOMInterface(context.getScope(), right)
+          pointsToDOMInterface(helpers.getScope(context, node), right)
         ) {
           context.report({
             node,

@@ -88,6 +88,7 @@ static AppShutdownMode sShutdownMode = AppShutdownMode::Normal;
 static Atomic<ShutdownPhase> sCurrentShutdownPhase(
     ShutdownPhase::NotInShutdown);
 static int sExitCode = 0;
+static Atomic<bool> sShutdownImpending(false);
 
 // These environment variable strings are all deliberately copied and leaked
 // due to requirements of PR_SetEnv and similar.
@@ -99,6 +100,10 @@ static wchar_t* sSavedProfLDEnvVar = nullptr;
 static char* sSavedProfDEnvVar = nullptr;
 static char* sSavedProfLDEnvVar = nullptr;
 #endif
+
+bool AppShutdown::IsShutdownImpending() { return sShutdownImpending; }
+
+void AppShutdown::SetImpendingShutdown() { sShutdownImpending = true; }
 
 ShutdownPhase GetShutdownPhaseFromPrefValue(int32_t aPrefValue) {
   switch (aPrefValue) {
@@ -200,6 +205,7 @@ void AppShutdown::Init(AppShutdownMode aMode, int aExitCode,
     sShutdownMode = aMode;
   }
   AppShutdown::AnnotateShutdownReason(aReason);
+  AppShutdown::SetImpendingShutdown();
 
   sExitCode = aExitCode;
 
@@ -309,32 +315,29 @@ bool AppShutdown::IsRestarting() {
 
 void AppShutdown::AnnotateShutdownReason(AppShutdownReason aReason) {
   auto key = CrashReporter::Annotation::ShutdownReason;
-  nsCString reasonStr;
+  const char* reasonStr;
   switch (aReason) {
     case AppShutdownReason::AppClose:
-      reasonStr = "AppClose"_ns;
+      reasonStr = "AppClose";
       break;
     case AppShutdownReason::AppRestart:
-      reasonStr = "AppRestart"_ns;
+      reasonStr = "AppRestart";
       break;
     case AppShutdownReason::OSForceClose:
-      reasonStr = "OSForceClose"_ns;
+      reasonStr = "OSForceClose";
       break;
     case AppShutdownReason::OSSessionEnd:
-      reasonStr = "OSSessionEnd"_ns;
+      reasonStr = "OSSessionEnd";
       break;
     case AppShutdownReason::OSShutdown:
-      reasonStr = "OSShutdown"_ns;
-      break;
-    case AppShutdownReason::WinUnexpectedMozQuit:
-      reasonStr = "WinUnexpectedMozQuit"_ns;
+      reasonStr = "OSShutdown";
       break;
     default:
       MOZ_ASSERT_UNREACHABLE("We should know the given reason for shutdown.");
-      reasonStr = "Unknown"_ns;
+      reasonStr = "Unknown";
       break;
   }
-  CrashReporter::AnnotateCrashReport(key, reasonStr);
+  CrashReporter::RecordAnnotationCString(key, reasonStr);
 }
 
 #ifdef DEBUG
@@ -458,7 +461,7 @@ void AppShutdown::AdvanceShutdownPhase(
 }
 
 ShutdownPhase AppShutdown::GetShutdownPhaseFromTopic(const char* aTopic) {
-  for (size_t i = 0; i < ArrayLength(sPhaseObserverKeys); ++i) {
+  for (size_t i = 0; i < std::size(sPhaseObserverKeys); ++i) {
     if (sPhaseObserverKeys[i] && !strcmp(sPhaseObserverKeys[i], aTopic)) {
       return static_cast<ShutdownPhase>(i);
     }

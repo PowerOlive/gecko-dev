@@ -1,23 +1,24 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::docs::Docs;
-use super::{attrs, Ident, Method};
+use super::{AttrInheritContext, Attrs, Ident, Method};
 use quote::ToTokens;
 
 /// A fieldless enum declaration in an FFI module.
-#[derive(Clone, Serialize, Deserialize, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Serialize, Debug, Hash, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Enum {
     pub name: Ident,
     pub docs: Docs,
-    /// A list of variants of the enum. (name, discriminant, docs)
-    pub variants: Vec<(Ident, isize, Docs)>,
+    /// A list of variants of the enum. (name, discriminant, docs, attrs)
+    pub variants: Vec<(Ident, isize, Docs, Attrs)>,
     pub methods: Vec<Method>,
-    pub cfg_attrs: Vec<String>,
+    pub attrs: Attrs,
 }
 
-impl From<&syn::ItemEnum> for Enum {
+impl Enum {
     /// Extract an [`Enum`] metadata value from an AST node.
-    fn from(enm: &syn::ItemEnum) -> Enum {
+    pub fn new(enm: &syn::ItemEnum, parent_attrs: &Attrs) -> Enum {
         let mut last_discriminant = -1;
         if !enm.generics.params.is_empty() {
             // Generic types are not allowed.
@@ -27,7 +28,10 @@ impl From<&syn::ItemEnum> for Enum {
             panic!("Enums cannot have generic parameters");
         }
 
-        let cfg_attrs = attrs::extract_cfg_attrs(&enm.attrs).collect();
+        let mut attrs = parent_attrs.clone();
+        attrs.add_attrs(&enm.attrs);
+        let variant_parent_attrs = attrs.attrs_for_inheritance(AttrInheritContext::Variant);
+
         Enum {
             name: (&enm.ident).into(),
             docs: Docs::from_attrs(&enm.attrs),
@@ -51,16 +55,18 @@ impl From<&syn::ItemEnum> for Enum {
                         .unwrap_or_else(|| last_discriminant + 1);
 
                     last_discriminant = new_discriminant;
-
+                    let mut v_attrs = variant_parent_attrs.clone();
+                    v_attrs.add_attrs(&v.attrs);
                     (
                         (&v.ident).into(),
                         new_discriminant,
                         Docs::from_attrs(&v.attrs),
+                        v_attrs,
                     )
                 })
                 .collect(),
             methods: vec![],
-            cfg_attrs,
+            attrs,
         }
     }
 }
@@ -79,15 +85,18 @@ mod tests {
         settings.set_sort_maps(true);
 
         settings.bind(|| {
-            insta::assert_yaml_snapshot!(Enum::from(&syn::parse_quote! {
-                /// Some docs.
-                #[diplomat::rust_link(foo::Bar, Enum)]
-                enum MyLocalEnum {
-                    Abc,
-                    /// Some more docs.
-                    Def
-                }
-            }));
+            insta::assert_yaml_snapshot!(Enum::new(
+                &syn::parse_quote! {
+                    /// Some docs.
+                    #[diplomat::rust_link(foo::Bar, Enum)]
+                    enum MyLocalEnum {
+                        Abc,
+                        /// Some more docs.
+                        Def
+                    }
+                },
+                &Default::default()
+            ));
         });
     }
 
@@ -97,16 +106,19 @@ mod tests {
         settings.set_sort_maps(true);
 
         settings.bind(|| {
-            insta::assert_yaml_snapshot!(Enum::from(&syn::parse_quote! {
-                /// Some docs.
-                #[diplomat::rust_link(foo::Bar, Enum)]
-                enum DiscriminantedEnum {
-                    Abc = -1,
-                    Def = 0,
-                    Ghi = 1,
-                    Jkl = 2,
-                }
-            }));
+            insta::assert_yaml_snapshot!(Enum::new(
+                &syn::parse_quote! {
+                    /// Some docs.
+                    #[diplomat::rust_link(foo::Bar, Enum)]
+                    enum DiscriminantedEnum {
+                        Abc = -1,
+                        Def = 0,
+                        Ghi = 1,
+                        Jkl = 2,
+                    }
+                },
+                &Default::default()
+            ));
         });
     }
 }

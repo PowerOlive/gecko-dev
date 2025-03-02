@@ -6,6 +6,8 @@
 
 // HttpLog.h should generally be included first
 #include "HttpLog.h"
+#include "nsCOMPtr.h"
+#include "nsStringFwd.h"
 
 // Log on level :5, instead of default :4.
 #undef LOG
@@ -23,11 +25,14 @@
 #include "Http2Stream.h"
 #include "Http2StreamBase.h"
 #include "Http2StreamTunnel.h"
+#include "Http2WebTransportSession.h"
 #include "LoadContextInfo.h"
 #include "mozilla/EndianUtils.h"
+#include "mozilla/glean/NetwerkMetrics.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/Sprintf.h"
 #include "mozilla/StaticPrefs_network.h"
+#include "mozilla/glean/NetwerkProtocolHttpMetrics.h"
 #include "mozilla/Telemetry.h"
 #include "nsHttp.h"
 #include "nsHttpConnection.h"
@@ -164,10 +169,7 @@ Http2Session::Http2Session(nsISocketTransport* aSocketTransport,
       mCntActivated(0),
       mTlsHandshakeFinished(false),
       mPeerFailedHandshake(false),
-      mTrrStreams(0),
-      mEnableWebsockets(false),
-      mPeerAllowsWebsockets(false),
-      mProcessedWaitingWebsockets(false) {
+      mTrrStreams(0) {
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
 
   static uint64_t sSerial;
@@ -223,7 +225,7 @@ void Http2Session::ShutdownStream(Http2StreamBase* aStream, nsresult aReason) {
     CloseStream(aStream, NS_ERROR_NET_INADEQUATE_SECURITY);
   } else if (!mCleanShutdown && (mGoAwayReason != NO_HTTP_ERROR)) {
     CloseStream(aStream, NS_ERROR_NET_HTTP2_SENT_GOAWAY);
-  } else if (!mCleanShutdown && SecurityErrorThatMayNeedRestart(aReason)) {
+  } else if (!mCleanShutdown && PossibleZeroRTTRetryError(aReason)) {
     CloseStream(aStream, aReason);
   } else {
     CloseStream(aStream, NS_ERROR_ABORT);
@@ -238,14 +240,15 @@ Http2Session::~Http2Session() {
   Shutdown(NS_OK);
 
   if (mTrrStreams) {
-    Telemetry::Accumulate(Telemetry::DNS_TRR_REQUEST_PER_CONN, mTrrStreams);
+    mozilla::glean::networking::trr_request_count_per_conn.Get("h2"_ns).Add(
+        static_cast<int32_t>(mTrrStreams));
   }
-  Telemetry::Accumulate(Telemetry::SPDY_PARALLEL_STREAMS, mConcurrentHighWater);
-  Telemetry::Accumulate(Telemetry::SPDY_REQUEST_PER_CONN_3, mCntActivated);
-  Telemetry::Accumulate(Telemetry::SPDY_SERVER_INITIATED_STREAMS,
-                        mServerPushedResources);
-  Telemetry::Accumulate(Telemetry::SPDY_GOAWAY_LOCAL, mClientGoAwayReason);
-  Telemetry::Accumulate(Telemetry::SPDY_GOAWAY_PEER, mPeerGoAwayReason);
+  glean::spdy::parallel_streams.AccumulateSingleSample(mConcurrentHighWater);
+  glean::spdy::request_per_conn.AccumulateSingleSample(mCntActivated);
+  glean::spdy::server_initiated_streams.AccumulateSingleSample(
+      mServerPushedResources);
+  glean::spdy::goaway_local.AccumulateSingleSample(mClientGoAwayReason);
+  glean::spdy::goaway_peer.AccumulateSingleSample(mPeerGoAwayReason);
   Telemetry::Accumulate(Telemetry::HTTP2_FAIL_BEFORE_SETTINGS,
                         mPeerFailedHandshake);
 }
@@ -267,10 +270,13 @@ inline nsresult Http2Session::SessionError(enum errorType reason) {
 void Http2Session::LogIO(Http2Session* self, Http2StreamBase* stream,
                          const char* label, const char* data,
                          uint32_t datalen) {
-  if (!LOG5_ENABLED()) return;
+  if (!MOZ_LOG_TEST(gHttpIOLog, LogLevel::Verbose)) {
+    return;
+  }
 
-  LOG5(("Http2Session::LogIO %p stream=%p id=0x%X [%s]", self, stream,
-        stream ? stream->StreamID() : 0, label));
+  MOZ_LOG(gHttpIOLog, LogLevel::Verbose,
+          ("Http2Session::LogIO %p stream=%p id=0x%X [%s]", self, stream,
+           stream ? stream->StreamID() : 0, label));
 
   // Max line is (16 * 3) + 10(prefix) + newline + null
   char linebuf[128];
@@ -283,7 +289,7 @@ void Http2Session::LogIO(Http2Session* self, Http2StreamBase* stream,
     if (!(index % 16)) {
       if (index) {
         *line = 0;
-        LOG5(("%s", linebuf));
+        MOZ_LOG(gHttpIOLog, LogLevel::Verbose, ("%s", linebuf));
       }
       line = linebuf;
       snprintf(line, 128, "%08X: ", index);
@@ -295,12 +301,12 @@ void Http2Session::LogIO(Http2Session* self, Http2StreamBase* stream,
   }
   if (index) {
     *line = 0;
-    LOG5(("%s", linebuf));
+    MOZ_LOG(gHttpIOLog, LogLevel::Verbose, ("%s", linebuf));
   }
 }
 
 using Http2ControlFx = nsresult (*)(Http2Session*);
-static Http2ControlFx sControlFunctions[] = {
+static constexpr Http2ControlFx sControlFunctions[] = {
     nullptr,  // type 0 data is not a control function
     Http2Session::RecvHeaders,
     Http2Session::RecvPriority,
@@ -311,10 +317,45 @@ static Http2ControlFx sControlFunctions[] = {
     Http2Session::RecvGoAway,
     Http2Session::RecvWindowUpdate,
     Http2Session::RecvContinuation,
-    Http2Session::RecvAltSvc,  // extension for type 0x0A
-    Http2Session::RecvUnused,  // 0x0B was BLOCKED still radioactive
-    Http2Session::RecvOrigin   // extension for type 0x0C
+    Http2Session::RecvAltSvc,          // extension for type 0x0A
+    Http2Session::RecvUnused,          // 0x0B was BLOCKED still radioactive
+    Http2Session::RecvOrigin,          // extension for type 0x0C
+    Http2Session::RecvUnused,          // 0x0D
+    Http2Session::RecvUnused,          // 0x0E
+    Http2Session::RecvUnused,          // 0x0F
+    Http2Session::RecvPriorityUpdate,  // 0x10
 };
+
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_DATA] == nullptr);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_HEADERS] ==
+              Http2Session::RecvHeaders);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_PRIORITY] ==
+              Http2Session::RecvPriority);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_RST_STREAM] ==
+              Http2Session::RecvRstStream);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_SETTINGS] ==
+              Http2Session::RecvSettings);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_PUSH_PROMISE] ==
+              Http2Session::RecvPushPromise);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_PING] ==
+              Http2Session::RecvPing);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_GOAWAY] ==
+              Http2Session::RecvGoAway);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_WINDOW_UPDATE] ==
+              Http2Session::RecvWindowUpdate);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_CONTINUATION] ==
+              Http2Session::RecvContinuation);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_ALTSVC] ==
+              Http2Session::RecvAltSvc);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_UNUSED] ==
+              Http2Session::RecvUnused);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_ORIGIN] ==
+              Http2Session::RecvOrigin);
+static_assert(sControlFunctions[0x0D] == Http2Session::RecvUnused);
+static_assert(sControlFunctions[0x0E] == Http2Session::RecvUnused);
+static_assert(sControlFunctions[0x0F] == Http2Session::RecvUnused);
+static_assert(sControlFunctions[Http2Session::FRAME_TYPE_PRIORITY_UPDATE] ==
+              Http2Session::RecvPriorityUpdate);
 
 bool Http2Session::RoomForMoreConcurrent() {
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
@@ -368,6 +409,9 @@ uint32_t Http2Session::ReadTimeoutTick(PRIntervalTime now) {
          this, pingTimeout));
     if ((now - mPingSentEpoch) >= pingTimeout) {
       LOG3(("Http2Session::ReadTimeoutTick %p Ping Timer Exhaustion\n", this));
+      if (mConnection) {
+        mConnection->SetCloseReason(ConnectionCloseReason::IDLE_TIMEOUT);
+      }
       mPingSentEpoch = 0;
       if (isTrr) {
         // These must be set this way to ensure we gracefully restart all
@@ -569,13 +613,16 @@ void Http2Session::CreateStream(nsAHttpTransaction* aHttpTransaction,
 
 already_AddRefed<nsHttpConnection> Http2Session::CreateTunnelStream(
     nsAHttpTransaction* aHttpTransaction, nsIInterfaceRequestor* aCallbacks,
-    PRIntervalTime aRtt, bool aIsWebSocket) {
+    PRIntervalTime aRtt, bool aIsExtendedCONNECT) {
   RefPtr<Http2StreamTunnel> refStream = CreateTunnelStreamFromConnInfo(
       this, mCurrentBrowserId, aHttpTransaction->ConnectionInfo(),
-      aIsWebSocket);
+      aIsExtendedCONNECT ? aHttpTransaction->IsForWebTransport()
+                               ? ExtendedCONNECTType::WebTransport
+                               : ExtendedCONNECTType::WebSocket
+                         : ExtendedCONNECTType::Proxy);
 
-  RefPtr<nsHttpConnection> newConn =
-      refStream->CreateHttpConnection(aHttpTransaction, aCallbacks, aRtt);
+  RefPtr<nsHttpConnection> newConn = refStream->CreateHttpConnection(
+      aHttpTransaction, aCallbacks, aRtt, aIsExtendedCONNECT);
 
   mTunnelStreams.AppendElement(std::move(refStream));
   return newConn.forget();
@@ -893,17 +940,6 @@ void Http2Session::GenerateSettingsAck() {
   FlushOutputQueue();
 }
 
-void Http2Session::GeneratePriority(uint32_t aID, uint8_t aPriorityWeight) {
-  MOZ_ASSERT(OnSocketThread(), "not on socket thread");
-  LOG3(("Http2Session::GeneratePriority %p %X %X\n", this, aID,
-        aPriorityWeight));
-
-  char* packet = CreatePriorityFrame(aID, 0, aPriorityWeight);
-
-  LogIO(this, nullptr, "Generate Priority", packet, kFrameHeaderBytes + 5);
-  FlushOutputQueue();
-}
-
 void Http2Session::GenerateRstStream(uint32_t aStatusCode, uint32_t aID) {
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
 
@@ -961,10 +997,10 @@ void Http2Session::SendHello() {
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
   LOG3(("Http2Session::SendHello %p\n", this));
 
-  // sized for magic + 5 settings and a session window update and 6 priority
+  // sized for magic + 6 settings and a session window update and 6 priority
   // frames 24 magic, 33 for settings (9 header + 4 settings @6), 13 for window
   // update, 6 priority frames at 14 (9 + 5) each
-  static const uint32_t maxSettings = 5;
+  static const uint32_t maxSettings = 6;
   static const uint32_t prioritySize =
       kPriorityGroupCount * (kFrameHeaderBytes + 5);
   static const uint32_t maxDataLen =
@@ -1006,11 +1042,13 @@ void Http2Session::SendHello() {
     // The value portion of the setting pair is already initialized to 0
     numberOfEntries++;
 
-    NetworkEndian::writeUint16(
-        packet + kFrameHeaderBytes + (6 * numberOfEntries),
-        SETTINGS_TYPE_MAX_CONCURRENT);
-    // The value portion of the setting pair is already initialized to 0
-    numberOfEntries++;
+    if (StaticPrefs::network_http_http2_send_push_max_concurrent_frame()) {
+      NetworkEndian::writeUint16(
+          packet + kFrameHeaderBytes + (6 * numberOfEntries),
+          SETTINGS_TYPE_MAX_CONCURRENT);
+      // The value portion of the setting pair is already initialized to 0
+      numberOfEntries++;
+    }
 
     mWaitingForSettingsAck = true;
   }
@@ -1030,6 +1068,22 @@ void Http2Session::SendHello() {
   NetworkEndian::writeUint32(
       packet + kFrameHeaderBytes + (6 * numberOfEntries) + 2, kMaxFrameData);
   numberOfEntries++;
+
+  bool disableRFC7540Priorities =
+      !StaticPrefs::network_http_http2_enabled_deps() ||
+      !gHttpHandler->CriticalRequestPrioritization();
+
+  // See bug 1909666. Sending this new setting could break some websites.
+  if (disableRFC7540Priorities &&
+      StaticPrefs::network_http_http2_send_NO_RFC7540_PRI()) {
+    NetworkEndian::writeUint16(
+        packet + kFrameHeaderBytes + (6 * numberOfEntries),
+        SETTINGS_NO_RFC7540_PRIORITIES);
+    NetworkEndian::writeUint32(
+        packet + kFrameHeaderBytes + (6 * numberOfEntries) + 2,
+        disableRFC7540Priorities ? 1 : 0);
+    numberOfEntries++;
+  }
 
   MOZ_ASSERT(numberOfEntries <= maxSettings);
   uint32_t dataLen = 6 * numberOfEntries;
@@ -1055,8 +1109,7 @@ void Http2Session::SendHello() {
     LogIO(this, nullptr, "Session Window Bump ", packet, kFrameHeaderBytes + 4);
   }
 
-  if (StaticPrefs::network_http_http2_enabled_deps() &&
-      gHttpHandler->CriticalRequestPrioritization()) {
+  if (!disableRFC7540Priorities) {
     mUseH2Deps = true;
     MOZ_ASSERT(mNextStreamID == kLeaderGroupID);
     CreatePriorityNode(kLeaderGroupID, 0, 200, "leader");
@@ -1087,6 +1140,12 @@ void Http2Session::SendHello() {
 
 void Http2Session::SendPriorityFrame(uint32_t streamID, uint32_t dependsOn,
                                      uint8_t weight) {
+  // If mUseH2Deps is false, that means that we've sent
+  // SETTINGS_NO_RFC7540_PRIORITIES = 1. Since the server must
+  // ignore priority frames anyway, we can skip sending it.
+  if (!UseH2Deps()) {
+    return;
+  }
   MOZ_ASSERT(OnSocketThread(), "not on socket thread");
   LOG3(
       ("Http2Session::SendPriorityFrame %p Frame 0x%X depends on 0x%X "
@@ -1097,6 +1156,42 @@ void Http2Session::SendPriorityFrame(uint32_t streamID, uint32_t dependsOn,
 
   LogIO(this, nullptr, "SendPriorityFrame", packet, kFrameHeaderBytes + 5);
   FlushOutputQueue();
+}
+
+void Http2Session::SendPriorityUpdateFrame(uint32_t streamID, uint8_t urgency,
+                                           bool incremental) {
+  CreatePriorityUpdateFrame(streamID, urgency, incremental);
+  FlushOutputQueue();
+}
+
+char* Http2Session::CreatePriorityUpdateFrame(uint32_t streamID,
+                                              uint8_t urgency,
+                                              bool incremental) {
+  // https://www.rfc-editor.org/rfc/rfc9218.html#section-7.1
+  nsPrintfCString priorityFieldValue(
+      "%s", urgency != 3 ? nsPrintfCString("u=%d", urgency).get() : "");
+  size_t payloadSize = 4 + priorityFieldValue.Length();
+  char* packet = EnsureOutputBuffer(kFrameHeaderBytes + payloadSize);
+  // The Stream Identifier field (see Section 5.1.1 of [HTTP/2]) in the
+  // PRIORITY_UPDATE frame header MUST be zero
+  CreateFrameHeader(packet, payloadSize,
+                    Http2Session::FRAME_TYPE_PRIORITY_UPDATE,
+                    0,   // unused flags
+                    0);  // streamID
+
+  // Reserved (1),
+  // Prioritized Stream ID (31),
+  MOZ_ASSERT(!(streamID & 0x80000000));
+  NetworkEndian::writeUint32(packet + kFrameHeaderBytes, streamID & 0x7FFFFFFF);
+  // Priority Field Value (..),
+  for (size_t i = 0; i < priorityFieldValue.Length(); ++i) {
+    packet[kFrameHeaderBytes + 4 + i] = priorityFieldValue[i];
+  }
+  mOutputQueueUsed += kFrameHeaderBytes + payloadSize;
+
+  LogIO(this, nullptr, "SendPriorityUpdateFrame", packet,
+        kFrameHeaderBytes + payloadSize);
+  return packet;
 }
 
 char* Http2Session::CreatePriorityFrame(uint32_t streamID, uint32_t dependsOn,
@@ -1184,18 +1279,27 @@ bool Http2Session::VerifyStream(Http2StreamBase* aStream,
 // static
 Http2StreamTunnel* Http2Session::CreateTunnelStreamFromConnInfo(
     Http2Session* session, uint64_t bcId, nsHttpConnectionInfo* info,
-    bool isWebSocket) {
+    ExtendedCONNECTType aType) {
   MOZ_ASSERT(info);
   MOZ_ASSERT(session);
 
-  if (isWebSocket) {
+  if (aType == ExtendedCONNECTType::WebTransport) {
+    MOZ_ASSERT(session->GetExtendedCONNECTSupport() ==
+               ExtendedCONNECTSupport::SUPPORTED);
+    return new Http2WebTransportSession(
+        session, nsISupportsPriority::PRIORITY_NORMAL, bcId, info);
+  }
+
+  if (aType == ExtendedCONNECTType::WebSocket) {
     LOG(("Http2Session creating Http2StreamWebSocket"));
-    MOZ_ASSERT(session->GetWebSocketSupport() == WebSocketSupport::SUPPORTED);
+    MOZ_ASSERT(session->GetExtendedCONNECTSupport() ==
+               ExtendedCONNECTSupport::SUPPORTED);
     return new Http2StreamWebSocket(
         session, nsISupportsPriority::PRIORITY_NORMAL, bcId, info);
   }
 
   MOZ_ASSERT(info->UsingHttpProxy() && info->UsingConnect());
+  MOZ_ASSERT(aType == ExtendedCONNECTType::Proxy);
   LOG(("Http2Session creating Http2StreamTunnel"));
   return new Http2StreamTunnel(session, nsISupportsPriority::PRIORITY_NORMAL,
                                bcId, info);
@@ -1416,6 +1520,13 @@ nsresult Http2Session::RecvHeaders(Http2Session* self) {
     return self->SessionError(PROTOCOL_ERROR);
   }
 
+  uint32_t frameSize = self->mInputFrameDataSize - paddingControlBytes -
+                       priorityLen - paddingLength;
+  if (self->mAggregatedHeaderSize + frameSize >
+      StaticPrefs::network_http_max_response_header_size()) {
+    LOG(("Http2Session %p header exceeds the limit\n", self));
+    return self->SessionError(PROTOCOL_ERROR);
+  }
   if (!self->mInputFrameDataStream) {
     // Cannot find stream. We can continue the session, but we need to
     // uncompress the header block to maintain the correct compression context
@@ -1432,8 +1543,7 @@ nsresult Http2Session::RecvHeaders(Http2Session* self) {
     self->mDecompressBuffer.Append(
         &self->mInputFrameBuffer[kFrameHeaderBytes + paddingControlBytes +
                                  priorityLen],
-        self->mInputFrameDataSize - paddingControlBytes - priorityLen -
-            paddingLength);
+        frameSize);
 
     if (self->mInputFrameFlags & kFlag_END_HEADERS) {
       rv = self->UncompressAndDiscard(false);
@@ -1463,21 +1573,16 @@ nsresult Http2Session::RecvHeaders(Http2Session* self) {
   self->mDecompressBuffer.Append(
       &self->mInputFrameBuffer[kFrameHeaderBytes + paddingControlBytes +
                                priorityLen],
-      self->mInputFrameDataSize - paddingControlBytes - priorityLen -
-          paddingLength);
+      frameSize);
 
   self->mInputFrameDataStream->UpdateTransportReadEvents(
       self->mInputFrameDataSize);
   self->mLastDataReadEpoch = self->mLastReadEpoch;
 
   if (!isContinuation) {
-    self->mAggregatedHeaderSize = self->mInputFrameDataSize -
-                                  paddingControlBytes - priorityLen -
-                                  paddingLength;
+    self->mAggregatedHeaderSize = frameSize;
   } else {
-    self->mAggregatedHeaderSize += self->mInputFrameDataSize -
-                                   paddingControlBytes - priorityLen -
-                                   paddingLength;
+    self->mAggregatedHeaderSize += frameSize;
   }
 
   if (!endHeadersFlag) {  // more are coming - don't process yet
@@ -1486,8 +1591,7 @@ nsresult Http2Session::RecvHeaders(Http2Session* self) {
   }
 
   if (isContinuation) {
-    Telemetry::Accumulate(Telemetry::SPDY_CONTINUED_HEADERS,
-                          self->mAggregatedHeaderSize);
+    glean::spdy::continued_headers.Accumulate(self->mAggregatedHeaderSize);
   }
 
   rv = self->ResponseHeadersComplete();
@@ -1699,12 +1803,12 @@ nsresult Http2Session::RecvSettings(Http2Session* self) {
 
       case SETTINGS_TYPE_MAX_CONCURRENT:
         self->mMaxConcurrent = value;
-        Telemetry::Accumulate(Telemetry::SPDY_SETTINGS_MAX_STREAMS, value);
+        glean::spdy::settings_max_streams.AccumulateSingleSample(value);
         self->ProcessPending();
         break;
 
       case SETTINGS_TYPE_INITIAL_WINDOW: {
-        Telemetry::Accumulate(Telemetry::SPDY_SETTINGS_IW, value >> 10);
+        glean::spdy::settings_iw.Accumulate(value >> 10);
         int32_t delta = value - self->mServerInitialStreamWindow;
         self->mServerInitialStreamWindow = value;
 
@@ -1726,16 +1830,16 @@ nsresult Http2Session::RecvSettings(Http2Session* self) {
       case SETTINGS_TYPE_ENABLE_CONNECT_PROTOCOL: {
         if (value == 1) {
           LOG3(("Enabling extended CONNECT"));
-          self->mPeerAllowsWebsockets = true;
+          self->mPeerAllowsExtendedCONNECT = true;
         } else if (value > 1) {
           LOG3(("Peer sent invalid value for ENABLE_CONNECT_PROTOCOL %d",
                 value));
           return self->SessionError(PROTOCOL_ERROR);
-        } else if (self->mPeerAllowsWebsockets) {
+        } else if (self->mPeerAllowsExtendedCONNECT) {
           LOG3(("Peer tried to re-disable extended CONNECT"));
           return self->SessionError(PROTOCOL_ERROR);
         }
-        self->mHasTransactionWaitingForWebsockets = true;
+        self->mHasTransactionWaitingForExtendedCONNECT = true;
       } break;
 
       default:
@@ -1752,17 +1856,13 @@ nsresult Http2Session::RecvSettings(Http2Session* self) {
     self->mGoAwayOnPush = true;
   }
 
-  if (!self->mProcessedWaitingWebsockets) {
-    self->mProcessedWaitingWebsockets = true;
-  }
-
-  if (self->mHasTransactionWaitingForWebsockets) {
+  if (self->mHasTransactionWaitingForExtendedCONNECT) {
     // trigger a queued websockets transaction -- enabled or not
-    LOG3(("Http2Sesssion::RecvSettings triggering queued websocket"));
+    LOG3(("Http2Sesssion::RecvSettings triggering queued transactions"));
     RefPtr<nsHttpConnectionInfo> ci;
     self->GetConnectionInfo(getter_AddRefs(ci));
     gHttpHandler->ConnMgr()->ProcessPendingQ(ci);
-    self->mHasTransactionWaitingForWebsockets = false;
+    self->mHasTransactionWaitingForExtendedCONNECT = false;
   }
 
   return NS_OK;
@@ -1944,8 +2044,7 @@ nsresult Http2Session::RecvPushPromise(Http2Session* self) {
   }
 
   if (self->mInputFrameType == FRAME_TYPE_CONTINUATION) {
-    Telemetry::Accumulate(Telemetry::SPDY_CONTINUED_HEADERS,
-                          self->mAggregatedHeaderSize);
+    glean::spdy::continued_headers.Accumulate(self->mAggregatedHeaderSize);
   }
 
   // Create the buffering transaction and push stream
@@ -2117,9 +2216,28 @@ nsresult Http2Session::RecvPushPromise(Http2Session* self) {
   pushedWeak->SetHTTPState(Http2StreamBase::RESERVED_BY_REMOTE);
   static_assert(Http2StreamBase::kWorstPriority >= 0,
                 "kWorstPriority out of range");
-  uint32_t priorityDependency = pushedWeak->PriorityDependency();
-  uint8_t priorityWeight = pushedWeak->PriorityWeight();
-  self->SendPriorityFrame(promisedID, priorityDependency, priorityWeight);
+  if (self->UseH2Deps()) {
+    uint32_t priorityDependency = pushedWeak->PriorityDependency();
+    uint8_t priorityWeight = pushedWeak->PriorityWeight();
+    self->SendPriorityFrame(promisedID, priorityDependency, priorityWeight);
+  } else if (StaticPrefs::network_http_http2_push_priority_update()) {
+    nsHttpTransaction* trans = associatedStream->HttpTransaction();
+    if (trans) {
+      uint8_t urgency = nsHttpHandler::UrgencyFromCoSFlags(
+          trans->GetClassOfService().Flags(), trans->Priority());
+
+      // if the initial stream was kUrgentStartGroupID or kLeaderGroupID
+      // which are equivalent to urgency 1 and 2 then set the pushed stream
+      // as having the same urgency as kFollowerGroupID.
+      // See Http2PushedStream::Http2PushedStream changing mPriorityDependency
+      if (urgency < 3) {
+        urgency = 4;
+      }
+
+      bool incremental = trans->GetClassOfService().Incremental();
+      self->SendPriorityUpdateFrame(promisedID, urgency, incremental);
+    }
+  }
   self->ResetDownstreamState();
   return NS_OK;
 }
@@ -2175,6 +2293,7 @@ nsresult Http2Session::RecvGoAway(Http2Session* self) {
     return self->SessionError(PROTOCOL_ERROR);
   }
 
+  self->mConnection->SetCloseReason(ConnectionCloseReason::GO_AWAY);
   self->mShouldGoAway = true;
   self->mGoAwayID = NetworkEndian::readUint32(self->mInputFrameBuffer.get() +
                                               kFrameHeaderBytes);
@@ -2409,14 +2528,14 @@ class UpdateAltSvcEvent : public Runnable {
       AltServiceChild::ProcessHeader(
           mHeader, originScheme, originHost, originPort, mCI->GetUsername(),
           mCI->GetPrivate(), nullptr, mCI->ProxyInfo(), 0,
-          mCI->GetOriginAttributes());
+          mCI->GetOriginAttributes(), mCI);
       return NS_OK;
     }
 
     AltSvcMapping::ProcessHeader(mHeader, originScheme, originHost, originPort,
                                  mCI->GetUsername(), mCI->GetPrivate(), nullptr,
                                  mCI->ProxyInfo(), 0,
-                                 mCI->GetOriginAttributes());
+                                 mCI->GetOriginAttributes(), mCI);
     return NS_OK;
   }
 
@@ -2633,12 +2752,6 @@ nsresult Http2Session::RecvOrigin(Http2Session* self) {
     return NS_OK;
   }
 
-  if (!gHttpHandler->AllowOriginExtension()) {
-    LOG3(("Http2Session::RecvOrigin %p origin extension pref'd off", self));
-    self->ResetDownstreamState();
-    return NS_OK;
-  }
-
   uint32_t offset = 0;
   self->mOriginFrameActivated = true;
 
@@ -2699,6 +2812,14 @@ nsresult Http2Session::RecvOrigin(Http2Session* self) {
 
   self->ResetDownstreamState();
   return NS_OK;
+}
+
+nsresult Http2Session::RecvPriorityUpdate(Http2Session* self) {
+  // https://www.rfc-editor.org/rfc/rfc9218.html#section-7.1-9
+  // Servers MUST NOT send PRIORITY_UPDATE frames. If a client receives a
+  //   PRIORITY_UPDATE frame, it MUST respond with a connection error of
+  //   type PROTOCOL_ERROR.
+  return self->SessionError(PROTOCOL_ERROR);
 }
 
 //-----------------------------------------------------------------------------
@@ -2951,7 +3072,7 @@ nsresult Http2Session::ReadyToProcessDataFrame(
              newState == DISCARDING_DATA_FRAME_PADDING);
   ChangeDownstreamState(newState);
 
-  Telemetry::Accumulate(Telemetry::SPDY_CHUNK_RECVD, mInputFrameDataSize >> 10);
+  glean::spdy::chunk_recvd.Accumulate(mInputFrameDataSize >> 10);
   mLastDataReadEpoch = mLastReadEpoch;
 
   if (!mInputFrameID) {
@@ -3477,7 +3598,7 @@ nsresult Http2Session::WriteSegmentsAgain(nsAHttpSegmentWriter* writer,
   if (mInputFrameDataRead != mInputFrameDataSize) return NS_OK;
 
   MOZ_ASSERT(mInputFrameType != FRAME_TYPE_DATA);
-  if (mInputFrameType < FRAME_TYPE_LAST) {
+  if (mInputFrameType < std::size(sControlFunctions)) {
     rv = sControlFunctions[mInputFrameType](this);
   } else {
     // Section 4.1 requires this to be ignored; though protocol_error would
@@ -3564,6 +3685,15 @@ nsresult Http2Session::ProcessConnectedPush(
   mSegmentWriter = writer;
   nsresult rv = pushConnectedStream->WriteSegments(this, count, countWritten);
   mSegmentWriter = nullptr;
+
+  if (mNeedsCleanup) {
+    LOG3(
+        ("Http2Session::ProcessConnectedPush session=%p stream=%p 0x%X "
+         "cleanup stream based on mNeedsCleanup.\n",
+         this, mNeedsCleanup, mNeedsCleanup ? mNeedsCleanup->StreamID() : 0));
+    CleanupStream(mNeedsCleanup, NS_OK, CANCEL_ERROR);
+    mNeedsCleanup = nullptr;
+  }
 
   // The pipe in nsHttpTransaction rewrites CLOSED error codes into OK
   // so we need this check to determine the truth.
@@ -3755,7 +3885,6 @@ void Http2Session::Close(nsresult aReason) {
   mStreamIDHash.Clear();
   mStreamTransactionHash.Clear();
   mTunnelStreams.Clear();
-  mProcessedWaitingWebsockets = true;
 
   uint32_t goAwayReason;
   if (mGoAwayReason != NO_HTTP_ERROR) {
@@ -4103,7 +4232,13 @@ nsresult Http2Session::ConfirmTLSProfile() {
   }
 
   uint16_t kea = ssl->GetKEAUsed();
-  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh) {
+  if (kea == ssl_kea_ecdh_hybrid && !StaticPrefs::security_tls_enable_kyber()) {
+    LOG3(("Http2Session::ConfirmTLSProfile %p FAILED due to disabled KEA %d\n",
+          this, kea));
+    return SessionError(INADEQUATE_SECURITY);
+  }
+
+  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh && kea != ssl_kea_ecdh_hybrid) {
     LOG3(("Http2Session::ConfirmTLSProfile %p FAILED due to invalid KEA %d\n",
           this, kea));
     return SessionError(INADEQUATE_SECURITY);
@@ -4474,25 +4609,26 @@ void Http2Session::SetCleanShutdown(bool aCleanShutdown) {
   mCleanShutdown = aCleanShutdown;
 }
 
-WebSocketSupport Http2Session::GetWebSocketSupport() {
-  LOG3(("Http2Session::GetWebSocketSupport %p enable=%d allow=%d processed=%d",
-        this, mEnableWebsockets, mPeerAllowsWebsockets,
-        mProcessedWaitingWebsockets));
+ExtendedCONNECTSupport Http2Session::GetExtendedCONNECTSupport() {
+  LOG3(
+      ("Http2Session::GetExtendedCONNECTSupport %p enable=%d peer allow=%d "
+       "receved setting=%d",
+       this, mEnableWebsockets, mPeerAllowsExtendedCONNECT, mReceivedSettings));
 
-  if (!mEnableWebsockets) {
-    return WebSocketSupport::NO_SUPPORT;
+  if (!mEnableWebsockets || mClosed) {
+    return ExtendedCONNECTSupport::NO_SUPPORT;
   }
 
-  if (mPeerAllowsWebsockets) {
-    return WebSocketSupport::SUPPORTED;
+  if (mPeerAllowsExtendedCONNECT) {
+    return ExtendedCONNECTSupport::SUPPORTED;
   }
 
-  if (!mProcessedWaitingWebsockets) {
-    mHasTransactionWaitingForWebsockets = true;
-    return WebSocketSupport::UNSURE;
+  if (!mReceivedSettings) {
+    mHasTransactionWaitingForExtendedCONNECT = true;
+    return ExtendedCONNECTSupport::UNSURE;
   }
 
-  return WebSocketSupport::NO_SUPPORT;
+  return ExtendedCONNECTSupport::NO_SUPPORT;
 }
 
 PRIntervalTime Http2Session::LastWriteTime() {

@@ -47,7 +47,7 @@ pageInfoTreeView.prototype = {
     return this.data[row][column.index] || "";
   },
 
-  setCellValue(row, column, value) {},
+  setCellValue() {},
 
   setCellText(row, column, value) {
     this.data[row][column.index] = value;
@@ -112,52 +112,52 @@ pageInfoTreeView.prototype = {
     this.sortcol = treecol.index;
   },
 
-  getRowProperties(row) {
+  getRowProperties() {
     return "";
   },
-  getCellProperties(row, column) {
+  getCellProperties() {
     return "";
   },
-  getColumnProperties(column) {
+  getColumnProperties() {
     return "";
   },
-  isContainer(index) {
+  isContainer() {
     return false;
   },
-  isContainerOpen(index) {
+  isContainerOpen() {
     return false;
   },
-  isSeparator(index) {
+  isSeparator() {
     return false;
   },
   isSorted() {
     return this.sortcol > -1;
   },
-  canDrop(index, orientation) {
+  canDrop() {
     return false;
   },
-  drop(row, orientation) {
+  drop() {
     return false;
   },
-  getParentIndex(index) {
+  getParentIndex() {
     return 0;
   },
-  hasNextSibling(index, after) {
+  hasNextSibling() {
     return false;
   },
-  getLevel(index) {
+  getLevel() {
     return 0;
   },
-  getImageSrc(row, column) {},
+  getImageSrc() {},
   getCellValue(row, column) {
     let col = column != null ? column : this.copycol;
     return row < 0 || col < 0 ? "" : this.data[row][col] || "";
   },
-  toggleOpenState(index) {},
-  cycleHeader(col) {},
+  toggleOpenState() {},
+  cycleHeader() {},
   selectionChanged() {},
-  cycleCell(row, column) {},
-  isEditable(row, column) {
+  cycleCell() {},
+  isEditable() {
     return false;
   },
 };
@@ -174,6 +174,7 @@ const COL_IMAGE_ALT = 3;
 const COL_IMAGE_COUNT = 4;
 const COL_IMAGE_NODE = 5;
 const COL_IMAGE_BG = 6;
+const COL_IMAGE_RAWSIZE = 7;
 
 // column number to copy from, second argument to pageInfoTreeView's constructor
 const COPYCOL_NONE = -1;
@@ -213,6 +214,11 @@ gImageView.onPageMediaSort = function (columnname) {
     comparator = function numComparator(a, b) {
       return a - b;
     };
+
+    // COL_IMAGE_SIZE contains the localized string, compare raw numbers.
+    if (index == COL_IMAGE_SIZE) {
+      index = COL_IMAGE_RAWSIZE;
+    }
   } else {
     comparator = function textComparator(a, b) {
       return (a || "").toLowerCase().localeCompare((b || "").toLowerCase());
@@ -283,58 +289,132 @@ const gClipboardHelper = getClipboardHelper();
  *                                the calling window's document will be used
  *                         - initialTab: (optional) id of the inital tab to display
  */
-async function onLoadPageInfo() {
-  [
-    SIZE_UNKNOWN,
-    ALT_NOT_SET,
-    MEDIA_STRINGS.img,
-    MEDIA_STRINGS["bg-img"],
-    MEDIA_STRINGS["border-img"],
-    MEDIA_STRINGS["list-img"],
-    MEDIA_STRINGS.cursor,
-    MEDIA_STRINGS.object,
-    MEDIA_STRINGS.embed,
-    MEDIA_STRINGS.link,
-    MEDIA_STRINGS.input,
-    MEDIA_STRINGS.video,
-    MEDIA_STRINGS.audio,
-  ] = await document.l10n.formatValues([
-    "image-size-unknown",
-    "not-set-alternative-text",
-    "media-img",
-    "media-bg-img",
-    "media-border-img",
-    "media-list-img",
-    "media-cursor",
-    "media-object",
-    "media-embed",
-    "media-link",
-    "media-input",
-    "media-video",
-    "media-audio",
-  ]);
+window.addEventListener(
+  "load",
+  async function onLoadPageInfo() {
+    [
+      SIZE_UNKNOWN,
+      ALT_NOT_SET,
+      MEDIA_STRINGS.img,
+      MEDIA_STRINGS["bg-img"],
+      MEDIA_STRINGS["border-img"],
+      MEDIA_STRINGS["list-img"],
+      MEDIA_STRINGS.cursor,
+      MEDIA_STRINGS.object,
+      MEDIA_STRINGS.embed,
+      MEDIA_STRINGS.link,
+      MEDIA_STRINGS.input,
+      MEDIA_STRINGS.video,
+      MEDIA_STRINGS.audio,
+    ] = await document.l10n.formatValues([
+      "image-size-unknown",
+      "not-set-alternative-text",
+      "media-img",
+      "media-bg-img",
+      "media-border-img",
+      "media-list-img",
+      "media-cursor",
+      "media-object",
+      "media-embed",
+      "media-link",
+      "media-input",
+      "media-video",
+      "media-audio",
+    ]);
 
-  const args =
-    "arguments" in window &&
-    window.arguments.length >= 1 &&
-    window.arguments[0];
+    const args =
+      "arguments" in window &&
+      window.arguments.length >= 1 &&
+      window.arguments[0];
 
-  // Init media view
-  let imageTree = document.getElementById("imagetree");
-  imageTree.view = gImageView;
+    // Init media view
+    let imageTree = document.getElementById("imagetree");
+    imageTree.view = gImageView;
 
-  imageTree.controllers.appendController(treeController);
+    imageTree.controllers.appendController(treeController);
 
-  document
-    .getElementById("metatree")
-    .controllers.appendController(treeController);
+    document
+      .getElementById("metatree")
+      .controllers.appendController(treeController);
 
-  // Select the requested tab, if the name is specified
-  await loadTab(args);
+    document
+      .querySelector("#metatree > treecols")
+      .addEventListener("click", event => {
+        let id = event.target.id;
+        switch (id) {
+          case "meta-name":
+          case "meta-content":
+            gMetaView.onPageMediaSort(id);
+            break;
+        }
+      });
 
-  // Emit init event for tests
-  window.dispatchEvent(new Event("page-info-init"));
-}
+    document
+      .querySelector("#imagetree > treecols")
+      .addEventListener("click", event => {
+        let id = event.target.id;
+        switch (id) {
+          case "image-address":
+          case "image-type":
+          case "image-size":
+          case "image-alt":
+          case "image-count":
+            gImageView.onPageMediaSort(id);
+            break;
+        }
+      });
+
+    let imagetree = document.getElementById("imagetree");
+    imagetree.addEventListener("select", onImageSelect);
+    imagetree.addEventListener("dragstart", event =>
+      onBeginLinkDrag(event, "image-address", "image-alt")
+    );
+
+    document.addEventListener("command", event => {
+      switch (event.target.id) {
+        // == pageInfoCommandSet ==
+        case "cmd_close":
+          window.close();
+          break;
+        case "cmd_help":
+          doHelpButton();
+          break;
+        // == topBar ==
+        case "generalTab":
+        case "mediaTab":
+        case "permTab":
+        case "securityTab":
+          showTab(event.target.id.slice(0, -3));
+          break;
+        // == imageSaveBox ==
+        case "selectallbutton":
+          doSelectAllMedia();
+          break;
+        case "imagesaveasbutton":
+        case "mediasaveasbutton":
+          saveMedia();
+          break;
+        // == securityPanel ==
+        case "security-view-cert":
+          security.viewCert();
+          break;
+        case "security-clear-sitedata":
+          security.clearSiteData();
+          break;
+        case "security-view-password":
+          security.viewPasswords();
+          break;
+      }
+    });
+
+    // Select the requested tab, if the name is specified
+    await loadTab(args);
+
+    // Emit init event for tests
+    window.dispatchEvent(new Event("page-info-init"));
+  },
+  { once: true }
+);
 
 async function loadPageInfo(browsingContext, imageElement, browser) {
   browser = browser || window.opener.gBrowser.selectedBrowser;
@@ -475,10 +555,10 @@ async function loadTab(args) {
 
 function openCacheEntry(key, cb) {
   var checkCacheListener = {
-    onCacheEntryCheck(entry) {
+    onCacheEntryCheck() {
       return Ci.nsICacheEntryOpenCallback.ENTRY_WANTED;
     },
-    onCacheEntryAvailable(entry, isNew, status) {
+    onCacheEntryAvailable(entry) {
       cb(entry);
     },
   };
@@ -580,21 +660,30 @@ async function addImage({ url, type, alt, altNotProvided, element, isBg }) {
   }
   if (!gImageHash[url][type].hasOwnProperty(alt)) {
     gImageHash[url][type][alt] = gImageView.data.length;
-    var row = [url, MEDIA_STRINGS[type], SIZE_UNKNOWN, alt, 1, element, isBg];
+    var row = [
+      url,
+      MEDIA_STRINGS[type],
+      SIZE_UNKNOWN,
+      alt,
+      1,
+      element,
+      isBg,
+      -1,
+    ];
     gImageView.addRow(row);
 
     // Fill in cache data asynchronously
     openCacheEntry(url, function (cacheEntry) {
-      // The data at row[2] corresponds to the data size.
       if (cacheEntry) {
         let value = cacheEntry.dataSize;
         // If value is not -1 then replace with actual value, else keep as "unknown"
         if (value != -1) {
+          row[COL_IMAGE_RAWSIZE] = value;
           let kbSize = Number(Math.round((value / 1024) * 100) / 100);
           document.l10n
             .formatValue("media-file-size", { size: kbSize })
             .then(function (response) {
-              row[2] = response;
+              row[COL_IMAGE_SIZE] = response;
               // Invalidate the row to trigger a repaint.
               gImageView.tree.invalidateRow(gImageView.data.indexOf(row));
             });
@@ -686,7 +775,7 @@ async function selectSaveFolder(aCallback) {
     }
   };
 
-  fp.init(window, titleText, nsIFilePicker.modeGetFolder);
+  fp.init(window.browsingContext, titleText, nsIFilePicker.modeGetFolder);
   fp.appendFilters(nsIFilePicker.filterAll);
   try {
     let initialDir = Services.prefs.getComplexValue(
@@ -732,15 +821,20 @@ function saveMedia() {
       let cookieJarSettings = E10SUtils.deserializeCookieJarSettings(
         gDocInfo.cookieJarSettings
       );
-      saveURL(
+      internalSave(
         url,
         null,
         null,
+        null,
+        null,
+        item.mimeType,
+        false,
         titleKey,
-        false,
-        false,
+        null,
         referrerInfo,
         cookieJarSettings,
+        null,
+        false,
         null,
         gDocInfo.isContentWindowPrivate,
         gDocInfo.principal
@@ -1080,7 +1174,7 @@ let treeController = {
     return command == "cmd_copy" || command == "cmd_selectAll";
   },
 
-  isCommandEnabled(command) {
+  isCommandEnabled() {
     return true; // not worth checking for this
   },
 

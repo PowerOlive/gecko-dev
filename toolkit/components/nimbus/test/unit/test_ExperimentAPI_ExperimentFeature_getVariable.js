@@ -11,7 +11,7 @@ async function setupForExperimentFeature() {
   const manager = ExperimentFakes.manager();
   await manager.onStartup();
 
-  sandbox.stub(ExperimentAPI, "_store").get(() => manager.store);
+  sandbox.stub(ExperimentAPI, "_manager").get(() => manager);
 
   return { sandbox, manager };
 }
@@ -90,6 +90,7 @@ add_task(async function test_ExperimentFeature_getVariable_precedence() {
   const rollout = ExperimentFakes.rollout(`${FEATURE_ID}-rollout`, {
     branch: {
       slug: "slug",
+      ratio: 1,
       features: [
         {
           featureId: FEATURE_ID,
@@ -144,7 +145,7 @@ add_task(async function test_ExperimentFeature_getVariable_precedence() {
 
   // Cleanup
   Services.prefs.deleteBranch(TEST_PREF_BRANCH);
-  await doExperimentCleanup();
+  doExperimentCleanup();
   sandbox.restore();
 });
 
@@ -154,6 +155,7 @@ add_task(async function test_ExperimentFeature_getVariable_partial_values() {
   const rollout = ExperimentFakes.rollout(`${FEATURE_ID}-rollout`, {
     branch: {
       slug: "slug",
+      ratio: 1,
       features: [
         {
           featureId: FEATURE_ID,
@@ -191,6 +193,6 @@ add_task(async function test_ExperimentFeature_getVariable_partial_values() {
   // Cleanup
   Services.prefs.getDefaultBranch("").deleteBranch(TEST_PREF_BRANCH);
   Services.prefs.deleteBranch(TEST_PREF_BRANCH);
-  await doExperimentCleanup();
+  doExperimentCleanup();
   sandbox.restore();
 });

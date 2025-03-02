@@ -18,16 +18,16 @@ origin:
   url: "https://cgit.freedesktop.org/drm/libdrm/"
   license: MIT
 
-  release: 0e2c7d05712d65903a9b77fb9f960ddff43bac64
+  release: e7d4b1df2d3f675b478897ab454d635e9b4eb915 (2024-12-18T13:15:57.000-05:00).
 
-  revision: 0e2c7d05712d65903a9b77fb9f960ddff43bac64
+  revision: e7d4b1df2d3f675b478897ab454d635e9b4eb915
   # The codebase does not provide a LICENSE file!
   # https://docs.mesa3d.org/license.html#license-copyright-information
   # license-file: LICENSE
 
 updatebot:
-  maintainer-phab: chew
-  maintainer-bz: ngrunbaum@mozilla.com
+  maintainer-phab: ng
+  maintainer-bz: ngrunbaum@me.com
   tasks:
     - type: vendoring
       enabled: true
@@ -40,7 +40,6 @@ vendoring:
   skip-vendoring-steps: ['update-moz-build'] 
   exclude:
     - '**'
-    - '**/.*'
 
   include:
     - include/drm/drm.h

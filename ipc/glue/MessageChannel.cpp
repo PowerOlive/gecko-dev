@@ -12,10 +12,12 @@
 #include <utility>
 
 #include "CrashAnnotations.h"
+#include "base/waitable_event.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/CycleCollectedJSContext.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/Fuzzing.h"
+#include "mozilla/FlowMarkers.h"
 #include "mozilla/IntentionalCrash.h"
 #include "mozilla/Logging.h"
 #include "mozilla/Monitor.h"
@@ -125,14 +127,6 @@ static MessageChannel* gParentProcessBlocker = nullptr;
 
 namespace mozilla {
 namespace ipc {
-
-static const uint32_t kMinTelemetryMessageSize = 4096;
-
-// Note: we round the time we spend waiting for a response to the nearest
-// millisecond. So a min value of 1 ms actually captures from 500us and above.
-// This is used for both the sending and receiving side telemetry for sync IPC,
-// (IPC_SYNC_MAIN_LATENCY_MS and IPC_SYNC_RECEIVE_MS).
-static const uint32_t kMinTelemetrySyncIPCLatencyMs = 1;
 
 // static
 bool MessageChannel::sIsPumpingMessages = false;
@@ -313,25 +307,6 @@ class AutoEnterTransaction {
   UniquePtr<IPC::Message> mReply;
 };
 
-class PendingResponseReporter final : public nsIMemoryReporter {
-  ~PendingResponseReporter() = default;
-
- public:
-  NS_DECL_THREADSAFE_ISUPPORTS
-
-  NS_IMETHOD
-  CollectReports(nsIHandleReportCallback* aHandleReport, nsISupports* aData,
-                 bool aAnonymize) override {
-    MOZ_COLLECT_REPORT(
-        "unresolved-ipc-responses", KIND_OTHER, UNITS_COUNT,
-        MessageChannel::gUnresolvedResponses,
-        "Outstanding IPC async message responses that are still not resolved.");
-    return NS_OK;
-  }
-};
-
-NS_IMPL_ISUPPORTS(PendingResponseReporter, nsIMemoryReporter)
-
 class ChannelCountReporter final : public nsIMemoryReporter {
   ~ChannelCountReporter() = default;
 
@@ -432,8 +407,6 @@ static void TryRegisterStrongMemoryReporter() {
   }
 }
 
-Atomic<size_t> MessageChannel::gUnresolvedResponses;
-
 MessageChannel::MessageChannel(const char* aName, IToplevelProtocol* aListener)
     : mName(aName), mListener(aListener), mMonitor(new RefCountedMonitor()) {
   MOZ_COUNT_CTOR(ipc::MessageChannel);
@@ -443,7 +416,6 @@ MessageChannel::MessageChannel(const char* aName, IToplevelProtocol* aListener)
   MOZ_RELEASE_ASSERT(mEvent, "CreateEvent failed! Nothing is going to work!");
 #endif
 
-  TryRegisterStrongMemoryReporter<PendingResponseReporter>();
   TryRegisterStrongMemoryReporter<ChannelCountReporter>();
 }
 
@@ -473,9 +445,8 @@ MessageChannel::~MessageChannel() {
   // would be unsafe to invoke our listener's callbacks, and we may be being
   // destroyed on a thread other than `mWorkerThread`.
   if (!IsClosedLocked()) {
-    CrashReporter::AnnotateCrashReport(
-        CrashReporter::Annotation::IPCFatalErrorProtocol,
-        nsDependentCString(mName));
+    CrashReporter::RecordAnnotationCString(
+        CrashReporter::Annotation::IPCFatalErrorProtocol, mName);
     switch (mChannelState) {
       case ChannelConnected:
         MOZ_CRASH(
@@ -499,7 +470,6 @@ MessageChannel::~MessageChannel() {
 
   // Double-check other properties for thoroughness.
   MOZ_RELEASE_ASSERT(!mLink);
-  MOZ_RELEASE_ASSERT(mPendingResponses.empty());
   MOZ_RELEASE_ASSERT(!mChannelErrorTask);
   MOZ_RELEASE_ASSERT(mPending.isEmpty());
   MOZ_RELEASE_ASSERT(!mShutdownTask);
@@ -537,6 +507,12 @@ int32_t MessageChannel::CurrentNestedInsideSyncTransaction() const {
   return mTransactionStack->TransactionID();
 }
 
+bool MessageChannel::TestOnlyIsTransactionComplete() const {
+  AssertWorkerThread();
+  MonitorAutoLock lock(*mMonitor);
+  return !mTransactionStack || mTransactionStack->IsComplete();
+}
+
 bool MessageChannel::AwaitingSyncReply() const {
   mMonitor->AssertCurrentThreadOwns();
   return mTransactionStack ? mTransactionStack->AwaitingSyncReply() : false;
@@ -559,17 +535,6 @@ int MessageChannel::DispatchingSyncMessageNestedLevel() const {
   return mTransactionStack
              ? mTransactionStack->DispatchingSyncMessageNestedLevel()
              : 0;
-}
-
-static const char* StringFromIPCSide(Side side) {
-  switch (side) {
-    case ChildSide:
-      return "Child";
-    case ParentSide:
-      return "Parent";
-    default:
-      return "Unknown";
-  }
 }
 
 static void PrintErrorMessage(Side side, const char* channelName,
@@ -617,16 +582,6 @@ void MessageChannel::Clear() {
   if (NS_IsMainThread() && gParentProcessBlocker == this) {
     gParentProcessBlocker = nullptr;
   }
-
-  gUnresolvedResponses -= mPendingResponses.size();
-  {
-    CallbackMap map = std::move(mPendingResponses);
-    MonitorAutoUnlock unlock(*mMonitor);
-    for (auto& pair : map) {
-      pair.second->Reject(ResponseRejectReason::ChannelClosed);
-    }
-  }
-  mPendingResponses.clear();
 
   SetIsCrossProcess(false);
 
@@ -755,25 +710,20 @@ bool MessageChannel::OpenOnSameThread(MessageChannel* aTargetChan,
          Open(std::move(porta), aSide, channelId, currentThread);
 }
 
-bool MessageChannel::Send(UniquePtr<Message> aMsg) {
-  if (aMsg->size() >= kMinTelemetryMessageSize) {
-    Telemetry::Accumulate(Telemetry::IPC_MESSAGE_SIZE2, aMsg->size());
-  }
-
+bool MessageChannel::Send(UniquePtr<Message> aMsg, int32_t* aSeqno) {
   MOZ_RELEASE_ASSERT(!aMsg->is_sync());
   MOZ_RELEASE_ASSERT(aMsg->nested_level() != IPC::Message::NESTED_INSIDE_SYNC);
+  MOZ_RELEASE_ASSERT(aMsg->routing_id() != MSG_ROUTING_NONE);
+  AssertWorkerThread();
+  mMonitor->AssertNotCurrentThreadOwns();
 
   AutoSetValue<bool> setOnCxxStack(mOnCxxStack, true);
 
-  AssertWorkerThread();
-  mMonitor->AssertNotCurrentThreadOwns();
-  if (MSG_ROUTING_NONE == aMsg->routing_id()) {
-    ReportMessageRouteError("MessageChannel::Send");
-    return false;
-  }
-
   if (aMsg->seqno() == 0) {
     aMsg->set_seqno(NextSeqno());
+  }
+  if (aSeqno) {
+    *aSeqno = aMsg->seqno();
   }
 
   MonitorAutoLock lock(*mMonitor);
@@ -828,35 +778,6 @@ void MessageChannel::FlushLazySendMessages() {
   // Send all lazy messages, then clear the queue.
   for (auto& msg : messages) {
     mLink->SendMessage(std::move(msg));
-  }
-}
-
-UniquePtr<MessageChannel::UntypedCallbackHolder> MessageChannel::PopCallback(
-    const Message& aMsg, int32_t aActorId) {
-  auto iter = mPendingResponses.find(aMsg.seqno());
-  if (iter != mPendingResponses.end() && iter->second->mActorId == aActorId &&
-      iter->second->mReplyMsgId == aMsg.type()) {
-    UniquePtr<MessageChannel::UntypedCallbackHolder> ret =
-        std::move(iter->second);
-    mPendingResponses.erase(iter);
-    gUnresolvedResponses--;
-    return ret;
-  }
-  return nullptr;
-}
-
-void MessageChannel::RejectPendingResponsesForActor(int32_t aActorId) {
-  auto itr = mPendingResponses.begin();
-  while (itr != mPendingResponses.end()) {
-    if (itr->second.get()->mActorId != aActorId) {
-      ++itr;
-      continue;
-    }
-    itr->second.get()->Reject(ResponseRejectReason::ActorDestroyed);
-    // Take special care of advancing the iterator since we are
-    // removing it while iterating.
-    itr = mPendingResponses.erase(itr);
-    gUnresolvedResponses--;
   }
 }
 
@@ -941,13 +862,13 @@ bool MessageChannel::MaybeInterceptSpecialIOMessage(const Message& aMsg) {
       // ourselves as "Closing".
       mLink->Close();
       mChannelState = ChannelClosing;
-      if (LoggingEnabled()) {
+      if (LoggingEnabledFor(mListener->GetProtocolName(), mSide)) {
         printf(
-            "[%s %u] NOTE: %s actor received `Goodbye' message.  Closing "
+            "[%s %u] NOTE: %s%s actor received `Goodbye' message.  Closing "
             "channel.\n",
             XRE_GeckoProcessTypeToString(XRE_GetProcessType()),
             static_cast<uint32_t>(base::GetCurrentProcId()),
-            (mSide == ChildSide) ? "child" : "parent");
+            mListener->GetProtocolName(), StringFromIPCSide(mSide));
       }
 
       // Notify the worker thread that the connection has been closed, as we
@@ -1026,6 +947,47 @@ bool MessageChannel::ShouldDeferMessage(const Message& aMsg) {
          aMsg.transaction_id() != CurrentNestedInsideSyncTransaction();
 }
 
+class IPCFlowMarker : public BaseMarkerType<IPCFlowMarker> {
+ public:
+  static constexpr const char* Name = "IPCFlowMarker";
+
+  using MS = MarkerSchema;
+  static constexpr MS::PayloadField PayloadFields[] = {
+      {"name", MS::InputType::CString, "Details", MS::Format::String,
+       MS::PayloadFlags::Searchable},
+      {"flow", MS::InputType::Uint64, "Flow", MS::Format::Flow,
+       MS::PayloadFlags::Searchable}};
+
+  static constexpr MS::Location Locations[] = {MS::Location::MarkerChart,
+                                               MS::Location::MarkerTable};
+  static constexpr const char* TableLabel =
+      "{marker.name} - {marker.data.name}(flow={marker.data.flow})";
+  static constexpr const char* ChartLabel = "{marker.name}";
+
+  static constexpr MS::ETWMarkerGroup Group = MS::ETWMarkerGroup::Generic;
+
+  static constexpr bool IsStackBased = true;
+
+  static void StreamJSONMarkerData(
+      mozilla::baseprofiler::SpliceableJSONWriter& aWriter,
+      IPC::Message::msgid_t aMessageType, Flow aFlow) {
+    aWriter.StringProperty(
+        "name",
+        mozilla::MakeStringSpan(IPC::StringFromIPCMessageType(aMessageType)));
+    aWriter.FlowProperty("flow", aFlow);
+  }
+};
+
+static uint64_t LossyNarrowChannelId(const nsID& aID) {
+  // We xor both halves of the UUID together so that the parts of the id where
+  // the variant (m2) and version (m3[0]) get xored with random bits from the
+  // other halve.
+  uint64_t bits[2];
+  memcpy(&bits, &aID, sizeof(bits));
+
+  return bits[0] ^ bits[1];
+}
+
 void MessageChannel::OnMessageReceivedFromLink(UniquePtr<Message> aMsg) {
   mMonitor->AssertCurrentThreadOwns();
   MOZ_ASSERT(mChannelState == ChannelConnected);
@@ -1102,6 +1064,30 @@ void MessageChannel::OnMessageReceivedFromLink(UniquePtr<Message> aMsg) {
 
   IPC_LOG("Receive from link; seqno=%d, xid=%d, shouldWakeUp=%d", aMsg->seqno(),
           aMsg->transaction_id(), shouldWakeUp);
+
+  struct FlowMarkerDispatch {
+    FlowMarkerDispatch(msgid_t type, Flow flow) : type(type), flow(flow) {
+      if (profiler_feature_active(ProfilerFeature::Flows)) {
+        options.Set(MarkerTiming::InstantNow());
+      }
+    }
+    ~FlowMarkerDispatch() {
+      if (!options.IsTimingUnspecified()) {
+        options.TimingRef().SetIntervalEnd();
+        profiler_add_marker("IPCDispatch", baseprofiler::category::OTHER,
+                            std::move(options), IPCFlowMarker{}, type, flow);
+      }
+    }
+    msgid_t type;
+    Flow flow;
+    MarkerOptions options;
+  };
+
+  // We want this marker to span the time when Post is called so that we
+  // can inherit the connection to the runnable.
+  FlowMarkerDispatch marker(
+      aMsg->type(),
+      Flow::Global(aMsg->seqno() ^ LossyNarrowChannelId(mMessageChannelId)));
 
   // There are two cases we're concerned about, relating to the state of the
   // worker thread:
@@ -1223,9 +1209,6 @@ void MessageChannel::ProcessPendingRequests(
 
 bool MessageChannel::Send(UniquePtr<Message> aMsg, UniquePtr<Message>* aReply) {
   mozilla::TimeStamp start = TimeStamp::Now();
-  if (aMsg->size() >= kMinTelemetryMessageSize) {
-    Telemetry::Accumulate(Telemetry::IPC_MESSAGE_SIZE2, aMsg->size());
-  }
 
   // Sanity checks.
   AssertWorkerThread();
@@ -1422,19 +1405,7 @@ bool MessageChannel::Send(UniquePtr<Message> aMsg, UniquePtr<Message>* aReply) {
 
   AddProfilerMarker(*reply, MessageDirection::eReceiving);
 
-  if (reply->size() >= kMinTelemetryMessageSize) {
-    Telemetry::Accumulate(Telemetry::IPC_REPLY_SIZE,
-                          nsDependentCString(msgName), reply->size());
-  }
-
   *aReply = std::move(reply);
-
-  // NOTE: Only collect IPC_SYNC_MAIN_LATENCY_MS on the main thread (bug
-  // 1343729)
-  if (NS_IsMainThread() && latencyMs >= kMinTelemetrySyncIPCLatencyMs) {
-    Telemetry::Accumulate(Telemetry::IPC_SYNC_MAIN_LATENCY_MS,
-                          nsDependentCString(msgName), latencyMs);
-  }
   return true;
 }
 
@@ -1610,9 +1581,13 @@ nsresult MessageChannel::MessageTask::Run() {
     return NS_OK;
   }
 
+  Channel()->AssertWorkerThread();
+  mMonitor->AssertSameMonitor(*Channel()->mMonitor);
+
 #ifdef FUZZING_SNAPSHOT
   if (!mIsFuzzMsg) {
-    if (fuzzing::Nyx::instance().started()) {
+    if (fuzzing::Nyx::instance().started() && XRE_IsParentProcess() &&
+        Channel()->IsCrossProcess()) {
       // Once we started fuzzing, prevent non-fuzzing tasks from being
       // run and potentially blocking worker threads.
       //
@@ -1628,8 +1603,6 @@ nsresult MessageChannel::MessageTask::Run() {
   }
 #endif
 
-  Channel()->AssertWorkerThread();
-  mMonitor->AssertSameMonitor(*Channel()->mMonitor);
   proxy = Channel()->Listener()->GetLifecycleProxy();
   Channel()->RunMessage(proxy, *this);
 
@@ -1714,6 +1687,13 @@ void MessageChannel::DispatchMessage(ActorLifecycleProxy* aProxy,
 
   UniquePtr<Message> reply;
 
+#ifdef FUZZING_SNAPSHOT
+  if (IsCrossProcess()) {
+    aMsg = mozilla::fuzzing::IPCFuzzController::instance().replaceIPCMessage(
+        std::move(aMsg));
+  }
+#endif
+
   IPC_LOG("DispatchMessage: seqno=%d, xid=%d", aMsg->seqno(),
           aMsg->transaction_id());
   AddProfilerMarker(*aMsg, MessageDirection::eReceiving);
@@ -1747,6 +1727,12 @@ void MessageChannel::DispatchMessage(ActorLifecycleProxy* aProxy,
     }
   }
 
+#ifdef FUZZING_SNAPSHOT
+  if (aMsg->IsFuzzMsg()) {
+    mozilla::fuzzing::IPCFuzzController::instance().syncAfterReplace();
+  }
+#endif
+
   if (reply && ChannelConnected == mChannelState) {
     IPC_LOG("Sending reply seqno=%d, xid=%d", aMsg->seqno(),
             aMsg->transaction_id());
@@ -1761,8 +1747,6 @@ void MessageChannel::DispatchSyncMessage(ActorLifecycleProxy* aProxy,
                                          UniquePtr<Message>& aReply) {
   AssertWorkerThread();
 
-  mozilla::TimeStamp start = TimeStamp::Now();
-
   int nestedLevel = aMsg.nested_level();
 
   MOZ_RELEASE_ASSERT(nestedLevel == IPC::Message::NOT_NESTED ||
@@ -1776,12 +1760,6 @@ void MessageChannel::DispatchSyncMessage(ActorLifecycleProxy* aProxy,
   {
     AutoSetValue<MessageChannel*> blocked(blockingVar, this);
     rv = aProxy->Get()->OnMessageReceived(aMsg, aReply);
-  }
-
-  uint32_t latencyMs = round((TimeStamp::Now() - start).ToMilliseconds());
-  if (latencyMs >= kMinTelemetrySyncIPCLatencyMs) {
-    Telemetry::Accumulate(Telemetry::IPC_SYNC_RECEIVE_MS,
-                          nsDependentCString(aMsg.name()), latencyMs);
   }
 
   if (!MaybeHandleError(rv, aMsg, "DispatchSyncMessage")) {
@@ -1937,17 +1915,19 @@ void MessageChannel::ReportConnectionError(const char* aFunctionName,
   mListener->ProcessingError(MsgDropped, errorMsg);
 }
 
-void MessageChannel::ReportMessageRouteError(const char* channelName) const {
-  PrintErrorMessage(mSide, channelName, "Need a route");
-  mListener->ProcessingError(MsgRouteError, "MsgRouteError");
-}
-
 bool MessageChannel::MaybeHandleError(Result code, const Message& aMsg,
                                       const char* channelName) {
   if (MsgProcessed == code) return true;
 
+#ifdef FUZZING_SNAPSHOT
+  mozilla::fuzzing::IPCFuzzController::instance().OnMessageError(code, aMsg);
+#endif
+
   const char* errorMsg = nullptr;
   switch (code) {
+    case MsgDropped:
+      errorMsg = "Message dropped: message could not be delivered";
+      break;
     case MsgNotKnown:
       errorMsg = "Unknown message: not processed";
       break;
@@ -1961,9 +1941,6 @@ bool MessageChannel::MaybeHandleError(Result code, const Message& aMsg,
       errorMsg =
           "Processing error: message was deserialized, but the handler "
           "returned false (indicating failure)";
-      break;
-    case MsgRouteError:
-      errorMsg = "Route error: message sent to unknown actor ID";
       break;
     case MsgValueError:
       errorMsg =
@@ -2216,8 +2193,7 @@ void MessageChannel::DebugAbort(const char* file, int line, const char* cond,
   printf_stderr(
       "###!!! [MessageChannel][%s][%s:%d] "
       "Assertion (%s) failed.  %s %s\n",
-      mSide == ChildSide ? "Child" : "Parent", file, line, cond, why,
-      reply ? "(reply)" : "");
+      StringFromIPCSide(mSide), file, line, cond, why, reply ? "(reply)" : "");
 
   MessageQueue pending = std::move(mPending);
   while (!pending.isEmpty()) {
@@ -2234,6 +2210,20 @@ void MessageChannel::DebugAbort(const char* file, int line, const char* cond,
 void MessageChannel::AddProfilerMarker(const IPC::Message& aMessage,
                                        MessageDirection aDirection) {
   mMonitor->AssertCurrentThreadOwns();
+
+  if (profiler_feature_active(ProfilerFeature::Flows) &&
+      // If one of the profiler mutexes is locked on this thread, don't
+      // record markers, because we don't want to expose profiler IPCs due to
+      // the profiler itself, and also to avoid possible re-entrancy issues.
+      !profiler_is_locked_on_current_thread()) {
+    if (aDirection == MessageDirection::eSending) {
+      auto flow = Flow::Global(aMessage.seqno() ^
+                               LossyNarrowChannelId(mMessageChannelId));
+      profiler_add_marker("IPC", baseprofiler::category::OTHER,
+                          MarkerTiming::InstantNow(), IPCFlowMarker{},
+                          aMessage.type(), flow);
+    }
+  }
 
   if (profiler_feature_active(ProfilerFeature::IPCMessages)) {
     base::ProcessId pid = mListener->OtherPidMaybeInvalid();

@@ -10,18 +10,22 @@
 #include <algorithm>
 
 #include "mozilla/Assertions.h"
-#include "mozilla/EndianUtils.h"
 #include "mozilla/Utf8.h"
 #include "BufferReader.h"
+#include "mozilla/EndianUtils.h"
 #include "VideoUtils.h"
 #include "TimeUnits.h"
+#include "mozilla/Logging.h"
 
 using mozilla::media::TimeIntervals;
 using mozilla::media::TimeUnit;
 
+extern mozilla::LazyLogModule gMediaDemuxerLog;
+
 namespace mozilla {
 
-// WAVDemuxer
+#define LOG(msg, ...) \
+  MOZ_LOG(gMediaDemuxerLog, LogLevel::Debug, msg, ##__VA_ARGS__)
 
 WAVDemuxer::WAVDemuxer(MediaResource* aSource) : mSource(aSource) {
   DDLINKCHILD("source", aSource);
@@ -89,6 +93,8 @@ bool WAVTrackDemuxer::Init() {
     return false;
   }
 
+  bool hasValidFmt = false;
+
   while (true) {
     if (!HeaderParserInit()) {
       return false;
@@ -98,9 +104,7 @@ bool WAVTrackDemuxer::Init() {
     uint32_t chunkSize = mHeaderParser.GiveHeader().ChunkSize();
 
     if (chunkName == FRMT_CODE) {
-      if (!FmtChunkParserInit()) {
-        return false;
-      }
+      hasValidFmt = FmtChunkParserInit();
     } else if (chunkName == LIST_CODE) {
       mHeaderParser.Reset();
       uint64_t endOfListChunk = static_cast<uint64_t>(mOffset) + chunkSize;
@@ -124,6 +128,10 @@ bool WAVTrackDemuxer::Init() {
       mOffset += 1;
     }
     mHeaderParser.Reset();
+  }
+
+  if (!hasValidFmt) {
+    return false;
   }
 
   int64_t streamLength = StreamLength();
@@ -150,13 +158,32 @@ bool WAVTrackDemuxer::Init() {
   mInfo->mRate = mSamplesPerSecond;
   mInfo->mChannels = mChannels;
   mInfo->mBitDepth = mFmtChunk.ValidBitsPerSamples();
-  mInfo->mProfile = AssertedCast<int8_t>(mFmtChunk.WaveFormat() & 0x00FF);
+  mInfo->mProfile = AssertedCast<uint8_t>(mFmtChunk.WaveFormat() & 0x00FF);
   mInfo->mExtendedProfile =
-      AssertedCast<int8_t>(mFmtChunk.WaveFormat() & 0xFF00 >> 8);
+      AssertedCast<uint8_t>(mFmtChunk.WaveFormat() & 0xFF00 >> 8);
   mInfo->mMimeType = "audio/wave; codecs=";
-  mInfo->mMimeType.AppendInt(mFmtChunk.WaveFormat());
+  // 1: linear integer pcm
+  // 3: float
+  // 6: alaw
+  // 7: ulaw
+  mInfo->mMimeType.AppendInt(mInfo->mProfile);
   mInfo->mDuration = Duration();
   mInfo->mChannelMap = mFmtChunk.ChannelMap();
+
+  if (AudioConfig::ChannelLayout::Channels(mInfo->mChannelMap) !=
+      mInfo->mChannels) {
+    AudioConfig::ChannelLayout::ChannelMap defaultForChannelCount =
+        AudioConfig::ChannelLayout(mInfo->mChannels).Map();
+    LOG(("Channel count of %" PRIu32
+         " and channel layout disagree, overriding channel map from %s to %s",
+         mInfo->mChannels,
+         AudioConfig::ChannelLayout::ChannelMapToString(mInfo->mChannelMap)
+             .get(),
+         AudioConfig::ChannelLayout::ChannelMapToString(defaultForChannelCount)
+             .get()));
+    mInfo->mChannelMap = defaultForChannelCount;
+  }
+  LOG(("WavDemuxer initialized: %s", mInfo->ToString().get()));
 
   return mInfo->mDuration.IsPositive();
 }
@@ -183,7 +210,7 @@ bool WAVTrackDemuxer::HeaderParserInit() {
 
 bool WAVTrackDemuxer::FmtChunkParserInit() {
   RefPtr<MediaRawData> fmtChunk = GetFileHeader(FindFmtChunk());
-  if (!fmtChunk) {
+  if (!fmtChunk || fmtChunk->Size() < 16) {
     return false;
   }
   nsTArray<uint8_t> fmtChunkData(fmtChunk->Data(), fmtChunk->Size());
@@ -260,6 +287,8 @@ bool WAVTrackDemuxer::ListChunkParserInit(uint32_t aChunkSize) {
       case 0x494e414d:  // INAM
         mInfo->mTags.AppendElement(MetadataTag("name"_ns, val));
         break;
+      default:
+        LOG(("Metadata key %08x not handled", id));
     }
 
     mHeaderParser.Reset();
@@ -657,8 +686,6 @@ void HeaderParser::ChunkHeader::Update(uint8_t c) {
 
 void FormatChunk::Init(nsTArray<uint8_t>&& aData) { mRaw = std::move(aData); }
 
-uint16_t FormatChunk::WaveFormat() const { return (mRaw[1] << 8) | (mRaw[0]); }
-
 uint16_t FormatChunk::Channels() const { return (mRaw[3] << 8) | (mRaw[2]); }
 
 uint32_t FormatChunk::SampleRate() const {
@@ -679,36 +706,62 @@ uint16_t FormatChunk::ValidBitsPerSamples() const {
   return (mRaw[15] << 8) | (mRaw[14]);
 }
 
-uint16_t FormatChunk::ExtraFormatInfoSize() const {
-  uint16_t value = static_cast<uint16_t>(mRaw[17] << 8) | (mRaw[16]);
-  if (WaveFormat() != 0xFFFE && value != 0) {
-    NS_WARNING(
-        "Found non-zero extra format info length and the wave format"
-        " isn't WAVEFORMATEXTENSIBLE.");
-    return 0;
+// Constants to deal with WAVEFORMATEXTENSIBLE struct
+constexpr size_t MIN_SIZE_WAVEFORMATEXTENSIBLE = 22;
+constexpr size_t OFFSET_CHANNEL_MAP = 20;
+constexpr size_t OFFSET_FORMAT = 24;
+constexpr size_t SIZE_WAVEFORMATEX = 18;
+
+template <typename T>
+Result<T, nsresult> GetFromExtradata(const nsTArray<uint8_t>& aRawData,
+                                     size_t aOffset) {
+  // Check there is extradata
+  MOZ_ASSERT(((aRawData[1] << 8) | aRawData[0]) == 0xFFFE,
+             "GetFromExtradata called without a tag of 0xFFFE");
+  if (aRawData.Length() <= SIZE_WAVEFORMATEX) {
+    return Err(NS_ERROR_UNEXPECTED);
   }
-  if (WaveFormat() == 0xFFFE && value < 22) {
-    NS_WARNING(
-        "Wave format is WAVEFORMATEXTENSIBLE and extra data size isn't at"
-        " least 22 bytes");
-    return 0;
+  uint16_t extradataSize =
+      static_cast<uint16_t>(aRawData[17] << 8) | (aRawData[16]);
+  // The length of this chunk is at least 18, check if it's long enough to
+  // hold the WAVE_FORMAT_EXTENSIBLE struct, that is 22 more than the
+  // WAVEFORMATEX.
+  if (extradataSize < MIN_SIZE_WAVEFORMATEXTENSIBLE ||
+      aRawData.Length() < SIZE_WAVEFORMATEX + MIN_SIZE_WAVEFORMATEXTENSIBLE) {
+    return Err(NS_ERROR_UNEXPECTED);
   }
-  return value;
+  BufferReader reader(aRawData.Elements() + aOffset, sizeof(T));
+  T value = reader.ReadType<T>();
+  T swapped = mozilla::NativeEndian::swapFromLittleEndian(value);
+  return swapped;
+}
+
+uint16_t FormatChunk::WaveFormat() const {
+  uint16_t format = (mRaw[1] << 8) | mRaw[0];
+  if (format != 0xFFFE) {
+    return format;
+  }
+  auto formatResult = GetFromExtradata<uint16_t>(mRaw, OFFSET_FORMAT);
+  if (formatResult.isErr()) {
+    LOG(("Error getting the Wave format, returning PCM"));
+    return 1;
+  }
+  return formatResult.unwrap();
 }
 
 AudioConfig::ChannelLayout::ChannelMap FormatChunk::ChannelMap() const {
-  // Integer or float files -- regular mapping
-  if (WaveFormat() == 1 || WaveFormat() == 2) {
+  uint16_t format = (mRaw[1] << 8) | mRaw[0];
+  if (format != 0xFFFE) {
     return AudioConfig::ChannelLayout(Channels()).Map();
   }
-  if (ExtraFormatInfoSize() < 22) {
-    MOZ_ASSERT(Channels() <= 2);
-    return AudioConfig::ChannelLayout::UNKNOWN_MAP;
+  auto mapResult = GetFromExtradata<uint32_t>(mRaw, OFFSET_CHANNEL_MAP);
+  if (mapResult.isErr()) {
+    LOG(("Error getting channel map, falling back to default order"));
+    return AudioConfig::ChannelLayout(Channels()).Map();
   }
   // ChannelLayout::ChannelMap is by design bit-per-bit compatible with
-  // WAVEFORMATEXTENSIBLE's dwChannelMask attribute, we can just cast here.
-  return static_cast<AudioConfig::ChannelLayout::ChannelMap>(
-      mRaw[21] | mRaw[20] | mRaw[19] | mRaw[18]);
+  // WAVEFORMATEXTENSIBLE's dwChannelMask attribute.
+  return mapResult.unwrap();
 }
 
 // DataParser

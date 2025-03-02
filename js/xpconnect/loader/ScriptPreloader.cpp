@@ -22,7 +22,10 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_javascript.h"
+#include "mozilla/TaskController.h"
+#include "mozilla/glean/JsXpconnectMetrics.h"
 #include "mozilla/Telemetry.h"
+#include "mozilla/Try.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/ContentParent.h"
@@ -30,9 +33,9 @@
 #include "mozilla/scache/StartupCache.h"
 
 #include "crc32c.h"
-#include "js/CompileOptions.h"          // JS::ReadOnlyCompileOptions
-#include "js/experimental/JSStencil.h"  // JS::Stencil, JS::DecodeStencil
-#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext
+#include "js/CompileOptions.h"              // JS::ReadOnlyCompileOptions
+#include "js/experimental/JSStencil.h"      // JS::Stencil, JS::DecodeStencil
+#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::ThreadStackQuotaForSize
 #include "js/Transcoding.h"
 #include "MainThreadUtils.h"
 #include "nsDebug.h"
@@ -114,13 +117,13 @@ nsresult ScriptPreloader::CollectReports(nsIHandleReportCallback* aHandleReport,
 
 StaticRefPtr<ScriptPreloader> ScriptPreloader::gScriptPreloader;
 StaticRefPtr<ScriptPreloader> ScriptPreloader::gChildScriptPreloader;
-UniquePtr<AutoMemMap> ScriptPreloader::gCacheData;
-UniquePtr<AutoMemMap> ScriptPreloader::gChildCacheData;
+StaticAutoPtr<AutoMemMap> ScriptPreloader::gCacheData;
+StaticAutoPtr<AutoMemMap> ScriptPreloader::gChildCacheData;
 
 ScriptPreloader& ScriptPreloader::GetSingleton() {
   if (!gScriptPreloader) {
     if (XRE_IsParentProcess()) {
-      gCacheData = MakeUnique<AutoMemMap>();
+      gCacheData = new AutoMemMap();
       gScriptPreloader = new ScriptPreloader(gCacheData.get());
       gScriptPreloader->mChildCache = &GetChildSingleton();
       Unused << gScriptPreloader->InitCache();
@@ -157,7 +160,7 @@ ScriptPreloader& ScriptPreloader::GetSingleton() {
 //  previous cache file, but I'd rather do that as a follow-up.
 ScriptPreloader& ScriptPreloader::GetChildSingleton() {
   if (!gChildScriptPreloader) {
-    gChildCacheData = MakeUnique<AutoMemMap>();
+    gChildCacheData = new AutoMemMap();
     gChildScriptPreloader = new ScriptPreloader(gChildCacheData.get());
     if (XRE_IsParentProcess()) {
       Unused << gChildScriptPreloader->InitCache(u"scriptCache-child"_ns);
@@ -710,9 +713,10 @@ Result<Ok, nsresult> ScriptPreloader::WriteCache() {
   }
 
   {
-    AutoFDClose fd;
+    AutoFDClose raiiFd;
     MOZ_TRY(cacheFile->OpenNSPRFileDesc(PR_WRONLY | PR_CREATE_FILE, 0644,
-                                        &fd.rwget()));
+                                        getter_Transfers(raiiFd)));
+    const auto fd = raiiFd.get();
 
     // We also need to hold mMonitor while we're touching scripts in
     // mScripts, or they may be freed before we're done with them.
@@ -979,6 +983,9 @@ already_AddRefed<JS::Stencil> ScriptPreloader::WaitForCachedStencil(
     JSContext* cx, const JS::ReadOnlyDecodeOptions& options,
     CachedStencil* script) {
   if (!script->mReadyToExecute) {
+    // mReadyToExecute is kept as false only when off-thread decode task was
+    // available (pref is set to true) and the task was successfully created.
+    // See ScriptPreloader::StartDecodeTask methods.
     MOZ_ASSERT(mDecodedStencils);
 
     // Check for the finished operations that can contain our target.
@@ -995,8 +1002,7 @@ already_AddRefed<JS::Stencil> ScriptPreloader::WaitForCachedStencil(
         LOG(Info, "Script is small enough to recompile on main thread\n");
 
         script->mReadyToExecute = true;
-        Telemetry::ScalarAdd(
-            Telemetry::ScalarID::SCRIPT_PRELOADER_MAINTHREAD_RECOMPILE, 1);
+        glean::script_preloader::mainthread_recompile.Add(1);
       } else {
         LOG(Info, "Must wait for async script load: %s\n", script->mURL.get());
         auto start = TimeStamp::Now();
@@ -1063,7 +1069,12 @@ void ScriptPreloader::OnDecodeTaskFailed() {
 void ScriptPreloader::FinishPendingParses(MonitorAutoLock& aMal) {
   mMonitor.AssertCurrentThreadOwns();
 
-  MOZ_ASSERT_IF(!mDecodingScripts.isEmpty(), mDecodedStencils);
+  // If off-thread decoding task hasn't been started, nothing to do.
+  // This can happen if the javascript.options.parallel_parsing pref was false,
+  // or the decode task fails to start.
+  if (!mDecodedStencils) {
+    return;
+  }
 
   // Process any pending decodes that are in flight.
   while (!mDecodingScripts.isEmpty()) {
@@ -1216,9 +1227,8 @@ NS_IMETHODIMP ScriptPreloader::DecodeTask::Run() {
 
   auto cleanup = MakeScopeExit([&]() { JS::DestroyFrontendContext(fc); });
 
-  const size_t kDefaultStackQuota = 128 * sizeof(size_t) * 1024;
-
-  JS::SetNativeStackQuota(fc, kDefaultStackQuota);
+  size_t stackSize = TaskController::GetThreadStackSize();
+  JS::SetNativeStackQuota(fc, JS::ThreadStackQuotaForSize(stackSize));
 
   size_t remaining = mDecodingSources.length();
   for (auto& source : mDecodingSources) {

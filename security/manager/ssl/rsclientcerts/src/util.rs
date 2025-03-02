@@ -26,24 +26,24 @@ macro_rules! unsafe_packed_field_access {
 // The following ENCODED_OID_BYTES_* consist of the encoded bytes of an ASN.1
 // OBJECT IDENTIFIER specifying the indicated OID (in other words, the full
 // tag, length, and value).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const ENCODED_OID_BYTES_SECP256R1: &[u8] =
     &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const ENCODED_OID_BYTES_SECP384R1: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const ENCODED_OID_BYTES_SECP521R1: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23];
 
 // The following OID_BYTES_* consist of the contents of the bytes of an ASN.1
 // OBJECT IDENTIFIER specifying the indicated OID (in other words, just the
 // value, and not the tag or length).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const OID_BYTES_SHA_256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const OID_BYTES_SHA_384: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const OID_BYTES_SHA_512: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const OID_BYTES_SHA_1: &[u8] = &[0x2b, 0x0e, 0x03, 0x02, 0x1a];
 
 // This is a helper function to take a value and lay it out in memory how
@@ -111,7 +111,7 @@ pub fn read_digest_info(digest_info: &[u8]) -> Result<(&[u8], &[u8]), Error> {
 ///   Ecdsa-Sig-Value  ::=  SEQUENCE  {
 ///        r     INTEGER,
 ///        s     INTEGER  }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn read_ec_sig_point(signature: &[u8]) -> Result<(&[u8], &[u8]), Error> {
     let mut sequence = Sequence::new(signature)?;
     let r = sequence.read_unsigned_integer()?;
@@ -155,7 +155,7 @@ pub fn read_encoded_certificate_identifiers(
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), Error> {
     let mut certificate_sequence = Sequence::new(certificate)?;
     let mut tbs_certificate_sequence = certificate_sequence.read_sequence()?;
-    let _version = tbs_certificate_sequence.read_tagged_value(0)?;
+    let _version = tbs_certificate_sequence.read_optional_tagged_value(0)?;
     let serial_number = tbs_certificate_sequence.read_encoded_sequence_component(INTEGER)?;
     let _signature = tbs_certificate_sequence.read_sequence()?;
     let issuer =
@@ -255,11 +255,14 @@ impl<'a> Sequence<'a> {
         })
     }
 
-    fn read_tagged_value(&mut self, tag: u8) -> Result<&'a [u8], Error> {
-        let (_, _, tagged_value_bytes) = self
-            .contents
-            .read_tlv(CONTEXT_SPECIFIC | CONSTRUCTED | tag)?;
-        Ok(tagged_value_bytes)
+    fn read_optional_tagged_value(&mut self, tag: u8) -> Result<Option<&'a [u8]>, Error> {
+        let expected = CONTEXT_SPECIFIC | CONSTRUCTED | tag;
+        if self.contents.peek(expected) {
+            let (_, _, tagged_value_bytes) = self.contents.read_tlv(expected)?;
+            Ok(Some(tagged_value_bytes))
+        } else {
+            Ok(None)
+        }
     }
 
     fn read_encoded_sequence_component(&mut self, tag: u8) -> Result<Vec<u8>, Error> {
@@ -331,6 +334,10 @@ impl<'a> Der<'a> {
 
     fn at_end(&self) -> bool {
         self.contents.is_empty()
+    }
+
+    fn peek(&self, expected: u8) -> bool {
+        Some(&expected) == self.contents.first()
     }
 }
 
@@ -459,7 +466,7 @@ mod tests {
     fn empty_input_fails() {
         let empty = Vec::new();
         assert!(read_rsa_modulus(&empty).is_err());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert!(read_ec_sig_point(&empty).is_err());
         assert!(read_encoded_certificate_identifiers(&empty).is_err());
     }
@@ -468,7 +475,7 @@ mod tests {
     fn empty_sequence_fails() {
         let empty = vec![SEQUENCE | CONSTRUCTED];
         assert!(read_rsa_modulus(&empty).is_err());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert!(read_ec_sig_point(&empty).is_err());
         assert!(read_encoded_certificate_identifiers(&empty).is_err());
     }
@@ -512,6 +519,35 @@ mod tests {
     }
 
     #[test]
+    fn test_read_v1_certificate_identifiers() {
+        let certificate = include_bytes!("../test/v1certificate.bin");
+        let result = read_encoded_certificate_identifiers(certificate);
+        assert!(result.is_ok());
+        let (serial_number, issuer, subject) = result.unwrap();
+        assert_eq!(
+            serial_number,
+            &[
+                0x02, 0x14, 0x51, 0x6b, 0x24, 0xaa, 0xf2, 0x7f, 0x56, 0x13, 0x5f, 0xc3, 0x8b, 0x5c,
+                0xa7, 0x00, 0x83, 0xa8, 0xee, 0xca, 0xad, 0xa0
+            ]
+        );
+        assert_eq!(
+            issuer,
+            &[
+                0x30, 0x12, 0x31, 0x10, 0x30, 0x0E, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x07, 0x54,
+                0x65, 0x73, 0x74, 0x20, 0x43, 0x41
+            ]
+        );
+        assert_eq!(
+            subject,
+            &[
+                0x30, 0x12, 0x31, 0x10, 0x30, 0x0E, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x07, 0x56,
+                0x31, 0x20, 0x43, 0x65, 0x72, 0x74
+            ]
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "windows")]
     fn test_read_digest() {
         // SEQUENCE
@@ -525,9 +561,10 @@ mod tests {
             0x88, 0x5c, 0xfe, 0x14, 0x5f, 0x3e, 0x93, 0xf0, 0xd1, 0xfa, 0x72, 0xbe, 0x98, 0x0c,
             0xc6, 0xec, 0x82, 0xc7, 0x0e, 0x14, 0x07, 0xc7, 0xd2,
         ];
-        let result = read_digest(&digest_info);
+        let result = read_digest_info(&digest_info);
         assert!(result.is_ok());
-        let digest = result.unwrap();
+        let (oid, digest) = result.unwrap();
+        assert_eq!(oid, &[0x60, 0x86, 0x48, 0x1, 0x65, 0x03, 0x04, 0x02, 0x01]);
         assert_eq!(
             digest,
             &[

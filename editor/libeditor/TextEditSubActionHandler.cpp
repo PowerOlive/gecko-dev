@@ -6,7 +6,7 @@
 #include "ErrorList.h"
 #include "TextEditor.h"
 
-#include "AutoRangeArray.h"
+#include "AutoClonedRangeArray.h"
 #include "EditAction.h"
 #include "EditorDOMPoint.h"
 #include "EditorUtils.h"
@@ -212,24 +212,19 @@ TextEditor::InsertLineFeedCharacterAtSelection() {
   MOZ_ASSERT(pointToInsert.IsSetAndValid());
   MOZ_ASSERT(!pointToInsert.IsContainerHTMLElement(nsGkAtoms::br));
 
-  RefPtr<Document> document = GetDocument();
-  if (NS_WARN_IF(!document)) {
-    return Err(NS_ERROR_NOT_INITIALIZED);
-  }
-
   // Insert a linefeed character.
   Result<InsertTextResult, nsresult> insertTextResult =
-      InsertTextWithTransaction(*document, u"\n"_ns, pointToInsert);
+      InsertTextWithTransaction(u"\n"_ns, pointToInsert,
+                                InsertTextTo::ExistingTextNodeIfAvailable);
   if (MOZ_UNLIKELY(insertTextResult.isErr())) {
     NS_WARNING("TextEditor::InsertTextWithTransaction(\"\\n\") failed");
     return insertTextResult.propagateErr();
   }
   insertTextResult.inspect().IgnoreCaretPointSuggestion();
-  EditorDOMPoint pointToPutCaret = insertTextResult.inspect().Handled()
-                                       ? insertTextResult.inspect()
-                                             .EndOfInsertedTextRef()
-                                             .To<EditorDOMPoint>()
-                                       : pointToInsert;
+  EditorDOMPoint pointToPutCaret =
+      insertTextResult.inspect().Handled()
+          ? insertTextResult.inspect().EndOfInsertedTextRef()
+          : pointToInsert;
   if (NS_WARN_IF(!pointToPutCaret.IsSetAndValid())) {
     return Err(NS_ERROR_FAILURE);
   }
@@ -348,28 +343,13 @@ void TextEditor::HandleNewLinesInStringForSingleLineEditor(
 }
 
 Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
-    EditSubAction aEditSubAction, const nsAString& aInsertionString,
-    SelectionHandling aSelectionHandling) {
+    const nsAString& aInsertionString, InsertTextFor aPurpose) {
   MOZ_ASSERT(IsEditActionDataAvailable());
-  MOZ_ASSERT(aEditSubAction == EditSubAction::eInsertText ||
-             aEditSubAction == EditSubAction::eInsertTextComingFromIME);
-  MOZ_ASSERT_IF(aSelectionHandling == SelectionHandling::Ignore,
-                aEditSubAction == EditSubAction::eInsertTextComingFromIME);
 
   UndefineCaretBidiLevel();
 
-  if (aInsertionString.IsEmpty() &&
-      aEditSubAction != EditSubAction::eInsertTextComingFromIME) {
-    // HACK: this is a fix for bug 19395
-    // I can't outlaw all empty insertions
-    // because IME transaction depend on them
-    // There is more work to do to make the
-    // world safe for IME.
-    return EditActionResult::CanceledResult();
-  }
-
   nsAutoString insertionString(aInsertionString);
-  if (mMaxTextLength >= 0) {
+  if (!aInsertionString.IsEmpty() && mMaxTextLength >= 0) {
     Result<EditActionResult, nsresult> result =
         MaybeTruncateInsertionStringForMaxLength(insertionString);
     if (MOZ_UNLIKELY(result.isErr())) {
@@ -382,7 +362,7 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
     // If we're exceeding the maxlength when composing IME, we need to clean up
     // the composing text, so we shouldn't return early.
     if (result.inspect().Handled() && insertionString.IsEmpty() &&
-        aEditSubAction != EditSubAction::eInsertTextComingFromIME) {
+        NothingToDoIfInsertingEmptyText(aPurpose)) {
       return EditActionResult::CanceledResult();
     }
   }
@@ -400,7 +380,7 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
 
   // if the selection isn't collapsed, delete it.
   if (!SelectionRef().IsCollapsed() &&
-      aSelectionHandling == SelectionHandling::Delete) {
+      !InsertingTextForExtantComposition(aPurpose)) {
     nsresult rv =
         DeleteSelectionAsSubAction(nsIEditor::eNone, nsIEditor::eNoStrip);
     if (NS_FAILED(rv)) {
@@ -408,6 +388,15 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
           "EditorBase::DeleteSelectionAsSubAction(eNone, eNoStrip) failed");
       return Err(rv);
     }
+  }
+
+  if (aInsertionString.IsEmpty() && NothingToDoIfInsertingEmptyText(aPurpose)) {
+    // HACK: this is a fix for bug 19395
+    // I can't outlaw all empty insertions
+    // because IME transaction depend on them
+    // There is more work to do to make the
+    // world safe for IME.
+    return EditActionResult::CanceledResult();
   }
 
   // XXX Why don't we cancel here?  Shouldn't we do this first?
@@ -445,12 +434,7 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
   }
   MOZ_ASSERT(!atStartOfSelection.IsContainerHTMLElement(nsGkAtoms::br));
 
-  RefPtr<Document> document = GetDocument();
-  if (NS_WARN_IF(!document)) {
-    return Err(NS_ERROR_NOT_INITIALIZED);
-  }
-
-  if (aEditSubAction == EditSubAction::eInsertTextComingFromIME) {
+  if (InsertingTextForComposition(aPurpose)) {
     EditorDOMPoint compositionStartPoint =
         GetFirstIMESelectionStartPoint<EditorDOMPoint>();
     if (!compositionStartPoint.IsSet()) {
@@ -460,8 +444,8 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
           "TextEditor::FindBetterInsertionPoint() failed, but ignored");
     }
     Result<InsertTextResult, nsresult> insertTextResult =
-        InsertTextWithTransaction(*document, insertionString,
-                                  compositionStartPoint);
+        InsertTextWithTransaction(insertionString, compositionStartPoint,
+                                  InsertTextTo::ExistingTextNodeIfAvailable);
     if (MOZ_UNLIKELY(insertTextResult.isErr())) {
       NS_WARNING("EditorBase::InsertTextWithTransaction() failed");
       return insertTextResult.propagateErr();
@@ -478,11 +462,11 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
         rv != NS_SUCCESS_EDITOR_BUT_IGNORED_TRIVIAL_ERROR,
         "CaretPoint::SuggestCaretPointTo() failed, but ignored");
   } else {
-    MOZ_ASSERT(aEditSubAction == EditSubAction::eInsertText);
+    MOZ_ASSERT(!InsertingTextForComposition(aPurpose));
 
     Result<InsertTextResult, nsresult> insertTextResult =
-        InsertTextWithTransaction(*document, insertionString,
-                                  atStartOfSelection);
+        InsertTextWithTransaction(insertionString, atStartOfSelection,
+                                  InsertTextTo::ExistingTextNodeIfAvailable);
     if (MOZ_UNLIKELY(insertTextResult.isErr())) {
       NS_WARNING("EditorBase::InsertTextWithTransaction() failed");
       return insertTextResult.propagateErr();
@@ -495,9 +479,8 @@ Result<EditActionResult, nsresult> TextEditor::HandleInsertText(
       // a LF, in which case make the caret attach to the next line.
       const bool endsWithLF =
           !insertionString.IsEmpty() && insertionString.Last() == nsCRT::LF;
-      EditorDOMPoint pointToPutCaret = insertTextResult.inspect()
-                                           .EndOfInsertedTextRef()
-                                           .To<EditorDOMPoint>();
+      EditorDOMPoint pointToPutCaret =
+          insertTextResult.inspect().EndOfInsertedTextRef();
       pointToPutCaret.SetInterlinePosition(
           endsWithLF ? InterlinePosition::StartOfNextLine
                      : InterlinePosition::EndOfLine);
@@ -633,13 +616,35 @@ Result<EditActionResult, nsresult> TextEditor::HandleDeleteSelectionInternal(
     }
 
     if (!SelectionRef().IsCollapsed()) {
-      nsresult rv = DeleteSelectionWithTransaction(aDirectionAndAmount,
-                                                   nsIEditor::eNoStrip);
-      if (NS_FAILED(rv)) {
-        NS_WARNING(
-            "EditorBase::DeleteSelectionWithTransaction(eNoStrip) failed");
-        return Err(rv);
+      AutoClonedSelectionRangeArray rangesToDelete(SelectionRef());
+      if (NS_WARN_IF(rangesToDelete.Ranges().IsEmpty())) {
+        NS_ASSERTION(false,
+                     "For avoiding to throw incompatible exception for "
+                     "`execCommand`, fix the caller");
+        return Err(NS_ERROR_FAILURE);
       }
+
+      if (const Text* theTextNode = AsTextEditor()->GetTextNode()) {
+        rangesToDelete.EnsureRangesInTextNode(*theTextNode);
+      }
+
+      Result<CaretPoint, nsresult> caretPointOrError =
+          DeleteRangesWithTransaction(aDirectionAndAmount, aStripWrappers,
+                                      rangesToDelete);
+      if (MOZ_UNLIKELY(caretPointOrError.isErr())) {
+        NS_WARNING("EditorBase::DeleteRangesWithTransaction() failed");
+        return caretPointOrError.propagateErr();
+      }
+      nsresult rv = caretPointOrError.inspect().SuggestCaretPointTo(
+          *this, {SuggestCaret::OnlyIfHasSuggestion,
+                  SuggestCaret::OnlyIfTransactionsAllowedToDoIt,
+                  SuggestCaret::AndIgnoreTrivialError});
+      if (NS_FAILED(rv)) {
+        NS_WARNING("CaretPoint::SuggestCaretPointTo() failed");
+      }
+      NS_WARNING_ASSERTION(
+          rv != NS_SUCCESS_EDITOR_BUT_IGNORED_TRIVIAL_ERROR,
+          "CaretPoint::SuggestCaretPointTo() failed, but ignored");
       return EditActionResult::HandledResult();
     }
 
@@ -656,11 +661,12 @@ Result<EditActionResult, nsresult> TextEditor::HandleDeleteSelectionInternal(
     }
   }
 
-  AutoRangeArray rangesToDelete(SelectionRef());
+  AutoClonedSelectionRangeArray rangesToDelete(SelectionRef());
   Result<nsIEditor::EDirection, nsresult> result =
       rangesToDelete.ExtendAnchorFocusRangeFor(*this, aDirectionAndAmount);
   if (result.isErr()) {
-    NS_WARNING("AutoRangeArray::ExtendAnchorFocusRangeFor() failed");
+    NS_WARNING(
+        "AutoClonedSelectionRangeArray::ExtendAnchorFocusRangeFor() failed");
     return result.propagateErr();
   }
   if (const Text* theTextNode = GetTextNode()) {

@@ -108,10 +108,8 @@ enum class GCAbortReason {
 #define JS_FOR_EACH_INTERNAL_MEMORY_USE(_) \
   _(ArrayBufferContents)                   \
   _(StringContents)                        \
-  _(ObjectElements)                        \
-  _(ObjectSlots)                           \
   _(ScriptPrivateData)                     \
-  _(MapObjectTable)                        \
+  _(MapObjectData)                         \
   _(BigIntDigits)                          \
   _(ScopeData)                             \
   _(WeakMapObject)                         \
@@ -120,13 +118,16 @@ enum class GCAbortReason {
   _(PropMapTable)                          \
   _(ModuleBindingMap)                      \
   _(ModuleCyclicFields)                    \
+  _(ModuleSyntheticFields)                 \
   _(ModuleExports)                         \
+  _(ModuleImportAttributes)                \
   _(BaselineScript)                        \
   _(IonScript)                             \
   _(ArgumentsData)                         \
   _(RareArgumentsData)                     \
   _(RegExpSharedBytecode)                  \
   _(RegExpSharedNamedCaptureData)          \
+  _(RegExpSharedNamedCaptureSliceData)     \
   _(TypedArrayElements)                    \
   _(NativeIterator)                        \
   _(JitScript)                             \
@@ -160,7 +161,8 @@ enum class GCAbortReason {
   _(SharedArrayRawBuffer)                  \
   _(XDRBufferElements)                     \
   _(GlobalObjectData)                      \
-  _(ProxyExternalValueArray)
+  _(ProxyExternalValueArray)               \
+  _(WasmTrailerBlock)
 
 #define JS_FOR_EACH_MEMORY_USE(_)  \
   JS_FOR_EACH_PUBLIC_MEMORY_USE(_) \

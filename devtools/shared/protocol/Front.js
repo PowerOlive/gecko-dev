@@ -12,7 +12,6 @@ var {
   getStack,
   callFunctionWithAsyncStack,
 } = require("resource://devtools/shared/platform/stack.js");
-const defer = require("resource://devtools/shared/defer.js");
 
 /**
  * Base class for client-side actor fronts.
@@ -269,7 +268,7 @@ class Front extends Pool {
    * Update the actor from its representation.
    * Subclasses should override this.
    */
-  form(form) {}
+  form() {}
 
   /**
    * Send a packet on the connection.
@@ -290,7 +289,7 @@ class Front extends Pool {
    * Send a two-way request on the connection.
    */
   request(packet) {
-    const deferred = defer();
+    const deferred = Promise.withResolvers();
     // Save packet basics for debugging
     const { to, type } = packet;
     this._requests.push({
@@ -381,6 +380,8 @@ class Front extends Pool {
             message += ` (${fileName}:${lineNumber}:${columnNumber})`;
           }
           const packetError = new Error(message);
+          // Also handle the stack trace from the server side
+          packetError.serverStack = packet.stack;
           deferred.reject(packetError);
         } else {
           deferred.resolve(packet);

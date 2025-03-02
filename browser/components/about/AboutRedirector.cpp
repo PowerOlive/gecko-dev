@@ -8,12 +8,16 @@
 #include "AboutRedirector.h"
 #include "nsNetUtil.h"
 #include "nsIAboutNewTabService.h"
+#include "nsIAppStartup.h"
 #include "nsIChannel.h"
 #include "nsIURI.h"
 #include "nsIProtocolHandler.h"
 #include "nsServiceManagerUtils.h"
+#include "mozilla/Components.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/dom/ContentChild.h"
+
+#define PROFILES_ENABLED_PREF "browser.profiles.enabled"
 
 namespace mozilla {
 namespace browser {
@@ -24,8 +28,7 @@ static const uint32_t ACTIVITY_STREAM_FLAGS =
     nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::ENABLE_INDEXED_DB |
     nsIAboutModule::URI_MUST_LOAD_IN_CHILD |
     nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
-    nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
-    nsIAboutModule::ALLOW_UNSANITIZED_CONTENT;
+    nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT;
 
 struct RedirEntry {
   const char* id;
@@ -45,11 +48,16 @@ struct RedirEntry {
     browser/components/about/components.conf
 */
 static const RedirEntry kRedirMap[] = {
+    {"asrouter", "chrome://browser/content/asrouter/asrouter-admin.html",
+     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
+         nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
+         nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
+         nsIAboutModule::HIDE_FROM_ABOUTABOUT},
     {"blocked", "chrome://browser/content/blockedSite.xhtml",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
          nsIAboutModule::URI_CAN_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
          nsIAboutModule::HIDE_FROM_ABOUTABOUT},
-    {"certerror", "chrome://global/content/aboutNetError.xhtml",
+    {"certerror", "chrome://global/content/aboutNetError.html",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
          nsIAboutModule::URI_CAN_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
          nsIAboutModule::HIDE_FROM_ABOUTABOUT},
@@ -73,10 +81,6 @@ static const RedirEntry kRedirMap[] = {
     {"firefoxview", "chrome://browser/content/firefoxview/firefoxview.html",
      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
          nsIAboutModule::HIDE_FROM_ABOUTABOUT},
-    {"firefoxview-next",
-     "chrome://browser/content/firefoxview/firefoxview-next.html",
-     nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
-         nsIAboutModule::HIDE_FROM_ABOUTABOUT},
     {"policies", "chrome://browser/content/policies/aboutPolicies.html",
      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
     {"privatebrowsing", "chrome://browser/content/aboutPrivateBrowsing.html",
@@ -86,23 +90,21 @@ static const RedirEntry kRedirMap[] = {
     {"profiling",
      "chrome://devtools/content/performance-new/aboutprofiling/index.xhtml",
      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
-    {"rights", "chrome://global/content/aboutRights.xhtml",
+    {"rights", "https://www.mozilla.org/about/legal/terms/firefox/",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
-         nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
+         nsIAboutModule::URI_MUST_LOAD_IN_CHILD},
     {"robots", "chrome://browser/content/aboutRobots.xhtml",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
          nsIAboutModule::ALLOW_SCRIPT},
     {"sessionrestore", "chrome://browser/content/aboutSessionRestore.xhtml",
      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::HIDE_FROM_ABOUTABOUT |
          nsIAboutModule::IS_SECURE_CHROME_UI},
-#ifdef NIGHTLY_BUILD
     {"shoppingsidebar", "chrome://browser/content/shopping/shopping.html",
      nsIAboutModule::URI_MUST_LOAD_IN_CHILD |
          nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
          nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
          nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::HIDE_FROM_ABOUTABOUT |
          nsIAboutModule::IS_SECURE_CHROME_UI},
-#endif
     {"tabcrashed", "chrome://browser/content/aboutTabCrashed.xhtml",
      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
          nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::HIDE_FROM_ABOUTABOUT},
@@ -143,6 +145,9 @@ static const RedirEntry kRedirMap[] = {
          nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
          nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
          nsIAboutModule::HIDE_FROM_ABOUTABOUT},
+    {"settings", "chrome://browser/content/preferences/preferences.xhtml",
+     nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
+         nsIAboutModule::HIDE_FROM_ABOUTABOUT},
     {"preferences", "chrome://browser/content/preferences/preferences.xhtml",
      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
     {"downloads",
@@ -159,9 +164,26 @@ static const RedirEntry kRedirMap[] = {
          nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
          nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
          nsIAboutModule::IS_SECURE_CHROME_UI},
-    {"ion", "chrome://browser/content/ion.html",
-     nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::HIDE_FROM_ABOUTABOUT |
-         nsIAboutModule::IS_SECURE_CHROME_UI},
+#ifdef MOZ_SELECTABLE_PROFILES
+    {"profilemanager", "chrome://browser/content/profiles/profiles.html",
+     nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
+         nsIAboutModule::HIDE_FROM_ABOUTABOUT},
+    {"editprofile", "chrome://browser/content/profiles/edit-profile.html",
+     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
+         nsIAboutModule::IS_SECURE_CHROME_UI | nsIAboutModule::ALLOW_SCRIPT |
+         nsIAboutModule::URI_MUST_LOAD_IN_CHILD |
+         nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS},
+    {"deleteprofile", "chrome://browser/content/profiles/delete-profile.html",
+     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
+         nsIAboutModule::IS_SECURE_CHROME_UI |
+         nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
+         nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS},
+    {"newprofile", "chrome://browser/content/profiles/new-profile.html",
+     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
+         nsIAboutModule::IS_SECURE_CHROME_UI | nsIAboutModule::ALLOW_SCRIPT |
+         nsIAboutModule::URI_MUST_LOAD_IN_CHILD |
+         nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS},
+#endif
 };
 
 static nsAutoCString GetAboutModuleName(nsIURI* aURI) {
@@ -204,6 +226,22 @@ AboutRedirector::NewChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo,
       NS_ENSURE_SUCCESS(rv, rv);
 
       return aboutNewTabService->AboutHomeChannel(aURI, aLoadInfo, result);
+    }
+  }
+
+  if ((path.EqualsASCII("editprofile") || path.EqualsASCII("deleteprofile") ||
+       path.EqualsASCII("newprofile")) &&
+      !mozilla::Preferences::GetBool(PROFILES_ENABLED_PREF, false)) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
+  if (path.EqualsASCII("profilemanager") &&
+      !mozilla::Preferences::GetBool(PROFILES_ENABLED_PREF, false)) {
+    bool startingUp;
+    nsCOMPtr<nsIAppStartup> appStartup(
+        mozilla::components::AppStartup::Service());
+    if (NS_FAILED(appStartup->GetStartingUp(&startingUp)) || !startingUp) {
+      return NS_ERROR_NOT_AVAILABLE;
     }
   }
 

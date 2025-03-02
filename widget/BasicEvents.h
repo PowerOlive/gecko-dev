@@ -99,8 +99,6 @@ struct BaseEventFlags {
   // the first <label> element is clicked, that one may set this true.
   // Then, the second <label> element won't handle the event.
   bool mMultipleActionsPrevented : 1;
-  // Similar to above but expected to be used during PreHandleEvent phase.
-  bool mMultiplePreActionsPrevented : 1;
   // If mIsBeingDispatched is true, the DOM event created from the event is
   // dispatching into the DOM tree and not completed.
   bool mIsBeingDispatched : 1;
@@ -442,6 +440,10 @@ class WidgetEvent : public WidgetEventTime {
         mFlags.mCancelable = false;
         mFlags.mBubbles = mFlags.mIsTrusted;
         break;
+      case eLegacyTextEventClass:
+        mFlags.mCancelable = mFlags.mIsTrusted && mMessage == eLegacyTextInput;
+        mFlags.mBubbles = mFlags.mIsTrusted && mMessage == eLegacyTextInput;
+        break;
       case eMouseEventClass:
         mFlags.mCancelable =
             (mMessage != eMouseEnter && mMessage != eMouseLeave);
@@ -510,9 +512,7 @@ class WidgetEvent : public WidgetEventTime {
     SetDefaultComposedInNativeAnonymousContent();
   }
 
-  WidgetEvent() : WidgetEventTime(), mPath(nullptr) {
-    MOZ_COUNT_CTOR(WidgetEvent);
-  }
+  WidgetEvent() : mPath(nullptr) { MOZ_COUNT_CTOR(WidgetEvent); }
 
  public:
   WidgetEvent(bool aIsTrusted, EventMessage aMessage,
@@ -521,7 +521,7 @@ class WidgetEvent : public WidgetEventTime {
 
   MOZ_COUNTED_DTOR_VIRTUAL(WidgetEvent)
 
-  WidgetEvent(const WidgetEvent& aOther) : WidgetEventTime() {
+  WidgetEvent(const WidgetEvent& aOther) : WidgetEventTime(aOther) {
     MOZ_COUNT_CTOR(WidgetEvent);
     *this = aOther;
   }
@@ -740,6 +740,24 @@ class WidgetEvent : public WidgetEventTime {
   inline bool IsReservedByChrome() const { return mFlags.IsReservedByChrome(); }
 
   /**
+   * Return true if the corresponding DOM event supports screen(X|Y), etc.
+   */
+  [[nodiscard]] inline bool DOMEventSupportsCoords() const {
+    switch (mClass) {
+      case eMouseEventClass:
+      case eMouseScrollEventClass:
+      case eWheelEventClass:
+      case eTouchEventClass:
+      case eDragEventClass:
+      case ePointerEventClass:
+      case eSimpleGestureEventClass:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
    * Utils for checking event types
    */
 
@@ -774,6 +792,13 @@ class WidgetEvent : public WidgetEventTime {
    * Returns true if the event mMessage is one of mouse events.
    */
   bool HasMouseEventMessage() const;
+
+  /**
+   * Returns true if the event class is eMouseEventClass or the event message
+   * is ePointerClick.
+   */
+  [[nodiscard]] bool IsMouseEventClassOrHasClickRelatedPointerEvent() const;
+
   /**
    * Returns true if the event mMessage is one of drag events.
    */
@@ -886,21 +911,29 @@ class WidgetEvent : public WidgetEventTime {
         break;
       case eMouseEventClass:
         mFlags.mComposed =
-            mMessage == eMouseClick || mMessage == eMouseDoubleClick ||
-            mMessage == eMouseAuxClick || mMessage == eMouseDown ||
+            mMessage == eMouseDoubleClick || mMessage == eMouseDown ||
             mMessage == eMouseUp || mMessage == eMouseOver ||
             mMessage == eMouseOut || mMessage == eMouseMove ||
-            mMessage == eContextMenu || mMessage == eXULPopupShowing ||
-            mMessage == eXULPopupHiding || mMessage == eXULPopupShown ||
-            mMessage == eXULPopupHidden;
+            mMessage == eXULPopupShowing || mMessage == eXULPopupHiding ||
+            mMessage == eXULPopupShown || mMessage == eXULPopupHidden ||
+            // `click` event, `auxclick` event and `contextmenu` event should be
+            // created as a PointerEvent, but they were MouseEvent before.
+            // Additionally, we support dispatching untrusted these events to
+            // some elements may cause a default action of it even if they are
+            // created with MouseEvent.  Therefore, we need to allow these event
+            // messages here.
+            mMessage == ePointerClick || mMessage == ePointerAuxClick ||
+            mMessage == eContextMenu;
         break;
       case ePointerEventClass:
         // All pointer events are composed
         mFlags.mComposed =
-            mMessage == ePointerDown || mMessage == ePointerMove ||
-            mMessage == ePointerUp || mMessage == ePointerCancel ||
-            mMessage == ePointerOver || mMessage == ePointerOut ||
-            mMessage == ePointerGotCapture || mMessage == ePointerLostCapture;
+            mMessage == ePointerClick || mMessage == ePointerAuxClick ||
+            mMessage == eContextMenu || mMessage == ePointerDown ||
+            mMessage == ePointerMove || mMessage == ePointerUp ||
+            mMessage == ePointerCancel || mMessage == ePointerOver ||
+            mMessage == ePointerOut || mMessage == ePointerGotCapture ||
+            mMessage == ePointerLostCapture;
         break;
       case eTouchEventClass:
         // All touch events are composed
@@ -1005,6 +1038,12 @@ class WidgetEvent : public WidgetEventTime {
   }
 
   bool IsUserAction() const;
+
+  /**
+   * Return true if the event should be handled without (pointer) capturing
+   * element.
+   */
+  [[nodiscard]] bool ShouldIgnoreCapturingContent() const;
 };
 
 /******************************************************************************

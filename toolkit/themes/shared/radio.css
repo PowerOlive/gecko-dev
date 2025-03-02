@@ -33,12 +33,18 @@ radio {
   -moz-default-appearance: radio;
   margin: 1px 0;
 
+  radiogroup:focus-visible radio[focused] > & {
+    outline-style: auto;
+  }
+
   @media (-moz-platform: windows) {
     width: 13px;
     height: 13px;
   }
 
   @media (-moz-platform: linux) {
+    width: 1.3em;
+    height: 1.3em;
     margin: 2px;
   }
 
@@ -52,14 +58,8 @@ radio {
   }
 }
 
-@media (-moz-platform: windows) or (-moz-platform: linux) {
-  radiogroup:focus-visible > radio[focused="true"] > .radio-label-box {
-    outline: var(--focus-outline);
-  }
-
-  .radio-icon[src] {
-    margin-inline-end: 2px;
-  }
+.radio-icon[src] {
+  margin-inline-end: 2px;
 }
 
 @media (-moz-platform: windows) {
@@ -74,9 +74,5 @@ radio {
   .radio-label,
   radiogroup {
     margin: 1px 0;
-  }
-
-  .radio-icon {
-    margin-inline-end: 2px;
   }
 }

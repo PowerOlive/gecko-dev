@@ -58,11 +58,11 @@ DecodeSynchronizer::SynchronizedFrameDecodeScheduler::
   RTC_DCHECK(stopped_);
 }
 
-absl::optional<uint32_t>
+std::optional<uint32_t>
 DecodeSynchronizer::SynchronizedFrameDecodeScheduler::ScheduledRtpTimestamp() {
   return next_frame_.has_value()
-             ? absl::make_optional(next_frame_->rtp_timestamp())
-             : absl::nullopt;
+             ? std::make_optional(next_frame_->rtp_timestamp())
+             : std::nullopt;
 }
 
 DecodeSynchronizer::ScheduledFrame
@@ -175,6 +175,10 @@ void DecodeSynchronizer::RemoveFrameScheduler(
 
 void DecodeSynchronizer::ScheduleNextTick() {
   RTC_DCHECK_RUN_ON(worker_queue_);
+  if (tick_scheduled_) {
+    return;
+  }
+  tick_scheduled_ = true;
   metronome_->RequestCallOnNextTick(
       SafeTask(safety_.flag(), [this] { OnTick(); }));
 }
@@ -182,6 +186,7 @@ void DecodeSynchronizer::ScheduleNextTick() {
 void DecodeSynchronizer::OnTick() {
   TRACE_EVENT0("webrtc", __func__);
   RTC_DCHECK_RUN_ON(worker_queue_);
+  tick_scheduled_ = false;
   expected_next_tick_ = clock_->CurrentTime() + metronome_->TickPeriod();
 
   for (auto* scheduler : schedulers_) {

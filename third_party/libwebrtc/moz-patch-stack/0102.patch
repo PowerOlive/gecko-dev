@@ -1,66 +1,44 @@
 From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Tue, 23 May 2023 06:14:00 +0000
-Subject: Bug 1809672 - Refactor TabCapturerWebrtc creation.
- r=ng,webrtc-reviewers
+Date: Mon, 6 May 2024 07:28:00 +0000
+Subject: Bug 1892329 - Invert _captureThread check in
+ VideoCaptureModuleV4L2::StartCapture. r=webrtc-reviewers,mjf
 
-This restores libwebrtc's DesktopCapturer to their upstream state as far as
-the tab capturer is concerned.
-
-Differential Revision: https://phabricator.services.mozilla.com/D174290
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/3778b2a0e3f93a2077303b91739cdd2eeb590726
+Differential Revision: https://phabricator.services.mozilla.com/D208186
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/6ed6737b8214bf664642eb17cbf66a8c8450e569
 ---
- modules/desktop_capture/desktop_capturer.cc | 11 -----------
- modules/desktop_capture/desktop_capturer.h  |  8 --------
- 2 files changed, 19 deletions(-)
+ .../video_capture/linux/video_capture_v4l2.cc | 21 +++++++++++--------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
 
-diff --git a/modules/desktop_capture/desktop_capturer.cc b/modules/desktop_capture/desktop_capturer.cc
-index 1af19a1fd2..7f601821fc 100644
---- a/modules/desktop_capture/desktop_capturer.cc
-+++ b/modules/desktop_capture/desktop_capturer.cc
-@@ -128,17 +128,6 @@ std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateScreenCapturer(
-   return capturer;
+diff --git a/modules/video_capture/linux/video_capture_v4l2.cc b/modules/video_capture/linux/video_capture_v4l2.cc
+index 74af348a6c..29ca864e19 100644
+--- a/modules/video_capture/linux/video_capture_v4l2.cc
++++ b/modules/video_capture/linux/video_capture_v4l2.cc
+@@ -303,16 +303,19 @@ int32_t VideoCaptureModuleV4L2::StartCapture(
+   }
+ 
+   // start capture thread;
+-  if (_captureThread.empty()) {
+-    quit_ = false;
+-    _captureThread = rtc::PlatformThread::SpawnJoinable(
+-        [self = scoped_refptr(this)] {
+-          while (self->CaptureProcess()) {
+-          }
+-        },
+-        "CaptureThread",
+-        rtc::ThreadAttributes().SetPriority(rtc::ThreadPriority::kHigh));
++  if (!_captureThread.empty()) {
++    return 0;
+   }
++
++  quit_ = false;
++
++  _captureThread = rtc::PlatformThread::SpawnJoinable(
++      [self = scoped_refptr(this)] {
++        while (self->CaptureProcess()) {
++        }
++      },
++      "CaptureThread",
++      rtc::ThreadAttributes().SetPriority(rtc::ThreadPriority::kHigh));
+   return 0;
  }
  
--// static
--std::unique_ptr<DesktopCapturer> DesktopCapturer::CreateTabCapturer(
--    const DesktopCaptureOptions& options) {
--  std::unique_ptr<DesktopCapturer> capturer = CreateRawTabCapturer(options);
--  if (capturer && options.detect_updated_region()) {
--    capturer.reset(new DesktopCapturerDifferWrapper(std::move(capturer)));
--  }
--
--  return capturer;
--}
--
- #if defined(WEBRTC_USE_PIPEWIRE) || defined(WEBRTC_USE_X11)
- bool DesktopCapturer::IsRunningUnderWayland() {
-   const char* xdg_session_type = getenv("XDG_SESSION_TYPE");
-diff --git a/modules/desktop_capture/desktop_capturer.h b/modules/desktop_capture/desktop_capturer.h
-index 64f3187f51..5efd2efc0f 100644
---- a/modules/desktop_capture/desktop_capturer.h
-+++ b/modules/desktop_capture/desktop_capturer.h
-@@ -191,10 +191,6 @@ class RTC_EXPORT DesktopCapturer {
-   static std::unique_ptr<DesktopCapturer> CreateScreenCapturer(
-       const DesktopCaptureOptions& options);
- 
--  // Creates a DesktopCapturer instance which targets to capture tab.
--  static std::unique_ptr<DesktopCapturer> CreateTabCapturer(
--      const DesktopCaptureOptions& options);
--
- #if defined(WEBRTC_USE_PIPEWIRE) || defined(WEBRTC_USE_X11)
-   static bool IsRunningUnderWayland();
- 
-@@ -225,10 +221,6 @@ class RTC_EXPORT DesktopCapturer {
-   // capture screens.
-   static std::unique_ptr<DesktopCapturer> CreateRawScreenCapturer(
-       const DesktopCaptureOptions& options);
--
--  // Creates a DesktopCapturer instance which targets to capture tabs
--  static std::unique_ptr<DesktopCapturer> CreateRawTabCapturer(
--      const DesktopCaptureOptions& options);
- };
- 
- }  // namespace webrtc
--- 
-2.34.1
-

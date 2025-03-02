@@ -34,11 +34,6 @@
 #include "modules/video_capture/video_capture_impl.h"
 #include "rtc_base/logging.h"
 
-#ifdef WEBRTC_LINUX
-#define EVENT_SIZE  ( sizeof (struct inotify_event) )
-#define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
-#endif
-
 // These defines are here to support building on kernel 3.16 which some
 // downstream projects, e.g. Firefox, use.
 // TODO(apehrson): Remove them and their undefs when no longer needed.
@@ -55,6 +50,11 @@
 #ifndef V4L2_PIX_FMT_RGBA32
 #define RGBA32_OVERRIDE 1
 #define V4L2_PIX_FMT_RGBA32 v4l2_fourcc('A', 'B', '2', '4')
+#endif
+
+#ifdef WEBRTC_LINUX
+#define EVENT_SIZE  ( sizeof (struct inotify_event) )
+#define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
 #endif
 
 namespace webrtc {
@@ -232,7 +232,8 @@ int32_t DeviceInfoV4l2::GetDeviceName(uint32_t deviceNumber,
                                       uint32_t deviceUniqueIdUTF8Length,
                                       char* /*productUniqueIdUTF8*/,
                                       uint32_t /*productUniqueIdUTF8Length*/,
-                                      pid_t* /*pid*/) {
+                                      pid_t* /*pid*/,
+                                      bool* /*deviceIsPlaceholder*/) {
   // Travel through /dev/video [0-63]
   uint32_t count = 0;
   char device[20];

@@ -7,9 +7,7 @@
 #ifndef mozilla_BounceTrackingRecord_h
 #define mozilla_BounceTrackingRecord_h
 
-#include "nsISupports.h"
 #include "nsStringFwd.h"
-#include "nsCycleCollectionParticipant.h"
 #include "nsTHashSet.h"
 
 namespace mozilla {
@@ -22,31 +20,30 @@ class CanonicalBrowsingContext;
 // navigation.
 class BounceTrackingRecord final {
  public:
-  NS_INLINE_DECL_CYCLE_COLLECTING_NATIVE_REFCOUNTING(BounceTrackingRecord);
-  NS_DECL_CYCLE_COLLECTION_NATIVE_CLASS(BounceTrackingRecord);
-
   void SetInitialHost(const nsACString& aHost);
 
-  const nsACString& GetInitialHost();
+  const nsACString& GetInitialHost() const;
 
   void SetFinalHost(const nsACString& aHost);
 
-  const nsACString& GetFinalHost();
+  const nsACString& GetFinalHost() const;
 
   void AddBounceHost(const nsACString& aHost);
 
   void AddStorageAccessHost(const nsACString& aHost);
 
-  const nsTHashSet<nsCString>& GetBounceHosts();
+  void AddUserActivationHost(const nsACString& aHost);
 
-  const nsTHashSet<nsCString>& GetStorageAccessHosts();
+  const nsTHashSet<nsCStringHashKey>& GetBounceHosts() const;
+
+  const nsTHashSet<nsCStringHashKey>& GetStorageAccessHosts() const;
+
+  const nsTHashSet<nsCStringHashKey>& GetUserActivationHosts() const;
 
   // Create a string that describes this record. Used for logging.
   nsCString Describe();
 
  private:
-  ~BounceTrackingRecord() = default;
-
   // A site's host. The initiator site of the current extended navigation.
   nsAutoCString mInitialHost;
 
@@ -56,15 +53,21 @@ class BounceTrackingRecord final {
 
   // A set of sites' hosts. All server-side and client-side redirects hit during
   // this extended navigation.
-  nsTHashSet<nsCString> mBounceHosts;
+  nsTHashSet<nsCStringHashKey> mBounceHosts;
 
   // A set of sites' hosts. All sites which accessed storage during this
   // extended navigation.
-  nsTHashSet<nsCString> mStorageAccessHosts;
+  nsTHashSet<nsCStringHashKey> mStorageAccessHosts;
+
+  // A set of sites' hosts. All sites which received user activation during
+  // this extended navigation.
+  // This is not used by bounce tracking protection itself, but are instead
+  // used to enable storage access heuristics. See Bug 1935235.
+  nsTHashSet<nsCStringHashKey> mUserActivationHosts;
 
   // Create a comma-delimited string that describes a string set. Used for
   // logging.
-  static nsCString DescribeSet(const nsTHashSet<nsCString>& set);
+  static nsCString DescribeSet(const nsTHashSet<nsCStringHashKey>& set);
 };
 
 }  // namespace mozilla

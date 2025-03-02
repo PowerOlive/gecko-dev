@@ -5,7 +5,6 @@
 /**
  * A client to fetch profile information for a Firefox Account.
  */
-"use strict;";
 
 import {
   ERRNO_NETWORK,
@@ -33,20 +32,17 @@ import { RESTRequest } from "resource://services-common/rest.sys.mjs";
  *   @param {String} options.serverURL
  *   The URL of the profile server to query.
  *   Example: https://profile.accounts.firefox.com/v1
- *   @param {String} options.token
- *   The bearer token to access the profile server
  * @constructor
  */
 export var FxAccountsProfileClient = function (options) {
-  if (!options || !options.serverURL) {
+  if (!options?.serverURL) {
     throw new Error("Missing 'serverURL' configuration option");
   }
 
   this.fxai = options.fxai || fxAccounts._internal;
 
-  try {
-    this.serverURL = new URL(options.serverURL);
-  } catch (e) {
+  this.serverURL = URL.parse(options.serverURL);
+  if (!this.serverURL) {
     throw new Error("Invalid 'serverURL'");
   }
   log.debug("FxAccountsProfileClient: Initialized");
@@ -54,7 +50,7 @@ export var FxAccountsProfileClient = function (options) {
 
 FxAccountsProfileClient.prototype = {
   /**
-   * {nsIURI}
+   * {URL}
    * The server to fetch profile information from.
    */
   serverURL: null,

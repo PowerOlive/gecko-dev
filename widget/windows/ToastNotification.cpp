@@ -20,6 +20,7 @@
 #include "mozilla/ErrorResult.h"
 #include "mozilla/mscom/COMWrappers.h"
 #include "mozilla/mscom/Utils.h"
+#include "mozilla/widget/WinRegistry.h"
 #include "mozilla/Logging.h"
 #include "mozilla/Services.h"
 #include "mozilla/WidgetUtils.h"
@@ -36,7 +37,6 @@
 #include "prenv.h"
 #include "ToastNotificationHandler.h"
 #include "ToastNotificationHeaderOnlyUtils.h"
-#include "WinUtils.h"
 
 namespace mozilla {
 namespace widget {
@@ -133,24 +133,16 @@ bool ToastNotification::EnsureAumidRegistered() {
 }
 
 bool ToastNotification::AssignIfMsixAumid(Maybe<nsAutoString>& aAumid) {
-  // `GetCurrentApplicationUserModelId` added in Windows 8.
-  DynamicallyLinkedFunctionPtr<decltype(&GetCurrentApplicationUserModelId)>
-      pGetCurrentApplicationUserModelId(L"kernel32.dll",
-                                        "GetCurrentApplicationUserModelId");
-  if (!pGetCurrentApplicationUserModelId) {
-    return false;
-  }
-
   UINT32 len = 0;
   // ERROR_INSUFFICIENT_BUFFER signals that we're in an MSIX package, and
   // therefore should use the package's AUMID.
-  if (pGetCurrentApplicationUserModelId(&len, nullptr) !=
+  if (GetCurrentApplicationUserModelId(&len, nullptr) !=
       ERROR_INSUFFICIENT_BUFFER) {
     MOZ_LOG(sWASLog, LogLevel::Debug, ("Not an MSIX package"));
     return false;
   }
   mozilla::Buffer<wchar_t> buffer(len);
-  LONG success = pGetCurrentApplicationUserModelId(&len, buffer.Elements());
+  LONG success = GetCurrentApplicationUserModelId(&len, buffer.Elements());
   NS_ENSURE_TRUE(success == ERROR_SUCCESS, false);
 
   aAumid.emplace(buffer.Elements());
@@ -162,7 +154,7 @@ bool ToastNotification::AssignIfNsisAumid(nsAutoString& aInstallHash,
   nsAutoString nsisAumidName =
       u""_ns MOZ_TOAST_APP_NAME u"Toast-"_ns + aInstallHash;
   nsAutoString nsisAumidPath = u"AppUserModelId\\"_ns + nsisAumidName;
-  if (!WinUtils::HasRegistryKey(HKEY_CLASSES_ROOT, nsisAumidPath.get())) {
+  if (!WinRegistry::HasKey(HKEY_CLASSES_ROOT, nsisAumidPath)) {
     MOZ_LOG(sWASLog, LogLevel::Debug,
             ("No CustomActivator value from installer in key 'HKCR\\%s'",
              NS_ConvertUTF16toUTF8(nsisAumidPath).get()));
@@ -188,8 +180,11 @@ bool ToastNotification::RegisterRuntimeAumid(nsAutoString& aInstallHash,
   rv = appdir->Clone(getter_AddRefs(icon));
   NS_ENSURE_SUCCESS(rv, false);
 
+  // Add  browser subdirectory only for Firefox
+#ifdef MOZ_BUILD_APP_IS_BROWSER
   rv = icon->Append(u"browser"_ns);
   NS_ENSURE_SUCCESS(rv, false);
+#endif
 
   rv = icon->Append(u"VisualElements"_ns);
   NS_ENSURE_SUCCESS(rv, false);
@@ -400,13 +395,6 @@ ToastNotification::ShowAlertNotification(
 }
 
 NS_IMETHODIMP
-ToastNotification::ShowPersistentNotification(const nsAString& aPersistentData,
-                                              nsIAlertNotification* aAlert,
-                                              nsIObserver* aAlertListener) {
-  return ShowAlert(aAlert, aAlertListener);
-}
-
-NS_IMETHODIMP
 ToastNotification::SetManualDoNotDisturb(bool aDoNotDisturb) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -472,13 +460,40 @@ ToastNotification::ShowAlert(nsIAlertNotification* aAlert,
   MOZ_TRY(aAlert->GetPrincipal(getter_AddRefs(principal)));
   bool isSystemPrincipal = principal && principal->IsSystemPrincipal();
 
-  RefPtr<ToastNotificationHandler> oldHandler = mActiveHandlers.Get(name);
+  auto imagePlacement = ImagePlacement::eInline;
+  if (isSystemPrincipal) {
+    nsCOMPtr<nsIWindowsAlertNotification> winAlert(do_QueryInterface(aAlert));
+    if (winAlert) {
+      nsIWindowsAlertNotification::ImagePlacement placement;
+      MOZ_TRY(winAlert->GetImagePlacement(&placement));
+      switch (placement) {
+        case nsIWindowsAlertNotification::eHero:
+          imagePlacement = ImagePlacement::eHero;
+          break;
+        case nsIWindowsAlertNotification::eIcon:
+          imagePlacement = ImagePlacement::eIcon;
+          break;
+        case nsIWindowsAlertNotification::eInline:
+          imagePlacement = ImagePlacement::eInline;
+          break;
+        default:
+          MOZ_LOG(sWASLog, LogLevel::Error,
+                  ("Invalid image placement enum value: %hhu", placement));
+          return NS_ERROR_UNEXPECTED;
+      }
+    }
+  }
+
+  // If there was a previous handler with the same name then unregister it.
+  if (RefPtr<ToastNotificationHandler> oldHandler = mActiveHandlers.Get(name)) {
+    oldHandler->UnregisterHandler();
+  }
 
   NS_ENSURE_TRUE(mAumid.isSome(), NS_ERROR_UNEXPECTED);
   RefPtr<ToastNotificationHandler> handler = new ToastNotificationHandler(
-      this, mAumid.ref(), aAlertListener, name, cookie, title, text, hostPort,
-      textClickable, requireInteraction, actions, isSystemPrincipal,
-      opaqueRelaunchData, inPrivateBrowsing, isSilent);
+      this, mAumid.ref(), aAlert, aAlertListener, name, cookie, title, text,
+      hostPort, textClickable, requireInteraction, actions, isSystemPrincipal,
+      opaqueRelaunchData, inPrivateBrowsing, isSilent, imagePlacement);
   mActiveHandlers.InsertOrUpdate(name, RefPtr{handler});
 
   MOZ_LOG(sWASLog, LogLevel::Debug,
@@ -486,7 +501,7 @@ ToastNotification::ShowAlert(nsIAlertNotification* aAlert,
            NS_ConvertUTF16toUTF8(name).get(), handler.get(),
            mActiveHandlers.Count()));
 
-  nsresult rv = handler->InitAlertAsync(aAlert);
+  nsresult rv = handler->InitAlertAsync();
   if (NS_WARN_IF(NS_FAILED(rv))) {
     MOZ_LOG(sWASLog, LogLevel::Debug,
             ("Failed to init alert, removing '%s'",
@@ -494,11 +509,6 @@ ToastNotification::ShowAlert(nsIAlertNotification* aAlert,
     mActiveHandlers.Remove(name);
     handler->UnregisterHandler();
     return rv;
-  }
-
-  // If there was a previous handler with the same name then unregister it.
-  if (oldHandler) {
-    oldHandler->UnregisterHandler();
   }
 
   return NS_OK;
@@ -549,8 +559,8 @@ ToastNotification::GetXmlStringForWindowsAlert(nsIAlertNotification* aAlert,
 
   NS_ENSURE_TRUE(mAumid.isSome(), NS_ERROR_UNEXPECTED);
   RefPtr<ToastNotificationHandler> handler = new ToastNotificationHandler(
-      this, mAumid.ref(), nullptr /* aAlertListener */, name, cookie, title,
-      text, hostPort, textClickable, requireInteraction, actions,
+      this, mAumid.ref(), aAlert, nullptr /* aAlertListener */, name, cookie,
+      title, text, hostPort, textClickable, requireInteraction, actions,
       isSystemPrincipal, opaqueRelaunchData, inPrivateBrowsing, isSilent);
 
   // Usually, this will be empty during testing, making test output
@@ -627,8 +637,7 @@ void ToastNotification::SignalComNotificationHandled(
       do_GetService(NS_WINDOWMEDIATOR_CONTRACTID));
   if (winMediator) {
     nsCOMPtr<mozIDOMWindowProxy> navWin;
-    winMediator->GetMostRecentWindow(u"navigator:browser",
-                                     getter_AddRefs(navWin));
+    winMediator->GetMostRecentBrowserWindow(getter_AddRefs(navWin));
     if (navWin) {
       nsCOMPtr<nsIWidget> widget =
           WidgetUtils::DOMWindowToWidget(nsPIDOMWindowOuter::From(navWin));
@@ -708,7 +717,7 @@ ToastNotification::HandleWindowsTag(const nsAString& aWindowsTag,
   ErrorResult rv;
   RefPtr<dom::Promise> promise =
       dom::Promise::Create(xpc::CurrentNativeGlobal(aCx), rv);
-  ENSURE_SUCCESS(rv, rv.StealNSResult());
+  RETURN_NSRESULT_ON_FAILURE(rv);
 
   this->VerifyTagPresentOrFallback(aWindowsTag)
       ->Then(
@@ -756,6 +765,9 @@ ToastNotification::CloseAlert(const nsAString& aAlertName,
                               bool aContextClosed) {
   RefPtr<ToastNotificationHandler> handler;
   if (NS_WARN_IF(!mActiveHandlers.Get(aAlertName, getter_AddRefs(handler)))) {
+    // This can happen when the handler is gone but the closure signal is not
+    // yet reached to the content process, and then the process tries closing
+    // the same signal.
     return NS_OK;
   }
 
@@ -849,6 +861,32 @@ ToastNotification::RemoveAllNotificationsForInstall() {
       Unused << NS_WARN_IF(FAILED(hr));
     }
   }();
+
+  return NS_OK;
+}
+
+NS_IMPL_ISUPPORTS_INHERITED(WindowsAlertNotification, AlertNotification,
+                            nsIWindowsAlertNotification)
+
+NS_IMETHODIMP WindowsAlertNotification::GetImagePlacement(
+    nsIWindowsAlertNotification::ImagePlacement* aImagePlacement) {
+  *aImagePlacement = mImagePlacement;
+  return NS_OK;
+}
+
+NS_IMETHODIMP WindowsAlertNotification::SetImagePlacement(
+    nsIWindowsAlertNotification::ImagePlacement aImagePlacement) {
+  switch (aImagePlacement) {
+    case eHero:
+    case eIcon:
+    case eInline:
+      mImagePlacement = aImagePlacement;
+      break;
+    default:
+      MOZ_LOG(sWASLog, LogLevel::Error,
+              ("Invalid image placement enum value: %hhu", aImagePlacement));
+      return NS_ERROR_INVALID_ARG;
+  }
 
   return NS_OK;
 }

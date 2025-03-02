@@ -290,7 +290,7 @@
  *
  * Barriers for use outside of the JS engine call into the same barrier
  * implementations at InternalBarrierMethods<T>::post via an indirect call to
- * Heap(.+)PostWriteBarrier.
+ * Heap(.+)WriteBarriers.
  *
  * These clases are designed to be used to wrap GC thing pointers or values that
  * act like them (i.e. JS::Value and jsid).  It is possible to use them for
@@ -361,6 +361,32 @@ struct InternalBarrierMethods<T*> {
 #endif
 };
 
+namespace gc {
+MOZ_ALWAYS_INLINE void ValuePostWriteBarrier(Value* vp, const Value& prev,
+                                             const Value& next) {
+  MOZ_ASSERT(!CurrentThreadIsOffThreadCompiling());
+  MOZ_ASSERT(vp);
+
+  // If the target needs an entry, add it.
+  js::gc::StoreBuffer* sb;
+  if (next.isGCThing() && (sb = next.toGCThing()->storeBuffer())) {
+    // If we know that the prev has already inserted an entry, we can
+    // skip doing the lookup to add the new entry. Note that we cannot
+    // safely assert the presence of the entry because it may have been
+    // added via a different store buffer.
+    if (prev.isGCThing() && prev.toGCThing()->storeBuffer()) {
+      return;
+    }
+    sb->putValue(vp);
+    return;
+  }
+  // Remove the prev entry if the new value does not need it.
+  if (prev.isGCThing() && (sb = prev.toGCThing()->storeBuffer())) {
+    sb->unputValue(vp);
+  }
+}
+}  // namespace gc
+
 template <>
 struct InternalBarrierMethods<Value> {
   static bool isMarkable(const Value& v) { return v.isGCThing(); }
@@ -373,26 +399,7 @@ struct InternalBarrierMethods<Value> {
 
   static MOZ_ALWAYS_INLINE void postBarrier(Value* vp, const Value& prev,
                                             const Value& next) {
-    MOZ_ASSERT(!CurrentThreadIsIonCompiling());
-    MOZ_ASSERT(vp);
-
-    // If the target needs an entry, add it.
-    js::gc::StoreBuffer* sb;
-    if (next.isGCThing() && (sb = next.toGCThing()->storeBuffer())) {
-      // If we know that the prev has already inserted an entry, we can
-      // skip doing the lookup to add the new entry. Note that we cannot
-      // safely assert the presence of the entry because it may have been
-      // added via a different store buffer.
-      if (prev.isGCThing() && prev.toGCThing()->storeBuffer()) {
-        return;
-      }
-      sb->putValue(vp);
-      return;
-    }
-    // Remove the prev entry if the new value does not need it.
-    if (prev.isGCThing() && (sb = prev.toGCThing()->storeBuffer())) {
-      sb->unputValue(vp);
-    }
+    gc::ValuePostWriteBarrier(vp, prev, next);
   }
 
   static void readBarrier(const Value& v) {
@@ -610,11 +617,13 @@ class GCPtr : public WriteBarriered<T> {
 
 #ifdef DEBUG
   ~GCPtr() {
-    // No barriers are necessary as this only happens when the GC is sweeping.
+    // No barriers are necessary as this only happens when the GC is sweeping or
+    // before this has been initialized (see above comment).
     //
     // If this assertion fails you may need to make the containing object use a
     // HeapPtr instead, as this can be deleted from outside of GC.
-    MOZ_ASSERT(CurrentThreadIsGCSweeping() || CurrentThreadIsGCFinalizing());
+    MOZ_ASSERT(CurrentThreadIsGCSweeping() || CurrentThreadIsGCFinalizing() ||
+               this->value == JS::SafelyInitialized<T>::create());
 
     Poison(this, JS_FREED_HEAP_PTR_PATTERN, sizeof(*this),
            MemCheckKind::MakeNoAccess);
@@ -762,7 +771,7 @@ template <class T>
 class GCStructPtr : public BarrieredBase<T> {
  public:
   // This is sometimes used to hold tagged pointers.
-  static constexpr uintptr_t MaxTaggedPointer = 0x2;
+  static constexpr uintptr_t MaxTaggedPointer = 0x5;
 
   GCStructPtr() : BarrieredBase<T>(JS::SafelyInitialized<T>::create()) {}
 
@@ -1105,6 +1114,7 @@ struct RemoveBarrier<WeakHeapPtr<T>> {
 
 #if MOZ_IS_GCC
 template struct JS_PUBLIC_API StableCellHasher<JSObject*>;
+template struct JS_PUBLIC_API StableCellHasher<JSScript*>;
 #endif
 
 template <typename T>
@@ -1207,6 +1217,12 @@ struct UnsafeBarePtrHasher {
   static bool match(const Key& k, Lookup l) { return k.get() == l; }
   static void rekey(Key& k, const Key& newKey) { k.set(newKey.get()); }
 };
+
+// Set up descriptive type aliases.
+template <class T>
+using PreBarrierWrapper = PreBarriered<T>;
+template <class T>
+using PreAndPostBarrierWrapper = GCPtr<T>;
 
 }  // namespace js
 

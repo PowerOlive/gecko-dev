@@ -10,7 +10,16 @@
 
 #include "api/peer_connection_interface.h"
 
+#include <memory>
 #include <utility>
+
+#include "api/media_types.h"
+#include "api/rtc_error.h"
+#include "api/rtp_parameters.h"
+#include "api/scoped_refptr.h"
+#include "p2p/base/port_allocator.h"
+#include "pc/media_factory.h"
+#include "rtc_base/rtc_certificate_generator.h"
 
 namespace webrtc {
 
@@ -45,16 +54,26 @@ PeerConnectionDependencies::PeerConnectionDependencies(
     PeerConnectionObserver* observer_in)
     : observer(observer_in) {}
 
+// TODO(bugs.webrtc.org/12598: remove pragma once async_resolver_factory
+// is removed from PeerConnectionDependencies
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PeerConnectionDependencies::PeerConnectionDependencies(
     PeerConnectionDependencies&&) = default;
+#pragma clang diagnostic pop
 
 PeerConnectionDependencies::~PeerConnectionDependencies() = default;
 
 PeerConnectionFactoryDependencies::PeerConnectionFactoryDependencies() =
     default;
 
+// TODO: bugs.webrtc.org/369904700 - remove pragma once `audio_processing`
+// is removed from PeerConnectionFactoryDependencies.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 PeerConnectionFactoryDependencies::PeerConnectionFactoryDependencies(
     PeerConnectionFactoryDependencies&&) = default;
+#pragma clang diagnostic pop
 
 PeerConnectionFactoryDependencies::~PeerConnectionFactoryDependencies() =
     default;
@@ -90,19 +109,9 @@ PeerConnectionFactoryInterface::CreatePeerConnection(
 
 RTCErrorOr<rtc::scoped_refptr<PeerConnectionInterface>>
 PeerConnectionFactoryInterface::CreatePeerConnectionOrError(
-    const PeerConnectionInterface::RTCConfiguration& configuration,
-    PeerConnectionDependencies dependencies) {
+    const PeerConnectionInterface::RTCConfiguration& /* configuration */,
+    PeerConnectionDependencies /* dependencies */) {
   return RTCError(RTCErrorType::INTERNAL_ERROR);
-}
-
-RtpCapabilities PeerConnectionFactoryInterface::GetRtpSenderCapabilities(
-    cricket::MediaType kind) const {
-  return {};
-}
-
-RtpCapabilities PeerConnectionFactoryInterface::GetRtpReceiverCapabilities(
-    cricket::MediaType kind) const {
-  return {};
 }
 
 }  // namespace webrtc

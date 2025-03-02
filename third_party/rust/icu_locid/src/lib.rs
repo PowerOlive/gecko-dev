@@ -24,7 +24,8 @@
 //! ```
 //! use icu::locid::Locale;
 //! use icu::locid::{
-//!     locale, subtags_language as language, subtags_region as region,
+//!     locale,
+//!     subtags::{language, region},
 //! };
 //!
 //! let mut loc: Locale = locale!("en-US");
@@ -45,7 +46,7 @@
 //! [`ICU4X`]: ../icu/index.html
 //! [`Unicode Extensions`]: extensions
 
-// https://github.com/unicode-org/icu4x/blob/main/docs/process/boilerplate.md#library-annotations
+// https://github.com/unicode-org/icu4x/blob/main/documents/process/boilerplate.md#library-annotations
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![cfg_attr(
     not(test),
@@ -71,9 +72,11 @@ mod locale;
 mod macros;
 mod ordering;
 mod parser;
+mod shortvec;
 
 pub use langid::LanguageIdentifier;
 pub use locale::Locale;
+#[allow(deprecated)]
 pub use ordering::SubtagOrderingResult;
 pub use parser::errors::ParserError;
 
@@ -81,6 +84,7 @@ pub use parser::errors::ParserError;
 pub use ParserError as Error;
 
 pub mod extensions;
+#[macro_use]
 pub mod subtags;
 pub mod zerovec;
 

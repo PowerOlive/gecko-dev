@@ -14,6 +14,7 @@ mod chars;
 #[cfg(doc)]
 pub mod custom;
 mod encode;
+mod macros;
 mod multi;
 mod niche;
 mod option;
@@ -29,7 +30,7 @@ pub use multi::MultiFieldsULE;
 pub use niche::{NicheBytes, NichedOption, NichedOptionULE};
 pub use option::{OptionULE, OptionVarULE};
 pub use plain::RawBytesULE;
-pub use unvalidated::UnvalidatedStr;
+pub use unvalidated::{UnvalidatedChar, UnvalidatedStr};
 
 use alloc::alloc::Layout;
 use alloc::borrow::ToOwned;
@@ -60,7 +61,7 @@ use core::{mem, slice};
 /// 6. Acknowledge the following note about the equality invariant.
 ///
 /// If the ULE type is a struct only containing other ULE types (or other types which satisfy invariants 1 and 2,
-/// like `[u8; N]`), invariants 1 and 2 can be achieved via `#[repr(packed)]` or `#[repr(transparent)]`.
+/// like `[u8; N]`), invariants 1 and 2 can be achieved via `#[repr(C, packed)]` or `#[repr(transparent)]`.
 ///
 /// # Equality invariant
 ///
@@ -156,7 +157,7 @@ where
 
 /// A trait for any type that has a 1:1 mapping with an unaligned little-endian (ULE) type.
 ///
-/// If you need to implement this trait, consider using [`#[make_varule]`](crate::make_ule) instead.
+/// If you need to implement this trait, consider using [`#[make_ule]`](crate::make_ule) instead.
 pub trait AsULE: Copy {
     /// The ULE type corresponding to `Self`.
     ///
@@ -270,7 +271,7 @@ where
 /// 7. Acknowledge the following note about the equality invariant.
 ///
 /// If the ULE type is a struct only containing other ULE/VarULE types (or other types which satisfy invariants 1 and 2,
-/// like `[u8; N]`), invariants 1 and 2 can be achieved via `#[repr(packed)]` or `#[repr(transparent)]`.
+/// like `[u8; N]`), invariants 1 and 2 can be achieved via `#[repr(C, packed)]` or `#[repr(transparent)]`.
 ///
 /// # Equality invariant
 ///
@@ -356,13 +357,12 @@ pub unsafe trait VarULE: 'static {
     #[inline]
     fn to_boxed(&self) -> Box<Self> {
         let bytesvec = self.as_byte_slice().to_owned().into_boxed_slice();
+        let bytesvec = mem::ManuallyDrop::new(bytesvec);
         unsafe {
             // Get the pointer representation
             let ptr: *mut Self =
                 Self::from_byte_slice_unchecked(&bytesvec) as *const Self as *mut Self;
-            assert_eq!(Layout::for_value(&*ptr), Layout::for_value(&*bytesvec));
-            // Forget the allocation
-            mem::forget(bytesvec);
+            assert_eq!(Layout::for_value(&*ptr), Layout::for_value(&**bytesvec));
             // Transmute the pointer to an owned pointer
             Box::from_raw(ptr)
         }

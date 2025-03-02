@@ -4,7 +4,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(clippy::module_name_repetitions)]
+use std::{cell::RefCell, collections::BTreeSet, mem, rc::Rc};
+
+use neqo_common::{qtrace, Encoder, Header, MessageType, Role};
+use neqo_qpack::{QPackDecoder, QPackEncoder};
+use neqo_transport::{Connection, DatagramTracking, StreamId};
 
 use super::{ExtendedConnectEvents, ExtendedConnectType, SessionCloseReason};
 use crate::{
@@ -15,14 +19,6 @@ use crate::{
     HttpRecvStreamEvents, Priority, PriorityHandler, ReceiveOutput, RecvStream, RecvStreamEvents,
     Res, SendStream, SendStreamEvents, Stream,
 };
-use neqo_common::{qtrace, Encoder, Header, MessageType, Role};
-use neqo_qpack::{QPackDecoder, QPackEncoder};
-use neqo_transport::{streams::SendOrder, Connection, DatagramTracking, StreamId};
-use std::any::Any;
-use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::mem;
-use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
 enum SessionState {
@@ -33,13 +29,13 @@ enum SessionState {
 }
 
 impl SessionState {
-    pub fn closing_state(&self) -> bool {
+    pub const fn closing_state(&self) -> bool {
         matches!(self, Self::FinPending | Self::Done)
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct WebTransportSession {
+pub struct WebTransportSession {
     control_stream_recv: Box<dyn RecvStream>,
     control_stream_send: Box<dyn SendStream>,
     stream_event_listener: Rc<RefCell<WebTransportSessionListener>>,
@@ -54,7 +50,7 @@ pub(crate) struct WebTransportSession {
 
 impl ::std::fmt::Display for WebTransportSession {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        write!(f, "WebTransportSession session={}", self.session_id,)
+        write!(f, "WebTransportSession session={}", self.session_id)
     }
 }
 
@@ -74,10 +70,10 @@ impl WebTransportSession {
                     message_type: MessageType::Response,
                     stream_type: Http3StreamType::ExtendedConnect,
                     stream_id: session_id,
-                    header_frame_type_read: false,
+                    first_frame_type: None,
                 },
                 qpack_decoder,
-                Box::new(stream_event_listener.clone()),
+                Box::new(Rc::clone(&stream_event_listener)),
                 None,
                 PriorityHandler::new(false, Priority::default()),
             )),
@@ -86,7 +82,7 @@ impl WebTransportSession {
                 Http3StreamType::ExtendedConnect,
                 session_id,
                 qpack_encoder,
-                Box::new(stream_event_listener.clone()),
+                Box::new(Rc::clone(&stream_event_listener)),
             )),
             stream_event_listener,
             session_id,
@@ -100,6 +96,7 @@ impl WebTransportSession {
     }
 
     /// # Panics
+    ///
     /// This function is only called with `RecvStream` and `SendStream` that also implement
     /// the http specific functions and `http_stream()` will never return `None`.
     #[must_use]
@@ -114,11 +111,11 @@ impl WebTransportSession {
         control_stream_recv
             .http_stream()
             .unwrap()
-            .set_new_listener(Box::new(stream_event_listener.clone()));
+            .set_new_listener(Box::new(Rc::clone(&stream_event_listener)));
         control_stream_send
             .http_stream()
             .unwrap()
-            .set_new_listener(Box::new(stream_event_listener.clone()));
+            .set_new_listener(Box::new(Rc::clone(&stream_event_listener)));
         Self {
             control_stream_recv,
             control_stream_send,
@@ -134,8 +131,11 @@ impl WebTransportSession {
     }
 
     /// # Errors
+    ///
     /// The function can only fail if supplied headers are not valid http headers.
+    ///
     /// # Panics
+    ///
     /// `control_stream_send` implements the  http specific functions and `http_stream()`
     /// will never return `None`.
     pub fn send_request(&mut self, headers: &[Header], conn: &mut Connection) -> Res<()> {
@@ -146,7 +146,7 @@ impl WebTransportSession {
     }
 
     fn receive(&mut self, conn: &mut Connection) -> Res<(ReceiveOutput, bool)> {
-        qtrace!([self], "receive control data");
+        qtrace!("[{self}] receive control data");
         let (out, _) = self.control_stream_recv.receive(conn)?;
         debug_assert!(out == ReceiveOutput::NoOutput);
         self.maybe_check_headers();
@@ -220,6 +220,7 @@ impl WebTransportSession {
     }
 
     /// # Panics
+    ///
     /// This cannot panic because headers are checked before this function called.
     pub fn maybe_check_headers(&mut self) {
         if SessionState::Negotiating != self.state {
@@ -228,11 +229,7 @@ impl WebTransportSession {
 
         if let Some((headers, interim, fin)) = self.stream_event_listener.borrow_mut().get_headers()
         {
-            qtrace!(
-                "ExtendedConnect response headers {:?}, fin={}",
-                headers,
-                fin
-            );
+            qtrace!("ExtendedConnect response headers {headers:?}, fin={fin}");
 
             if interim {
                 if fin {
@@ -294,7 +291,7 @@ impl WebTransportSession {
     }
 
     pub fn add_stream(&mut self, stream_id: StreamId) {
-        if let SessionState::Active = self.state {
+        if self.state == SessionState::Active {
             if stream_id.is_bidi() {
                 self.send_streams.insert(stream_id);
                 self.recv_streams.insert(stream_id);
@@ -323,7 +320,7 @@ impl WebTransportSession {
     }
 
     #[must_use]
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(self.state, SessionState::Active)
     }
 
@@ -335,6 +332,7 @@ impl WebTransportSession {
     }
 
     /// # Errors
+    ///
     /// It may return an error if the frame is not correctly decoded.
     pub fn read_control_stream(&mut self, conn: &mut Connection) -> Res<()> {
         let (f, fin) = self
@@ -344,7 +342,7 @@ impl WebTransportSession {
                 &mut self.control_stream_recv,
             ))
             .map_err(|_| Error::HttpGeneralProtocolStream)?;
-        qtrace!([self], "Received frame: {:?} fin={}", f, fin);
+        qtrace!("[{self}] Received frame: {f:?} fin={fin}");
         if let Some(WebTransportFrame::CloseSession { error, message }) = f {
             self.events.session_end(
                 ExtendedConnectType::WebTransport,
@@ -373,8 +371,9 @@ impl WebTransportSession {
     }
 
     /// # Errors
-    /// Return an error if the stream was closed on the transport layer, but that information is not yet
-    /// consumed on the http/3 layer.
+    ///
+    /// Return an error if the stream was closed on the transport layer, but that information is not
+    /// yet consumed on the http/3 layer.
     pub fn close_session(&mut self, conn: &mut Connection, error: u32, message: &str) -> Res<()> {
         self.state = SessionState::Done;
         let close_frame = WebTransportFrame::CloseSession {
@@ -399,6 +398,7 @@ impl WebTransportSession {
     }
 
     /// # Errors
+    ///
     /// Returns an error if the datagram exceeds the remote datagram size limit.
     pub fn send_datagram(
         &self,
@@ -406,12 +406,12 @@ impl WebTransportSession {
         buf: &[u8],
         id: impl Into<DatagramTracking>,
     ) -> Res<()> {
-        qtrace!([self], "send_datagram state={:?}", self.state);
-        if let SessionState::Active = self.state {
+        qtrace!("[{self}] send_datagram state={:?}", self.state);
+        if self.state == SessionState::Active {
             let mut dgram_data = Encoder::default();
             dgram_data.encode_varint(self.session_id.as_u64() / 4);
             dgram_data.encode(buf);
-            conn.send_datagram(dgram_data.as_ref(), id)?;
+            conn.send_datagram(dgram_data.into(), id)?;
         } else {
             debug_assert!(false);
             return Err(Error::Unavailable);
@@ -419,8 +419,8 @@ impl WebTransportSession {
         Ok(())
     }
 
-    pub fn datagram(&mut self, datagram: Vec<u8>) {
-        if let SessionState::Active = self.state {
+    pub fn datagram(&self, datagram: Vec<u8>) {
+        if self.state == SessionState::Active {
             self.events.new_datagram(self.session_id, datagram);
         }
     }
@@ -447,7 +447,7 @@ impl RecvStream for Rc<RefCell<WebTransportSession>> {
     }
 
     fn webtransport(&self) -> Option<Rc<RefCell<WebTransportSession>>> {
-        Some(self.clone())
+        Some(Self::clone(self))
     }
 }
 
@@ -467,10 +467,6 @@ impl HttpRecvStream for Rc<RefCell<WebTransportSession>> {
     fn priority_update_sent(&mut self) {
         self.borrow_mut().priority_update_sent();
     }
-
-    fn any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl SendStream for Rc<RefCell<WebTransportSession>> {
@@ -484,16 +480,6 @@ impl SendStream for Rc<RefCell<WebTransportSession>> {
 
     fn has_data_to_send(&self) -> bool {
         self.borrow_mut().has_data_to_send()
-    }
-
-    fn set_sendorder(&mut self, _conn: &mut Connection, _sendorder: Option<SendOrder>) -> Res<()> {
-        // Not relevant on session
-        Ok(())
-    }
-
-    fn set_fairness(&mut self, _conn: &mut Connection, _fairness: bool) -> Res<()> {
-        // Not relevant on session
-        Ok(())
     }
 
     fn stream_writable(&self) {}

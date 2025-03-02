@@ -3,23 +3,23 @@
 // (online at: https://github.com/unicode-org/icu4x/blob/main/LICENSE ).
 
 use crate::*;
-use alloc::borrow::Cow;
 use core::fmt;
 
 macro_rules! impl_write_num {
-    ($u:ty, $i:ty, $test:ident, $max_ilog_10:expr) => {
+    ($u:ty, $i:ty, $test:ident) => {
         impl $crate::Writeable for $u {
             fn write_to<W: core::fmt::Write + ?Sized>(&self, sink: &mut W) -> core::fmt::Result {
-                let mut buf = [b'0'; $max_ilog_10 + 1];
+                const MAX_LEN: usize = <$u>::MAX.ilog10() as usize + 1;
+                let mut buf = [b'0'; MAX_LEN];
                 let mut n = *self;
-                let mut i = $max_ilog_10 + 1;
+                let mut i = MAX_LEN;
                 #[allow(clippy::indexing_slicing)] // n < 10^i
                 while n != 0 {
                     i -= 1;
                     buf[i] = b'0' + (n % 10) as u8;
                     n /= 10;
                 }
-                if i == buf.len() {
+                if i == MAX_LEN {
                     debug_assert_eq!(*self, 0);
                     i -= 1;
                 }
@@ -29,39 +29,7 @@ macro_rules! impl_write_num {
             }
 
             fn writeable_length_hint(&self) -> $crate::LengthHint {
-                #[allow(unstable_name_collisions)] // that's the idea
                 LengthHint::exact(self.checked_ilog10().unwrap_or(0) as usize + 1)
-            }
-        }
-
-        impl ILog10Ext for $u {
-            fn checked_ilog10(self) -> Option<u32> {
-                if self == 0 {
-                    return None;
-                }
-                let b = (<$u>::BITS - 1) - self.leading_zeros();
-                // self ∈ [2ᵇ, 2ᵇ⁺¹-1] => ⌊log₁₀(self)⌋ ∈ [⌊log₁₀(2ᵇ)⌋, ⌊log₁₀(2ᵇ⁺¹-1)⌋]
-                //                    <=> ⌊log₁₀(self)⌋ ∈ [⌊log₁₀(2ᵇ)⌋, ⌊log₁₀(2ᵇ⁺¹)⌋]
-                //                    <=> ⌊log₁₀(self)⌋ ∈ [⌊b log₁₀(2)⌋, ⌊(b+1) log₁₀(2)⌋]
-                // The second line holds because there is no integer in
-                // [log₁₀(2ᶜ-1), log₁₀(2ᶜ)], if there were, there'd be some 10ⁿ in
-                // [2ᶜ-1, 2ᶜ], but it can't be 2ᶜ-1 due to parity nor 2ᶜ due to prime
-                // factors.
-
-                const M: u32 = (core::f64::consts::LOG10_2 * (1 << 26) as f64) as u32;
-                let low = (b * M) >> 26;
-                let high = ((b + 1) * M) >> 26;
-
-                // If the bounds aren't tight (e.g. 87 ∈ [64, 127] ⟹ ⌊log₁₀(87)⌋ ∈ [1,2]),
-                // compare to 10ʰ (100). This shouldn't happen too often as there are more
-                // powers of 2 than 10 (it happens for 14% of u32s).
-                Some(if high == low {
-                    low
-                } else if self < (10 as $u).pow(high) {
-                    low
-                } else {
-                    high
-                })
             }
         }
 
@@ -114,23 +82,12 @@ macro_rules! impl_write_num {
     };
 }
 
-/// `checked_ilog10` is added as a method on integer types in 1.67.
-/// This extension trait provides it for older compilers.
-trait ILog10Ext: Sized {
-    fn checked_ilog10(self) -> Option<u32>;
-}
-
-impl_write_num!(u8, i8, test_u8, 2);
-impl_write_num!(u16, i16, test_u16, 4);
-impl_write_num!(u32, i32, test_u32, 9);
-impl_write_num!(u64, i64, test_u64, 19);
-impl_write_num!(u128, i128, test_u128, 38);
-impl_write_num!(
-    usize,
-    isize,
-    test_usize,
-    if usize::MAX as u64 == u64::MAX { 19 } else { 9 }
-);
+impl_write_num!(u8, i8, test_u8);
+impl_write_num!(u16, i16, test_u16);
+impl_write_num!(u32, i32, test_u32);
+impl_write_num!(u64, i64, test_u64);
+impl_write_num!(u128, i128, test_u128);
+impl_write_num!(usize, isize, test_usize);
 
 impl Writeable for str {
     #[inline]
@@ -158,6 +115,11 @@ impl Writeable for str {
     fn write_to_string(&self) -> Cow<str> {
         Cow::Borrowed(self)
     }
+
+    #[inline]
+    fn writeable_cmp_bytes(&self, other: &[u8]) -> core::cmp::Ordering {
+        self.as_bytes().cmp(other)
+    }
 }
 
 impl Writeable for String {
@@ -174,6 +136,35 @@ impl Writeable for String {
     #[inline]
     fn write_to_string(&self) -> Cow<str> {
         Cow::Borrowed(self)
+    }
+
+    #[inline]
+    fn writeable_cmp_bytes(&self, other: &[u8]) -> core::cmp::Ordering {
+        self.as_bytes().cmp(other)
+    }
+}
+
+impl Writeable for char {
+    #[inline]
+    fn write_to<W: fmt::Write + ?Sized>(&self, sink: &mut W) -> fmt::Result {
+        sink.write_char(*self)
+    }
+
+    #[inline]
+    fn writeable_length_hint(&self) -> LengthHint {
+        LengthHint::exact(self.len_utf8())
+    }
+
+    #[inline]
+    fn write_to_string(&self) -> Cow<str> {
+        let mut s = String::with_capacity(self.len_utf8());
+        s.push(*self);
+        Cow::Owned(s)
+    }
+
+    #[inline]
+    fn writeable_cmp_bytes(&self, other: &[u8]) -> core::cmp::Ordering {
+        self.encode_utf8(&mut [0u8; 4]).as_bytes().cmp(other)
     }
 }
 
@@ -197,13 +188,56 @@ impl<T: Writeable + ?Sized> Writeable for &T {
     fn write_to_string(&self) -> Cow<str> {
         (*self).write_to_string()
     }
+
+    #[inline]
+    fn writeable_cmp_bytes(&self, other: &[u8]) -> core::cmp::Ordering {
+        (*self).writeable_cmp_bytes(other)
+    }
 }
+
+macro_rules! impl_write_smart_pointer {
+    ($ty:path, T: $extra_bound:path) => {
+        impl<'a, T: ?Sized + Writeable + $extra_bound> Writeable for $ty {
+            #[inline]
+            fn write_to<W: fmt::Write + ?Sized>(&self, sink: &mut W) -> fmt::Result {
+                core::borrow::Borrow::<T>::borrow(self).write_to(sink)
+            }
+            #[inline]
+            fn write_to_parts<W: PartsWrite + ?Sized>(&self, sink: &mut W) -> fmt::Result {
+                core::borrow::Borrow::<T>::borrow(self).write_to_parts(sink)
+            }
+            #[inline]
+            fn writeable_length_hint(&self) -> LengthHint {
+                core::borrow::Borrow::<T>::borrow(self).writeable_length_hint()
+            }
+            #[inline]
+            fn write_to_string(&self) -> Cow<str> {
+                core::borrow::Borrow::<T>::borrow(self).write_to_string()
+            }
+            #[inline]
+            fn writeable_cmp_bytes(&self, other: &[u8]) -> core::cmp::Ordering {
+                core::borrow::Borrow::<T>::borrow(self).writeable_cmp_bytes(other)
+            }
+        }
+    };
+    ($ty:path) => {
+        // Add a harmless duplicate Writeable bound
+        impl_write_smart_pointer!($ty, T: Writeable);
+    };
+}
+
+impl_write_smart_pointer!(Cow<'a, T>, T: alloc::borrow::ToOwned);
+impl_write_smart_pointer!(alloc::boxed::Box<T>);
+impl_write_smart_pointer!(alloc::rc::Rc<T>);
+impl_write_smart_pointer!(alloc::sync::Arc<T>);
 
 #[test]
 fn test_string_impls() {
     fn check_writeable_slice<W: Writeable + core::fmt::Display>(writeables: &[W]) {
         assert_writeable_eq!(&writeables[0], "");
         assert_writeable_eq!(&writeables[1], "abc");
+        assert!(matches!(writeables[0].write_to_string(), Cow::Borrowed(_)));
+        assert!(matches!(writeables[1].write_to_string(), Cow::Borrowed(_)));
     }
 
     // test str impl
@@ -212,6 +246,38 @@ fn test_string_impls() {
 
     // test String impl
     let arr: &[String] = &[String::new(), "abc".to_owned()];
+    check_writeable_slice(arr);
+
+    // test char impl
+    let chars = ['a', 'β', '你', '😀'];
+    for i in 0..chars.len() {
+        let s = String::from(chars[i]);
+        assert_writeable_eq!(&chars[i], s);
+        for j in 0..chars.len() {
+            assert_eq!(
+                chars[j].writeable_cmp_bytes(s.as_bytes()),
+                chars[j].cmp(&chars[i]),
+                "{:?} vs {:?}",
+                chars[j],
+                chars[i]
+            );
+        }
+    }
+
+    // test Cow impl
+    let arr: &[Cow<str>] = &[Cow::Borrowed(""), Cow::Owned("abc".to_string())];
+    check_writeable_slice(arr);
+
+    // test Box impl
+    let arr: &[Box<str>] = &["".into(), "abc".into()];
+    check_writeable_slice(arr);
+
+    // test Rc impl
+    let arr: &[alloc::rc::Rc<str>] = &["".into(), "abc".into()];
+    check_writeable_slice(arr);
+
+    // test Arc impl
+    let arr: &[alloc::sync::Arc<str>] = &["".into(), "abc".into()];
     check_writeable_slice(arr);
 
     // test &T impl

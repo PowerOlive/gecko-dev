@@ -8,9 +8,35 @@ Releases
    :glob:
    :hidden:
 
+   nss_3_109.rst
+   nss_3_108.rst
+   nss_3_101_3.rst
+   nss_3_107.rst
+   nss_3_106.rst
+   nss_3_105.rst
+   nss_3_104.rst
+   nss_3_103.rst
+   nss_3_102_1.rst
+   nss_3_102.rst
+   nss_3_101_2.rst
+   nss_3_101_1.rst
+   nss_3_101.rst
+   nss_3_100.rst
+   nss_3_99.rst
+   nss_3_98.rst
+   nss_3_97.rst
+   nss_3_96_1.rst
+   nss_3_96.rst
+   nss_3_95.rst
+   nss_3_94.rst
+   nss_3_93.rst
    nss_3_92.rst
-   nss_3_91_0.rst
-   nss_3_90_0.rst
+   nss_3_91.rst
+   nss_3_90_4.rst
+   nss_3_90_3.rst
+   nss_3_90_2.rst
+   nss_3_90_1.rst
+   nss_3_90.rst
    nss_3_89_1.rst
    nss_3_89.rst
    nss_3_88_1.rst
@@ -56,23 +82,43 @@ Releases
 
 .. note::
 
-   **NSS 3.92.0** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_91_0_release_notes`
+   **NSS 3.109** is the latest version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_109_release_notes`
 
-   **NSS 3.90.0 (ESR)** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_90_0_release_notes`
+   **NSS 3.101.3 (ESR)** is the latest ESR version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_101_3_release_notes`
 
 .. container::
 
-   Changes in 3.92 included in this release:
+   Changes in 3.109 included in this release:
 
-   - Bug 1822935 - Set nssckbi version number to 2.62.
-   - Bug 1833270 - Add 4 Atos TrustedRoot Root CA certificates to NSS.
-   - Bug 1839992 - Add 4 SSL.com Root CA certificates.
-   - Bug 1840429 - Add Sectigo E46 and R46 Root CA certificates.
-   - Bug 1840437 - Add LAWtrust Root CA2 (4096).
-   - Bug 1822936 - Remove E-Tugra Certification Authority root. 
-   - Bug 1827224 - Remove Camerfirma Chambers of Commerce Root.
-   - Bug 1840505 - Remove Hongkong Post Root CA 1.
-   - Bug 1842928 - Remove E-Tugra Global Root CA ECC v3 and RSA v3.
-   - Bug 1842937 - Avoid redefining BYTE_ORDER on hppa Linux.
+   - Bug 1939512 - Call BL_Init before RNG_RNGInit() so that special SHA instructions can be used if available
+   - Bug 1930807 - NSS policy updates - fix inaccurate key policy issues
+   - Bug 1945883 - SMIME fuzz target
+   - Bug 1914256 - ASN1 decoder fuzz target
+   - Bug 1936001 - Part 2: Revert "Extract testcases from ssl gtests for fuzzing"
+   - Bug 1915155 - Add fuzz/README.md
+   - Bug 1936001 - Part 4: Fix tstclnt arguments script
+   - Bug 1944545 - Extend pkcs7 fuzz target
+   - Bug 1912320 - Extend certDN fuzz target
+   - Bug 1854095 - delete old docker image definitions and task scheduling code  
+   - Bug 1854095 - apply nspr patch in acvp script
+   - Bug 1854095 - parse try syntax on pushes to nss-try
+   - Bug 1854095 - add "fuzz" task kind
+   - Bug 1854095 - add "test" task kind
+   - Bug 1854095 - add "certs" task kind
+   - Bug 1854095 - add "build" task kind
+   - Bug 1854095 - add "tools" task kind
+   - Bug 1854095 - add "fuzz" docker image
+   - Bug 1854095 - add "gcc-4.4" docker image
+   - Bug 1854095 - add "clang-format" docker image
+   - Bug 1854095 - add "acvp" docker image
+   - Bug 1854095 - add "builds" docker image
+   - Bug 1854095 - switch .taskcluster.yml to taskgraph
+   - Bug 1944300 - restore alloca.h include
+   - Bug 1944300 - refactor run_hacl.sh slightly
+   - Bug 1944300 - ignore all libcrux files in run_hacl.sh
+   - Bug 1944300 - use `diff -u` in HACL* consistency check
+   - Bug 1944300 - revert changes to HACL* files from bug 1866841
+   - Bug 1936001 - Part 3: Package frida corpus script
+

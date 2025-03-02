@@ -286,6 +286,49 @@ def check_old_event_api(
         yield ("The old event API is gone. Extra keys require a type.")
 
 
+def check_metric_on_events_lifetime(
+    metric: metrics.Metric, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    """A non-event metric on the Events ping only makes sense if its value
+    is immutable over the life of the ping."""
+    if (
+        "events" in metric.send_in_pings
+        and "all_pings" not in metric.send_in_pings
+        and metric.type != "event"
+        and metric.lifetime == metrics.Lifetime.ping
+    ):
+        yield (
+            "Non-event metrics sent on the Events ping should not have the ping"
+            " lifetime."
+        )
+
+
+def check_unexpected_unit(
+    metric: metrics.Metric, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    """
+    `unit` was allowed on all metrics and recently disallowed.
+    We now warn about its use on all but quantity and custom distribution
+    metrics.
+    """
+    allowed_types = [metrics.Quantity, metrics.CustomDistribution]
+    if not any([isinstance(metric, ty) for ty in allowed_types]) and metric.unit:
+        yield (
+            "The `unit` property is only allowed for quantity "
+            + "and custom distribution metrics."
+        )
+
+
+def check_empty_datareview(
+    metric: metrics.Metric, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    disallowed_datareview = ["", "todo"]
+    data_reviews = [dr.lower() in disallowed_datareview for dr in metric.data_reviews]
+
+    if any(data_reviews):
+        yield "List of data reviews should not contain empty strings or TODO markers."
+
+
 def check_redundant_ping(
     pings: pings.Ping, parser_config: Dict[str, Any]
 ) -> LintGenerator:
@@ -342,6 +385,35 @@ def check_unknown_ping(
                 yield nit
 
 
+def check_name_too_similar(
+    check_name: str,
+    check_type: CheckType,
+    all_pings: Dict[str, pings.Ping],
+    all_metrics: Dict[str, metrics.Metric],
+    parser_config: Dict[str, Any],
+) -> NitGenerator:
+    """
+    Check that all metrics identifiers are suitably distinct.
+    Require that at least n-1 of the similarly-named metrics must be no_lint'd to dismiss the lint.
+
+    Current similarity test: the fully-qualified identifier differs solely in punctuation.
+    e.g. formautofill.credit_cards and formautofill.creditcards
+    """
+    seen_metrics: Dict[str, metrics.Metric] = dict()
+
+    for _, metric in all_metrics.items():
+        if check_name in metric.no_lint:
+            continue
+
+        no_punc = metric.identifier().replace("_", "").replace(".", "")
+        if no_punc in seen_metrics:
+            msg = f"Metric `{metric.identifier()}`'s name is too similar to existing metric `{seen_metrics[no_punc].identifier()}`"
+            nit = GlinterNit(check_name, metric.identifier(), msg, check_type)
+            yield nit
+
+        seen_metrics[no_punc] = metric
+
+
 # The checks that operate on an entire category of metrics:
 #    {NAME: (function, is_error)}
 CATEGORY_CHECKS: Dict[
@@ -366,6 +438,9 @@ METRIC_CHECKS: Dict[
     "USER_LIFETIME_EXPIRATION": (check_user_lifetime_expiration, CheckType.warning),
     "EXPIRED": (check_expired_metric, CheckType.warning),
     "OLD_EVENT_API": (check_old_event_api, CheckType.warning),
+    "METRIC_ON_EVENTS_LIFETIME": (check_metric_on_events_lifetime, CheckType.error),
+    "UNEXPECTED_UNIT": (check_unexpected_unit, CheckType.warning),
+    "EMPTY_DATAREVIEW": (check_empty_datareview, CheckType.warning),
 }
 
 
@@ -391,6 +466,7 @@ ALL_OBJECT_CHECKS: Dict[
     ],
 ] = {
     "UNKNOWN_PING_REFERENCED": (check_unknown_ping, CheckType.error),
+    "NAME_TOO_SIMILAR": (check_name_too_similar, CheckType.error),
 }
 
 

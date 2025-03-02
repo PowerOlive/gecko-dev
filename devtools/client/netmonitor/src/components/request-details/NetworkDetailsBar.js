@@ -11,7 +11,7 @@ const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-t
 const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
 const {
   connect,
-} = require("resource://devtools/client/shared/redux/visibility-handler-connect.js");
+} = require("resource://devtools/client/shared/vendor/react-redux.js");
 const Actions = require("resource://devtools/client/netmonitor/src/actions/index.js");
 const {
   getSelectedRequest,
@@ -45,6 +45,8 @@ function NetworkDetailsBar({
   openNetworkDetails,
   openLink,
   targetSearchResult,
+  defaultRawResponse,
+  setDefaultRawResponse,
 }) {
   if (!request) {
     return null;
@@ -72,6 +74,8 @@ function NetworkDetailsBar({
           toggleNetworkDetails,
           openNetworkDetails,
           targetSearchResult,
+          defaultRawResponse,
+          setDefaultRawResponse,
         })
   );
 }
@@ -88,12 +92,16 @@ NetworkDetailsBar.propTypes = {
   sourceMapURLService: PropTypes.object,
   toggleNetworkDetails: PropTypes.func.isRequired,
   openLink: PropTypes.func,
+  openNetworkDetails: PropTypes.func,
   targetSearchResult: PropTypes.object,
+  defaultRawResponse: PropTypes.bool,
+  setDefaultRawResponse: PropTypes.func,
 };
 
 module.exports = connect(
   state => ({
     activeTabId: state.ui.detailsPanelSelectedTab,
+    defaultRawResponse: state.ui.defaultRawResponse,
     request: getSelectedRequest(state),
     targetSearchResult: state.search.targetSearchResult,
   }),
@@ -102,5 +110,7 @@ module.exports = connect(
     selectTab: tabId => dispatch(Actions.selectDetailsPanelTab(tabId)),
     toggleNetworkDetails: () => dispatch(Actions.toggleNetworkDetails()),
     openNetworkDetails: open => dispatch(Actions.openNetworkDetails(open)),
+    setDefaultRawResponse: open =>
+      dispatch(Actions.setDefaultRawResponse(open)),
   })
 )(NetworkDetailsBar);

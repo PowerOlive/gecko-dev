@@ -46,7 +46,7 @@ class AudioConfig {
     // The maximum number of channels a channel map can represent.
     static constexpr uint32_t MAX_CHANNELS = 32;
 
-    typedef uint32_t ChannelMap;
+    using ChannelMap = uint32_t;
 
     ChannelLayout() : mChannelMap(UNKNOWN_MAP), mValid(false) {}
     explicit ChannelLayout(uint32_t aChannels)
@@ -97,6 +97,8 @@ class AudioConfig {
 
     static ChannelLayout SMPTEDefault(const ChannelLayout& aChannelLayout);
     static ChannelLayout SMPTEDefault(ChannelMap aMap);
+    // Convert a channel map to a human readable string for debugging purposes.
+    static nsCString ChannelMapToString(const ChannelMap aChannelMap);
 
     static constexpr ChannelMap UNKNOWN_MAP = 0;
 

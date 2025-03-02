@@ -1,4 +1,4 @@
-use super::{Command, CommandError, RequestCtap2, StatusCode};
+use super::{Command, CommandError, CtapResponse, RequestCtap2, StatusCode};
 use crate::ctap2::attestation::AAGuid;
 use crate::ctap2::server::PublicKeyCredentialParameters;
 use crate::transport::errors::HIDError;
@@ -17,7 +17,7 @@ pub struct GetInfo {}
 impl RequestCtap2 for GetInfo {
     type Output = AuthenticatorInfo;
 
-    fn command() -> Command {
+    fn command(&self) -> Command {
         Command::GetInfo
     }
 
@@ -340,6 +340,10 @@ pub struct AuthenticatorInfo {
 }
 
 impl AuthenticatorInfo {
+    pub fn supports_cred_protect(&self) -> bool {
+        self.extensions.contains(&"credProtect".to_string())
+    }
+
     pub fn supports_hmac_secret(&self) -> bool {
         self.extensions.contains(&"hmac-secret".to_string())
     }
@@ -358,7 +362,13 @@ impl AuthenticatorInfo {
         }
         AuthenticatorVersion::U2F_V2
     }
+
+    pub fn device_is_protected(&self) -> bool {
+        self.options.client_pin == Some(true) || self.options.user_verification == Some(true)
+    }
 }
+
+impl CtapResponse for AuthenticatorInfo {}
 
 macro_rules! parse_next_optional_value {
     ($name:expr, $map:expr) => {
@@ -1032,7 +1042,7 @@ pub mod tests {
         assert_eq!(authenticator_info, expected);
 
         // Both 1 and 2
-        let mut raw_list = raw_data.clone();
+        let mut raw_list = raw_data;
         let raw_list_len = raw_list.len();
         raw_list[raw_list_len - 2] = 0x82; // array(2) instead of array(1)
         raw_list.push(0x02);

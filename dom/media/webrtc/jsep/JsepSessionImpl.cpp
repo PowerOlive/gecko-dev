@@ -12,9 +12,9 @@
 #include <string>
 #include <utility>
 
+#include "mozilla/StaticPrefs_media.h"
 #include "transport/logging.h"
 #include "mozilla/Preferences.h"
-#include "mozilla/Telemetry.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/net/DataChannelProtocol.h"
 #include "nsDebug.h"
@@ -196,7 +196,7 @@ nsresult JsepSessionImpl::SetBundlePolicy(JsepBundlePolicy policy) {
 }
 
 nsresult JsepSessionImpl::AddDtlsFingerprint(
-    const std::string& algorithm, const std::vector<uint8_t>& value) {
+    const nsACString& algorithm, const std::vector<uint8_t>& value) {
   mLastError.clear();
   JsepDtlsFingerprint fp;
 
@@ -458,12 +458,22 @@ std::vector<SdpExtmapAttributeList::Extmap> JsepSessionImpl::GetRtpExtensions(
     const SdpMediaSection& msection) {
   std::vector<SdpExtmapAttributeList::Extmap> result;
   JsepMediaType mediaType = JsepMediaType::kNone;
+  const auto direction = msection.GetDirection();
+  const auto includes_send = direction == SdpDirectionAttribute::kSendrecv ||
+                             direction == SdpDirectionAttribute::kSendonly;
   switch (msection.GetMediaType()) {
     case SdpMediaSection::kAudio:
       mediaType = JsepMediaType::kAudio;
       break;
     case SdpMediaSection::kVideo:
       mediaType = JsepMediaType::kVideo;
+      // We need to add the dependency descriptor extension for simulcast
+      if (includes_send && StaticPrefs::media_peerconnection_video_use_dd() &&
+          msection.GetAttributeList().HasAttribute(
+              SdpAttribute::kSimulcastAttribute)) {
+        AddVideoRtpExtension(webrtc::RtpExtension::kDependencyDescriptorUri,
+                             SdpDirectionAttribute::kSendonly);
+      }
       if (msection.GetAttributeList().HasAttribute(
               SdpAttribute::kRidAttribute)) {
         // We need RID support
@@ -1100,7 +1110,7 @@ nsresult JsepSessionImpl::HandleNegotiatedSession(
     }
 
     // Skip disabled m-sections.
-    if (answer.GetMediaSection(i).GetPort() == 0) {
+    if (mSdpHelper.MsectionIsDisabled(answer.GetMediaSection(i))) {
       transceiver->mTransport.Close();
       transceiver->SetStopped();
       transceiver->Disassociate();
@@ -1121,11 +1131,17 @@ nsresult JsepSessionImpl::HandleNegotiatedSession(
 
   CopyBundleTransports();
 
-  std::vector<JsepTrack*> remoteTracks;
+  std::vector<JsepTrack*> receiveTracks;
   for (auto& transceiver : mTransceivers) {
-    remoteTracks.push_back(&transceiver.mRecvTrack);
+    // Do not count payload types for non-active recv tracks as duplicates. If
+    // we receive an RTP packet with a payload type that is used by both a
+    // sendrecv and a sendonly m-section, there is no ambiguity; it is for the
+    // sendrecv m-section.
+    if (transceiver.mRecvTrack.GetActive()) {
+      receiveTracks.push_back(&transceiver.mRecvTrack);
+    }
   }
-  JsepTrack::SetUniquePayloadTypes(remoteTracks);
+  JsepTrack::SetUniqueReceivePayloadTypes(receiveTracks);
 
   mNegotiations++;
 

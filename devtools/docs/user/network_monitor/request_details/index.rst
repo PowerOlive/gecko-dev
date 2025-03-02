@@ -50,6 +50,7 @@ This includes:
   - Transferred: The amount of data transferred for the request.
   - Referrer policy: The value of the `Referrer-policy header <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy>`_.
 
+- **HTTP Early hints response headers** (when the request includes early hints)
 - **HTTP Response headers**
 - **HTTP Request headers**
 
@@ -89,6 +90,16 @@ The following information is shown in both the collapsed and the expanded states
 - The **Referrer Policy**, which governs which referrer information, sent in the `Referer <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referer>`_ header, should be included with requests. (See `Referrer-Policy <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy>`_ for a description of possible values)
 - **Blocking**: If the request is to a site that is associated with a known tracker, an icon and a message are shown; otherwise, this field is not shown.
 
+Early hints response headers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The `Early hints <https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/103>`_ response headers section shows the headers provided by HTTP 103 informational response. For each line in the early hints response headers section, a question mark links to the documentation for that response header, if one is available.
+
+A **Raw** toggle button in the section heading controls whether the headers are shown with formatting, or as plain, unformatted text.
+
+.. image:: early-hint-response-headers.png
+  :alt: Screenshot showing the Early hints response headers section of the Header details pane
+  :class: border
 
 Response headers
 ~~~~~~~~~~~~~~~~
@@ -102,7 +113,7 @@ A **Raw** toggle button in the section heading controls whether the headers are 
 
 
 .. image:: response-headers-fx78.png
-  :alt: Screenshot showing the Request headers section of the Request details pane
+  :alt: Screenshot showing the Response headers section of the Headers details pane
   :class: border
 
 You can copy some or all of the response header in JSON format by using the context menu:
@@ -456,6 +467,31 @@ Server Timing
 New in Firefox 71, the *Server Timing* section lists any information provided in the `Server-Timing <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing>`_ header — this is used to surface any backend server timing metrics you've recorded (e.g. database read/write, CPU time, file system access, etc.).
 
 The header takes a series of descriptions and durations, which can be anything you like. In the above screenshot for example, the highlighted request's ``Server-Timing`` header contains 4 items — *data*, *markup*, *total*, and *miss*.
+
+Service Worker Timing
+~~~~~~~~~~~~~~~~~~~~~
+
+The *Service Worker Timing* section lists the information relating to the specific service worker request. The metrics include Startup, Dispatch fetch and Handle fetch.
+
+.. image:: network-service-worker-timings.png
+  :class: border
+
+.. list-table::
+  :widths: 20 80
+  :header-rows: 0
+
+
+  * - Name
+    - Description
+
+  * - Startup
+    - Time taken to launch the service worker, this is only indicated if the launch starts after the fetch event has already been dispatched.
+
+  * - Dispatch fetch
+    - Time taken from when a fetch event is triggered to just before it starts getting handled by the service worker.
+
+  * - Handle fetch
+    - Time taken to by the service worker to handle the fetch event.
 
 
 .. _network-monitor-request-details-security-tab:

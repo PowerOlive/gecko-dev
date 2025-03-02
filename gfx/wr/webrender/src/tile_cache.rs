@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{ColorF, PrimitiveFlags, QualitySettings, RasterSpace, ClipId};
+use api::{ColorF, DebugFlags, PrimitiveFlags, QualitySettings, RasterSpace, ClipId};
 use api::units::*;
 use crate::clip::{ClipNodeKind, ClipLeafId, ClipNodeId, ClipTreeBuilder};
 use crate::frame_builder::FrameBuilderConfig;
-use crate::internal_types::{FastHashMap};
+use crate::internal_types::FastHashMap;
 use crate::picture::{PrimitiveList, PictureCompositeMode, PicturePrimitive, SliceId};
 use crate::picture::{Picture3DContext, TileCacheParams, TileOffset, PictureFlags};
 use crate::prim_store::{PrimitiveInstance, PrimitiveStore, PictureIndex};
@@ -119,6 +119,8 @@ pub struct TileCacheBuilder {
     prev_scroll_root_cache: (SpatialNodeIndex, SpatialNodeIndex),
     /// Handle to the root reference frame
     root_spatial_node_index: SpatialNodeIndex,
+    /// Debug flags to provide to our TileCacheInstances.
+    debug_flags: DebugFlags,
 }
 
 /// The output of a tile cache builder, containing all details needed to construct the
@@ -145,11 +147,13 @@ impl TileCacheBuilder {
     pub fn new(
         root_spatial_node_index: SpatialNodeIndex,
         background_color: Option<ColorF>,
+        debug_flags: DebugFlags,
     ) -> Self {
         TileCacheBuilder {
             primary_slices: vec![PrimarySlice::new(SliceFlags::empty(), None, background_color)],
             prev_scroll_root_cache: (SpatialNodeIndex::INVALID, SpatialNodeIndex::INVALID),
             root_spatial_node_index,
+            debug_flags,
         }
     }
 
@@ -226,6 +230,7 @@ impl TileCacheBuilder {
                 cluster.spatial_node_index,
                 &mut self.prev_scroll_root_cache,
                 spatial_tree,
+                true,
             );
 
             *scroll_root_occurrences.entry(scroll_root).or_insert(0) += 1;
@@ -324,6 +329,9 @@ impl TileCacheBuilder {
                     spatial_node_index,
                     &mut self.prev_scroll_root_cache,
                     spatial_tree,
+                    // Allow sticky frames as scroll roots, unless our quality settings prefer
+                    // subpixel AA over performance.
+                    !quality_settings.force_subpixel_aa_where_possible,
                 );
 
                 let current_scroll_root = secondary_slices
@@ -369,6 +377,7 @@ impl TileCacheBuilder {
                                         clip_node_data.key.spatial_node_index,
                                         &mut self.prev_scroll_root_cache,
                                         spatial_tree,
+                                        true,
                                     );
 
                                     if spatial_root != self.root_spatial_node_index {
@@ -451,6 +460,11 @@ impl TileCacheBuilder {
         let mut tile_cache_pictures = Vec::new();
         let primary_slices = std::mem::replace(&mut self.primary_slices, Vec::new());
 
+        // TODO: At the moment, culling, clipping and invalidation are always
+        // done in the root coordinate space. The plan is to move to doing it
+        // (always or mostly) in raster space.
+        let visibility_node = spatial_tree.root_reference_frame_index();
+
         for mut primary_slice in primary_slices {
 
             if primary_slice.has_too_many_slices() {
@@ -466,8 +480,10 @@ impl TileCacheBuilder {
                         clip_tree_builder,
                     ) {
                         create_tile_cache(
+                            self.debug_flags,
                             primary_slice.slice_flags,
                             descriptor.scroll_root,
+                            visibility_node,
                             primary_slice.iframe_clip,
                             descriptor.prim_list,
                             primary_slice.background_color,
@@ -483,8 +499,10 @@ impl TileCacheBuilder {
                 SliceKind::Default { secondary_slices } => {
                     for descriptor in secondary_slices {
                         create_tile_cache(
+                            self.debug_flags,
                             primary_slice.slice_flags,
                             descriptor.scroll_root,
+                            visibility_node,
                             primary_slice.iframe_clip,
                             descriptor.prim_list,
                             primary_slice.background_color,
@@ -509,12 +527,13 @@ fn find_scroll_root(
     spatial_node_index: SpatialNodeIndex,
     prev_scroll_root_cache: &mut (SpatialNodeIndex, SpatialNodeIndex),
     spatial_tree: &SceneSpatialTree,
+    allow_sticky_frames: bool,
 ) -> SpatialNodeIndex {
     if prev_scroll_root_cache.0 == spatial_node_index {
         return prev_scroll_root_cache.1;
     }
 
-    let scroll_root = spatial_tree.find_scroll_root(spatial_node_index);
+    let scroll_root = spatial_tree.find_scroll_root(spatial_node_index, allow_sticky_frames);
     *prev_scroll_root_cache = (spatial_node_index, scroll_root);
 
     scroll_root
@@ -560,8 +579,10 @@ fn find_shared_clip_root(
 /// Given a PrimitiveList and scroll root, construct a tile cache primitive instance
 /// that wraps the primitive list.
 fn create_tile_cache(
+    debug_flags: DebugFlags,
     slice_flags: SliceFlags,
     scroll_root: SpatialNodeIndex,
+    visibility_node: SpatialNodeIndex,
     iframe_clip: Option<ClipId>,
     prim_list: PrimitiveList,
     background_color: Option<ColorF>,
@@ -605,14 +626,17 @@ fn create_tile_cache(
     // Store some information about the picture cache slice. This is used when we swap the
     // new scene into the frame builder to either reuse existing slices, or create new ones.
     tile_caches.insert(slice_id, TileCacheParams {
+        debug_flags,
         slice,
         slice_flags,
         spatial_node_index: scroll_root,
+        visibility_node_index: visibility_node,
         background_color,
         shared_clip_node_id,
         shared_clip_leaf_id,
         virtual_surface_size: frame_builder_config.compositor_kind.get_virtual_surface_size(),
-        compositor_surface_count: prim_list.compositor_surface_count,
+        image_surface_count: prim_list.image_surface_count,
+        yuv_image_surface_count: prim_list.yuv_image_surface_count,
     });
 
     let pic_index = prim_store.pictures.alloc().init(PicturePrimitive::new_image(
@@ -623,6 +647,7 @@ fn create_tile_cache(
         scroll_root,
         RasterSpace::Screen,
         PictureFlags::empty(),
+        None,
     ));
 
     tile_cache_pictures.push(PictureIndex(pic_index));

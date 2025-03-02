@@ -99,7 +99,7 @@ void ClearSiteData::Initialize() {
     return;
   }
 
-  obs->AddObserver(service, NS_HTTP_ON_EXAMINE_RESPONSE_TOPIC, false);
+  obs->AddObserver(service, NS_HTTP_ON_AFTER_EXAMINE_RESPONSE_TOPIC, false);
   obs->AddObserver(service, NS_XPCOM_SHUTDOWN_OBSERVER_ID, false);
   gClearSiteData = service;
 }
@@ -120,7 +120,7 @@ void ClearSiteData::Shutdown() {
     return;
   }
 
-  obs->RemoveObserver(service, NS_HTTP_ON_EXAMINE_RESPONSE_TOPIC);
+  obs->RemoveObserver(service, NS_HTTP_ON_AFTER_EXAMINE_RESPONSE_TOPIC);
   obs->RemoveObserver(service, NS_XPCOM_SHUTDOWN_OBSERVER_ID);
 }
 
@@ -135,7 +135,7 @@ ClearSiteData::Observe(nsISupports* aSubject, const char* aTopic,
     return NS_OK;
   }
 
-  MOZ_ASSERT(!strcmp(aTopic, NS_HTTP_ON_EXAMINE_RESPONSE_TOPIC));
+  MOZ_ASSERT(!strcmp(aTopic, NS_HTTP_ON_AFTER_EXAMINE_RESPONSE_TOPIC));
 
   nsCOMPtr<nsIHttpChannel> channel = do_QueryInterface(aSubject);
   if (NS_WARN_IF(!channel)) {
@@ -185,14 +185,24 @@ void ClearSiteData::ClearDataFromChannel(nsIHttpChannel* aChannel) {
   int32_t cleanFlags = 0;
   RefPtr<PendingCleanupHolder> holder = new PendingCleanupHolder(aChannel);
 
+  if (StaticPrefs::privacy_clearSiteDataHeader_cache_enabled() &&
+      (flags & eCache)) {
+    LogOpToConsole(aChannel, uri, eCache);
+    cleanFlags |= nsIClearDataService::CLEAR_ALL_CACHES;
+  }
+
   if (flags & eCookies) {
     LogOpToConsole(aChannel, uri, eCookies);
-    cleanFlags |= nsIClearDataService::CLEAR_COOKIES;
+    cleanFlags |= nsIClearDataService::CLEAR_COOKIES |
+                  nsIClearDataService::CLEAR_COOKIE_BANNER_EXECUTED_RECORD |
+                  nsIClearDataService::CLEAR_FINGERPRINTING_PROTECTION_STATE;
   }
 
   if (flags & eStorage) {
     LogOpToConsole(aChannel, uri, eStorage);
-    cleanFlags |= nsIClearDataService::CLEAR_DOM_STORAGES;
+    cleanFlags |= nsIClearDataService::CLEAR_DOM_STORAGES |
+                  nsIClearDataService::CLEAR_COOKIE_BANNER_EXECUTED_RECORD |
+                  nsIClearDataService::CLEAR_FINGERPRINTING_PROTECTION_STATE;
   }
 
   if (cleanFlags) {
@@ -230,6 +240,13 @@ uint32_t ClearSiteData::ParseHeader(nsIHttpChannel* aChannel,
     // around tokens.
     value.StripTaggedASCII(mozilla::ASCIIMask::MaskWhitespace());
 
+    if (StaticPrefs::privacy_clearSiteDataHeader_cache_enabled()) {
+      if (value.EqualsLiteral("\"cache\"")) {
+        flags |= eCache;
+        continue;
+      }
+    }
+
     if (value.EqualsLiteral("\"cookies\"")) {
       flags |= eCookies;
       continue;
@@ -242,6 +259,9 @@ uint32_t ClearSiteData::ParseHeader(nsIHttpChannel* aChannel,
 
     if (value.EqualsLiteral("\"*\"")) {
       flags = eCookies | eStorage;
+      if (StaticPrefs::privacy_clearSiteDataHeader_cache_enabled()) {
+        flags |= eCache;
+      }
       break;
     }
 
@@ -293,6 +313,10 @@ void ClearSiteData::LogToConsoleInternal(
 
 void ClearSiteData::TypeToString(Type aType, nsAString& aStr) const {
   switch (aType) {
+    case eCache:
+      aStr.AssignLiteral("cache");
+      break;
+
     case eCookies:
       aStr.AssignLiteral("cookies");
       break;

@@ -5,7 +5,7 @@
 # NOTE: For English locales, strings in this file should be in APA-style Title Case.
 # See https://apastyle.apa.org/style-grammar-guidelines/capitalization/title-case
 #
-# NOTE: For Engineers, please don't re-use these strings outside of the menubar.
+# NOTE: For Engineers, please don't reuse these strings outside of the menubar.
 
 ## Application Menu (macOS only)
 
@@ -246,6 +246,15 @@ menu-bookmarks-other =
 menu-bookmarks-mobile =
     .label = Mobile Bookmarks
 
+## Profiles Menu
+
+menu-profiles =
+    .label = Profiles
+menu-profiles-manage-profiles =
+    .label = Manage profiles
+menu-profiles-new-profile =
+    .label = New profile
+
 ## Tools Menu
 
 menu-tools =
@@ -340,3 +349,5 @@ menu-help-report-deceptive-site =
 menu-help-not-deceptive =
     .label = This Isn’t a Deceptive Site…
     .accesskey = D
+menu-report-broken-site =
+  .label = Report Broken Site

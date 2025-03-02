@@ -17,11 +17,13 @@ modules:
           fields: []
           methods: []
           output_only: false
-          cfg_attrs: []
+          attrs: {}
     sub_modules: []
+    attrs: {}
   other:
     name: other
     imports: []
     declared_types: {}
     sub_modules: []
+    attrs: {}
 

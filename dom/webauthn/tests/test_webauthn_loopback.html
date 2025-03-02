@@ -20,6 +20,8 @@
 "use strict";
 
 add_task(async function() {
+  // This test intentionally compares items to themselves.
+  /* eslint-disable no-self-compare */
   await SpecialPowers.pushPrefEnv({"set": [["security.webauth.webauthn_testing_allow_direct_attestation", true]]});
   await addVirtualAuthenticator();
   is(navigator.authentication, undefined, "navigator.authentication does not exist any longer");
@@ -56,10 +58,14 @@ add_task(async function() {
     ok(aCredInfo.response.clientDataJSON === aCredInfo.response.clientDataJSON, "PublicKeyCredential.Response.ClientDataJSON is SameObject");
     ok(aCredInfo.response.attestationObject === aCredInfo.response.attestationObject, "PublicKeyCredential.Response.AttestationObject is SameObject");
 
-    let clientData = JSON.parse(buffer2string(aCredInfo.response.clientDataJSON));
-    is(clientData.challenge, bytesToBase64UrlSafe(gCredentialChallenge), "Challenge is correct");
+    let clientDataJSON = buffer2string(aCredInfo.response.clientDataJSON);
+    let clientData = JSON.parse(clientDataJSON);
+    let challengeB64 = bytesToBase64UrlSafe(gCredentialChallenge);
+    let expectedClientDataJSON = '{"type":"webauthn.create","challenge":"'+challengeB64+'","origin":"'+window.location.origin+'","crossOrigin":false}';
+    is(clientData.challenge, challengeB64, "Challenge is correct");
     is(clientData.origin, window.location.origin, "Origin is correct");
     is(clientData.type, "webauthn.create", "Type is correct");
+    is(clientDataJSON, expectedClientDataJSON, "clientData is in the correct order for limited verification");
 
     let attestationObj = await webAuthnDecodeCBORAttestation(aCredInfo.response.attestationObject);
     // Make sure the RP ID hash matches what we calculate.
@@ -115,8 +121,8 @@ add_task(async function() {
   }
 
   async function testMakeCredential() {
-    let rp = {id: document.domain, name: "none", icon: "none"};
-    let user = {id: new Uint8Array(), name: "none", icon: "none", displayName: "none"};
+    let rp = {id: document.domain, name: "none"};
+    let user = {id: new Uint8Array(), name: "none", displayName: "none"};
     let param = {type: "public-key", alg: cose_alg_ECDSA_w_SHA256};
     let makeCredentialOptions = {
       rp,
@@ -131,8 +137,8 @@ add_task(async function() {
   }
 
   async function testMakeDuplicate(aCredInfo) {
-    let rp = {id: document.domain, name: "none", icon: "none"};
-    let user = {id: new Uint8Array(), name: "none", icon: "none", displayName: "none"};
+    let rp = {id: document.domain, name: "none"};
+    let user = {id: new Uint8Array(), name: "none", displayName: "none"};
     let param = {type: "public-key", alg: cose_alg_ECDSA_w_SHA256};
     let makeCredentialOptions = {
       rp,

@@ -259,12 +259,12 @@ TEST_P(ReceiveStatisticsTest, GetReceiveStreamDataCounters) {
   ASSERT_TRUE(statistician != NULL);
 
   StreamDataCounters counters = statistician->GetReceiveStreamDataCounters();
-  EXPECT_GT(counters.first_packet_time_ms, -1);
+  EXPECT_TRUE(counters.first_packet_time.IsFinite());
   EXPECT_EQ(1u, counters.transmitted.packets);
 
   receive_statistics_->OnRtpPacket(packet1_);
   counters = statistician->GetReceiveStreamDataCounters();
-  EXPECT_GT(counters.first_packet_time_ms, -1);
+  EXPECT_TRUE(counters.first_packet_time.IsFinite());
   EXPECT_EQ(2u, counters.transmitted.packets);
 }
 
@@ -590,17 +590,18 @@ TEST_P(ReceiveStatisticsTest, StreamDataCounters) {
 
 TEST_P(ReceiveStatisticsTest, LastPacketReceivedTimestamp) {
   clock_.AdvanceTimeMilliseconds(42);
+  packet1_.SetSequenceNumber(100);
   receive_statistics_->OnRtpPacket(packet1_);
-  StreamDataCounters counters = receive_statistics_->GetStatistician(kSsrc1)
-                                    ->GetReceiveStreamDataCounters();
+  RtpReceiveStats counters =
+      receive_statistics_->GetStatistician(kSsrc1)->GetStats();
 
-  EXPECT_EQ(42, counters.last_packet_received_timestamp_ms);
+  EXPECT_EQ(counters.last_packet_received, Timestamp::Millis(42));
 
   clock_.AdvanceTimeMilliseconds(3);
+  packet1_.SetSequenceNumber(101);
   receive_statistics_->OnRtpPacket(packet1_);
-  counters = receive_statistics_->GetStatistician(kSsrc1)
-                 ->GetReceiveStreamDataCounters();
-  EXPECT_EQ(45, counters.last_packet_received_timestamp_ms);
+  counters = receive_statistics_->GetStatistician(kSsrc1)->GetStats();
+  EXPECT_EQ(counters.last_packet_received, Timestamp::Millis(45));
 }
 
 TEST_P(ReceiveStatisticsTest, SimpleJitterComputation) {
@@ -895,6 +896,23 @@ TEST(ReviseJitterTest,
   //          / 16 = 2'757
   // final jitter: 2'757 / 16 = 172
   EXPECT_EQ(GetJitter(*statistics), 172U);
+}
+
+TEST(ReviseJitterTest, TwoPacketsWithMaximumRtpTimestampDifference) {
+  SimulatedClock clock(0);
+  std::unique_ptr<ReceiveStatistics> statistics =
+      ReceiveStatistics::Create(&clock);
+  RtpPacketReceived packet1 = MakeRtpPacket(/*payload_type_frequency=*/90'000,
+                                            /*timestamp=*/0x01234567);
+  RtpPacketReceived packet2 =
+      MakeNextRtpPacket(packet1,
+                        /*payload_type_frequency=*/90'000,
+                        /*timestamp=*/0x81234567);
+  statistics->OnRtpPacket(packet1);
+  statistics->OnRtpPacket(packet2);
+
+  // Expect large jump in RTP timestamp is ignored for jitter calculation.
+  EXPECT_EQ(GetJitter(*statistics), 0U);
 }
 
 }  // namespace

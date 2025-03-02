@@ -44,7 +44,8 @@ LinkStyle::SheetInfo::SheetInfo(
     mozilla::CORSMode aCORSMode, const nsAString& aTitle,
     const nsAString& aMedia, const nsAString& aIntegrity,
     const nsAString& aNonce, HasAlternateRel aHasAlternateRel,
-    IsInline aIsInline, IsExplicitlyEnabled aIsExplicitlyEnabled)
+    IsInline aIsInline, IsExplicitlyEnabled aIsExplicitlyEnabled,
+    FetchPriority aFetchPriority)
     : mContent(aContent),
       mURI(aURI),
       mTriggeringPrincipal(aTriggeringPrincipal),
@@ -54,6 +55,7 @@ LinkStyle::SheetInfo::SheetInfo(
       mMedia(aMedia),
       mIntegrity(aIntegrity),
       mNonce(aNonce),
+      mFetchPriority(aFetchPriority),
       mHasAlternateRel(aHasAlternateRel == HasAlternateRel::Yes),
       mIsInline(aIsInline == IsInline::Yes),
       mIsExplicitlyEnabled(aIsExplicitlyEnabled) {
@@ -323,8 +325,7 @@ Result<LinkStyle::Update, nsresult> LinkStyle::DoUpdateStyleSheet(
     }
 
     // Parse the style sheet.
-    return doc->CSSLoader()->LoadInlineStyle(*info, text, mLineNumber,
-                                             aObserver);
+    return doc->CSSLoader()->LoadInlineStyle(*info, text, aObserver);
   }
   if (thisContent.IsElement()) {
     nsAutoString integrity;
