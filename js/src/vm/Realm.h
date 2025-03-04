@@ -17,14 +17,19 @@
 #include <stddef.h>
 
 #include "builtin/Array.h"
+#include "ds/IdValuePair.h"
 #include "gc/Barrier.h"
+#include "jit/BaselineCompileQueue.h"
 #include "js/GCVariant.h"
 #include "js/RealmOptions.h"
 #include "js/TelemetryTimers.h"
 #include "js/UniquePtr.h"
 #include "vm/ArrayBufferObject.h"
+#include "vm/GuardFuse.h"
+#include "vm/InvalidatingFuse.h"
 #include "vm/JSContext.h"
 #include "vm/PromiseLookup.h"  // js::PromiseLookup
+#include "vm/RealmFuses.h"
 #include "vm/SavedStacks.h"
 #include "wasm/WasmRealm.h"
 
@@ -35,7 +40,7 @@ class LCovRealm;
 }  // namespace coverage
 
 namespace jit {
-class JitRealm;
+class BaselineCompileQueue;
 }  // namespace jit
 
 class AutoRestoreRealmDebugMode;
@@ -130,13 +135,61 @@ class NewPlainObjectWithPropsCache {
  public:
   NewPlainObjectWithPropsCache() { purge(); }
 
-  SharedShape* lookup(IdValuePair* properties, size_t nproperties) const;
+  SharedShape* lookup(Handle<IdValueVector> properties) const;
   void add(SharedShape* shape);
 
   void purge() {
     for (size_t i = 0; i < NumEntries; i++) {
       entries_[i] = nullptr;
     }
+  }
+};
+
+// Cache for Object.assign's fast path for two plain objects. It's used to
+// optimize:
+//
+//   Object.assign(to, from)
+//
+// If the |to| object has shape |emptyToShape_| (shape with no properties) and
+// the |from| object has shape |fromShape_|, we can use |newToShape_| for |to|
+// and copy all (data)) properties from the |from| object.
+//
+// This is a one-entry cache for now. It has a hit rate of > 90% on both
+// Speedometer 2 and Speedometer 3.
+class MOZ_NON_TEMPORARY_CLASS PlainObjectAssignCache {
+  SharedShape* emptyToShape_ = nullptr;
+  SharedShape* fromShape_ = nullptr;
+  SharedShape* newToShape_ = nullptr;
+
+#ifdef DEBUG
+  void assertValid() const;
+#else
+  void assertValid() const {}
+#endif
+
+ public:
+  PlainObjectAssignCache() = default;
+  PlainObjectAssignCache(const PlainObjectAssignCache&) = delete;
+  void operator=(const PlainObjectAssignCache&) = delete;
+
+  SharedShape* lookup(Shape* emptyToShape, Shape* fromShape) const {
+    if (emptyToShape_ == emptyToShape && fromShape_ == fromShape) {
+      assertValid();
+      return newToShape_;
+    }
+    return nullptr;
+  }
+  void fill(SharedShape* emptyToShape, SharedShape* fromShape,
+            SharedShape* newToShape) {
+    emptyToShape_ = emptyToShape;
+    fromShape_ = fromShape;
+    newToShape_ = newToShape;
+    assertValid();
+  }
+  void purge() {
+    emptyToShape_ = nullptr;
+    fromShape_ = nullptr;
+    newToShape_ = nullptr;
   }
 };
 
@@ -176,7 +229,9 @@ struct IteratorHashPolicy {
 };
 
 class DebugEnvironments;
+class NonSyntacticVariablesObject;
 class ObjectWeakMap;
+class WithEnvironmentObject;
 
 // ObjectRealm stores various tables and other state associated with particular
 // objects in a realm. To make sure the correct ObjectRealm is used for an
@@ -216,15 +271,28 @@ class ObjectRealm {
                               size_t* objectMetadataTablesArg,
                               size_t* nonSyntacticLexicalEnvironmentsArg);
 
-  js::NonSyntacticLexicalEnvironmentObject*
+  NonSyntacticLexicalEnvironmentObject*
+  getOrCreateNonSyntacticLexicalEnvironment(
+      JSContext* cx, Handle<NonSyntacticVariablesObject*> enclosing);
+
+  NonSyntacticLexicalEnvironmentObject*
+  getOrCreateNonSyntacticLexicalEnvironment(
+      JSContext* cx, Handle<WithEnvironmentObject*> enclosing);
+
+  NonSyntacticLexicalEnvironmentObject*
+  getOrCreateNonSyntacticLexicalEnvironment(
+      JSContext* cx, Handle<WithEnvironmentObject*> enclosing,
+      Handle<NonSyntacticVariablesObject*> key);
+
+ private:
+  NonSyntacticLexicalEnvironmentObject*
   getOrCreateNonSyntacticLexicalEnvironment(JSContext* cx,
-                                            js::HandleObject enclosing);
-  js::NonSyntacticLexicalEnvironmentObject*
-  getOrCreateNonSyntacticLexicalEnvironment(JSContext* cx,
-                                            js::HandleObject enclosing,
-                                            js::HandleObject key,
-                                            js::HandleObject thisv);
-  js::NonSyntacticLexicalEnvironmentObject* getNonSyntacticLexicalEnvironment(
+                                            HandleObject enclosing,
+                                            HandleObject key,
+                                            HandleObject thisv);
+
+ public:
+  NonSyntacticLexicalEnvironmentObject* getNonSyntacticLexicalEnvironment(
       JSObject* key) const;
 };
 
@@ -259,7 +327,7 @@ class JS::Realm : public JS::shadow::Realm {
 
   JSPrincipals* principals_ = nullptr;
 
-  js::UniquePtr<js::jit::JitRealm> jitRealm_;
+  js::jit::BaselineCompileQueue baselineCompileQueue_;
 
   // Bookkeeping information for debug scope objects.
   js::UniquePtr<js::DebugEnvironments> debugEnvs_;
@@ -323,6 +391,7 @@ class JS::Realm : public JS::shadow::Realm {
     DebuggerObservesAsmJS = 1 << 2,
     DebuggerObservesCoverage = 1 << 3,
     DebuggerObservesWasm = 1 << 4,
+    DebuggerObservesNativeCall = 1 << 5,
   };
   unsigned debugModeBits_ = 0;
   friend class js::AutoRestoreRealmDebugMode;
@@ -330,6 +399,12 @@ class JS::Realm : public JS::shadow::Realm {
   bool isSystem_ = false;
   bool allocatedDuringIncrementalGC_;
   bool initializingGlobal_ = true;
+
+  // Indicates that we are tracing all execution within this realm, i.e.,
+  // recording every entrance into exit from each function, among other
+  // things. See ExecutionTracer.h for where the bulk of this work
+  // happens.
+  bool isTracingExecution_ = false;
 
   js::UniquePtr<js::coverage::LCovRealm> lcovRealm_ = nullptr;
 
@@ -340,7 +415,7 @@ class JS::Realm : public JS::shadow::Realm {
   js::DtoaCache dtoaCache;
   js::NewProxyCache newProxyCache;
   js::NewPlainObjectWithPropsCache newPlainObjectWithPropsCache;
-  js::ArraySpeciesLookup arraySpeciesLookup;
+  js::PlainObjectAssignCache plainObjectAssignCache;
   js::PromiseLookup promiseLookup;
 
   // Last time at which an animation was played for this realm.
@@ -357,6 +432,9 @@ class JS::Realm : public JS::shadow::Realm {
 
   // Counter for shouldCaptureStackForThrow.
   uint16_t numStacksCapturedForThrow_ = 0;
+
+  // Count the number of allocation sites pretenured, for testing purposes.
+  uint16_t numAllocSitesPretenured = 0;
 
 #ifdef DEBUG
   bool firedOnNewGlobalObject = false;
@@ -404,8 +482,7 @@ class JS::Realm : public JS::shadow::Realm {
                               size_t* innerViewsArg,
                               size_t* objectMetadataTablesArg,
                               size_t* savedStacksSet,
-                              size_t* nonSyntacticLexicalEnvironmentsArg,
-                              size_t* jitRealm);
+                              size_t* nonSyntacticLexicalEnvironmentsArg);
 
   JS::Zone* zone() { return zone_; }
   const JS::Zone* zone() const { return zone_; }
@@ -429,6 +506,9 @@ class JS::Realm : public JS::shadow::Realm {
   const JS::RealmBehaviors& behaviors() const { return behaviors_; }
 
   void setNonLive() { behaviors_.setNonLive(); }
+  void setReduceTimerPrecisionCallerType(JS::RTPCallerTypeToken type) {
+    behaviors_.setReduceTimerPrecisionCallerType(type);
+  }
 
   /* Whether to preserve JIT code on non-shrinking GCs. */
   bool preserveJitCode() { return creationOptions_.preserveJitCode(); }
@@ -623,6 +703,30 @@ class JS::Realm : public JS::shadow::Realm {
   void setIsDebuggee();
   void unsetIsDebuggee();
 
+  bool isTracingExecution() { return isTracingExecution_; }
+
+  void enableExecutionTracing() {
+    MOZ_ASSERT(!debuggerObservesCoverage());
+
+    isTracingExecution_ = true;
+    setIsDebuggee();
+    updateDebuggerObservesAllExecution();
+  }
+
+  void disableExecutionTracing() {
+    if (!isTracingExecution_) {
+      return;
+    }
+
+    isTracingExecution_ = false;
+    // updateDebuggerObservesAllExecution always wants isDebuggee to be true,
+    // so we just have weird ordering here to play nicely with it
+    updateDebuggerObservesAllExecution();
+    if (!hasDebuggers()) {
+      unsetIsDebuggee();
+    }
+  }
+
   DebuggerVector& getDebuggers(const JS::AutoRequireNoGC& nogc) {
     return debuggers_;
   };
@@ -663,6 +767,17 @@ class JS::Realm : public JS::shadow::Realm {
     updateDebuggerObservesFlag(DebuggerObservesWasm);
   }
 
+  // True if this compartment's global is a debuggee of some Debugger
+  // object with a live hook that observes native calls.
+  // (has a onNativeCall function registered)
+  bool debuggerObservesNativeCall() const {
+    static const unsigned Mask = IsDebuggee | DebuggerObservesNativeCall;
+    return (debugModeBits_ & Mask) == Mask;
+  }
+  void updateDebuggerObservesNativeCall() {
+    updateDebuggerObservesFlag(DebuggerObservesNativeCall);
+  }
+
   // True if this realm's global is a debuggee of some Debugger object
   // whose collectCoverageInfo flag is true.
   bool debuggerObservesCoverage() const {
@@ -680,6 +795,9 @@ class JS::Realm : public JS::shadow::Realm {
 
   bool shouldCaptureStackForThrow();
 
+  // Returns the locale for this realm. (Pointer must NOT be freed!)
+  const char* getLocale() const;
+
   // Initializes randomNumberGenerator if needed.
   mozilla::non_crypto::XorShift128PlusRNG& getOrCreateRandomNumberGenerator();
 
@@ -690,10 +808,13 @@ class JS::Realm : public JS::shadow::Realm {
 
   mozilla::HashCodeScrambler randomHashCodeScrambler();
 
-  bool ensureJitRealmExists(JSContext* cx);
-  void traceWeakEdgesInJitRealm(JSTracer* trc);
-
-  js::jit::JitRealm* jitRealm() { return jitRealm_.get(); }
+  js::jit::BaselineCompileQueue& baselineCompileQueue() {
+    return baselineCompileQueue_;
+  }
+  static constexpr size_t offsetOfBaselineCompileQueue() {
+    return offsetof(Realm, baselineCompileQueue_);
+  }
+  void removeFromCompileQueue(JSScript* script);
 
   js::DebugEnvironments* debugEnvs() { return debugEnvs_.get(); }
   js::UniquePtr<js::DebugEnvironments>& debugEnvsRef() { return debugEnvs_; }
@@ -714,8 +835,8 @@ class JS::Realm : public JS::shadow::Realm {
   static constexpr size_t offsetOfCompartment() {
     return offsetof(JS::Realm, compartment_);
   }
-  static constexpr size_t offsetOfJitRealm() {
-    return offsetof(JS::Realm, jitRealm_);
+  static constexpr size_t offsetOfAllocationMetadataBuilder() {
+    return offsetof(JS::Realm, allocationMetadataBuilder_);
   }
   static constexpr size_t offsetOfDebugModeBits() {
     return offsetof(JS::Realm, debugModeBits_);
@@ -730,8 +851,17 @@ class JS::Realm : public JS::shadow::Realm {
     return offsetof(JS::Realm, global_);
   }
 
- private:
-  void purgeForOfPicChain();
+  js::RealmFuses realmFuses;
+
+  // Allocation site used by binding code to provide feedback
+  // on allocation heap for DOM allocation functions.
+  //
+  // See  CallIRGenerator::tryAttachCallNative
+  js::gc::AllocSite* localAllocSite = nullptr;
+
+  static size_t offsetOfLocalAllocSite() {
+    return offsetof(JS::Realm, localAllocSite);
+  }
 };
 
 inline js::Handle<js::GlobalObject*> JSContext::global() const {

@@ -16,7 +16,6 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/SharedThreadPool.h"
-#include "mozilla/Telemetry.h"
 #include "mozilla/TimeStamp.h"
 #include "nsDebug.h"
 #include "nsAutoRef.h"
@@ -110,25 +109,33 @@ void OggDemuxer::SandboxDestroy::operator()(rlbox_sandbox_ogg* sandbox) {
 // (https://www.whatwg.org/specs/web-apps/current-
 // work/multipage/embedded-content.html#dom-audiotrack-kind) &
 // (http://wiki.xiph.org/SkeletonHeaders)
-const nsString OggDemuxer::GetKind(const nsCString& aRole) {
+nsString OggDemuxer::GetKind(const nsCString& aRole) {
   if (aRole.Find("audio/main") != -1 || aRole.Find("video/main") != -1) {
     return u"main"_ns;
-  } else if (aRole.Find("audio/alternate") != -1 ||
-             aRole.Find("video/alternate") != -1) {
+  }
+  if (aRole.Find("audio/alternate") != -1 ||
+      aRole.Find("video/alternate") != -1) {
     return u"alternative"_ns;
-  } else if (aRole.Find("audio/audiodesc") != -1) {
+  }
+  if (aRole.Find("audio/audiodesc") != -1) {
     return u"descriptions"_ns;
-  } else if (aRole.Find("audio/described") != -1) {
+  }
+  if (aRole.Find("audio/described") != -1) {
     return u"main-desc"_ns;
-  } else if (aRole.Find("audio/dub") != -1) {
+  }
+  if (aRole.Find("audio/dub") != -1) {
     return u"translation"_ns;
-  } else if (aRole.Find("audio/commentary") != -1) {
+  }
+  if (aRole.Find("audio/commentary") != -1) {
     return u"commentary"_ns;
-  } else if (aRole.Find("video/sign") != -1) {
+  }
+  if (aRole.Find("video/sign") != -1) {
     return u"sign"_ns;
-  } else if (aRole.Find("video/captioned") != -1) {
+  }
+  if (aRole.Find("video/captioned") != -1) {
     return u"captions"_ns;
-  } else if (aRole.Find("video/subtitled") != -1) {
+  }
+  if (aRole.Find("video/subtitled") != -1) {
     return u"subtitles"_ns;
   }
   return u""_ns;
@@ -152,26 +159,23 @@ void OggDemuxer::InitTrack(MessageField* aMsgInfo, TrackInfo* aInfo,
 
 OggDemuxer::OggDemuxer(MediaResource* aResource)
     : mSandbox(CreateSandbox()),
-      mTheoraState(nullptr),
       mVorbisState(nullptr),
       mOpusState(nullptr),
       mFlacState(nullptr),
       mOpusEnabled(MediaDecoder::IsOpusEnabled()),
       mSkeletonState(nullptr),
       mAudioOggState(aResource, mSandbox.get()),
-      mVideoOggState(aResource, mSandbox.get()),
       mIsChained(false),
       mTimedMetadataEvent(nullptr),
       mOnSeekableEvent(nullptr) {
   MOZ_COUNT_CTOR(OggDemuxer);
-  // aResource is referenced through inner m{Audio,Video}OffState members.
+  // aResource is referenced through inner mAudioOffState members.
   DDLINKCHILD("resource", aResource);
 }
 
 OggDemuxer::~OggDemuxer() {
   MOZ_COUNT_DTOR(OggDemuxer);
   Reset(TrackInfo::kAudioTrack);
-  Reset(TrackInfo::kVideoTrack);
 }
 
 void OggDemuxer::SetChainingEvents(TimedMetadataEventProducer* aMetadataEvent,
@@ -184,7 +188,7 @@ bool OggDemuxer::HasAudio() const {
   return mVorbisState || mOpusState || mFlacState;
 }
 
-bool OggDemuxer::HasVideo() const { return mTheoraState; }
+bool OggDemuxer::HasVideo() const { return false; }
 
 bool OggDemuxer::HaveStartTime() const { return mStartTime.isSome(); }
 
@@ -214,19 +218,12 @@ RefPtr<OggDemuxer::InitPromise> OggDemuxer::Init() {
   if (ret != 0) {
     return InitPromise::CreateAndReject(NS_ERROR_OUT_OF_MEMORY, __func__);
   }
-  ret = sandbox_invoke(*mSandbox, ogg_sync_init,
-                       OggSyncState(TrackInfo::kVideoTrack))
-            .unverified_safe_because(RLBOX_OGG_RETURN_CODE_SAFE);
-  if (ret != 0) {
-    return InitPromise::CreateAndReject(NS_ERROR_OUT_OF_MEMORY, __func__);
-  }
   if (ReadMetadata() != NS_OK) {
     return InitPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_METADATA_ERR,
                                         __func__);
   }
 
-  if (!GetNumberTracks(TrackInfo::kAudioTrack) &&
-      !GetNumberTracks(TrackInfo::kVideoTrack)) {
+  if (!GetNumberTracks(TrackInfo::kAudioTrack)) {
     return InitPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_METADATA_ERR,
                                         __func__);
   }
@@ -245,18 +242,14 @@ OggCodecState* OggDemuxer::GetTrackCodecState(
       } else {
         return mFlacState;
       }
-    case TrackInfo::kVideoTrack:
-      return mTheoraState;
     default:
-      return 0;
+      return nullptr;
   }
 }
 
 TrackInfo::TrackType OggDemuxer::GetCodecStateType(
     OggCodecState* aState) const {
   switch (aState->GetType()) {
-    case OggCodecState::TYPE_THEORA:
-      return TrackInfo::kVideoTrack;
     case OggCodecState::TYPE_OPUS:
     case OggCodecState::TYPE_VORBIS:
     case OggCodecState::TYPE_FLAC:
@@ -270,8 +263,6 @@ uint32_t OggDemuxer::GetNumberTracks(TrackInfo::TrackType aType) const {
   switch (aType) {
     case TrackInfo::kAudioTrack:
       return HasAudio() ? 1 : 0;
-    case TrackInfo::kVideoTrack:
-      return HasVideo() ? 1 : 0;
     default:
       return 0;
   }
@@ -282,8 +273,6 @@ UniquePtr<TrackInfo> OggDemuxer::GetTrackInfo(TrackInfo::TrackType aType,
   switch (aType) {
     case TrackInfo::kAudioTrack:
       return mInfo.mAudio.Clone();
-    case TrackInfo::kVideoTrack:
-      return mInfo.mVideo.Clone();
     default:
       return nullptr;
   }
@@ -342,9 +331,6 @@ bool OggDemuxer::ReadHeaders(TrackInfo::TrackType aType,
 
 void OggDemuxer::BuildSerialList(nsTArray<uint32_t>& aTracks) {
   // Obtaining seek index information for currently active bitstreams.
-  if (HasVideo()) {
-    aTracks.AppendElement(mTheoraState->mSerial);
-  }
   if (HasAudio()) {
     if (mVorbisState) {
       aTracks.AppendElement(mVorbisState->mSerial);
@@ -362,8 +348,6 @@ void OggDemuxer::SetupTarget(OggCodecState** aSavedState,
 
   if (aNewState->GetInfo()->GetAsAudioInfo()) {
     mInfo.mAudio = *aNewState->GetInfo()->GetAsAudioInfo();
-  } else {
-    mInfo.mVideo = *aNewState->GetInfo()->GetAsVideoInfo();
   }
   *aSavedState = aNewState;
 }
@@ -372,8 +356,8 @@ void OggDemuxer::SetupTargetSkeleton() {
   // Setup skeleton related information after mVorbisState & mTheroState
   // being set (if they exist).
   if (mSkeletonState) {
-    if (!HasAudio() && !HasVideo()) {
-      // We have a skeleton track, but no audio or video, may as well disable
+    if (!HasAudio()) {
+      // We have a skeleton track, but no audio, may as well disable
       // the skeleton, we can't do anything useful with this media.
       OGG_DEBUG("Deactivating skeleton stream %" PRIu32,
                 mSkeletonState->mSerial);
@@ -401,7 +385,7 @@ void OggDemuxer::SetupMediaTracksInfo(const nsTArray<uint32_t>& aSerials) {
   // 1. Retrieve a codecState from mCodecStore by this serial number.
   // 2. Retrieve a message field from mMsgFieldStore by this serial number.
   // 3. For now, skip if the serial number refers to a non-primary bitstream.
-  // 4. Setup track and other audio/video related information per different
+  // 4. Setup track and other audio related information per different
   // types.
   for (size_t i = 0; i < aSerials.Length(); i++) {
     uint32_t serial = aSerials[i];
@@ -414,9 +398,6 @@ void OggDemuxer::SetupMediaTracksInfo(const nsTArray<uint32_t>& aSerials) {
 
     OggCodecState* primeState = nullptr;
     switch (codecState->GetType()) {
-      case OggCodecState::TYPE_THEORA:
-        primeState = mTheoraState;
-        break;
       case OggCodecState::TYPE_VORBIS:
         primeState = mVorbisState;
         break;
@@ -430,15 +411,10 @@ void OggDemuxer::SetupMediaTracksInfo(const nsTArray<uint32_t>& aSerials) {
         break;
     }
     if (primeState && primeState == codecState) {
-      bool isAudio = primeState->GetInfo()->GetAsAudioInfo();
       if (msgInfo) {
-        InitTrack(
-            msgInfo,
-            isAudio ? static_cast<TrackInfo*>(&mInfo.mAudio) : &mInfo.mVideo,
-            true);
+        InitTrack(msgInfo, static_cast<TrackInfo*>(&mInfo.mAudio), true);
       }
-      FillTags(isAudio ? static_cast<TrackInfo*>(&mInfo.mAudio) : &mInfo.mVideo,
-               primeState->GetTags());
+      FillTags(static_cast<TrackInfo*>(&mInfo.mAudio), primeState->GetTags());
     }
   }
 }
@@ -464,73 +440,61 @@ nsresult OggDemuxer::ReadMetadata() {
   // and THEN we can run SetupTarget*
   // @fixme fixme
 
-  TrackInfo::TrackType tracks[2] = {TrackInfo::kAudioTrack,
-                                    TrackInfo::kVideoTrack};
-
   nsTArray<OggCodecState*> bitstreams;
   nsTArray<uint32_t> serials;
 
-  for (uint32_t i = 0; i < ArrayLength(tracks); i++) {
-    tainted_ogg<ogg_page*> page = mSandbox->malloc_in_sandbox<ogg_page>();
-    if (!page) {
-      return NS_ERROR_OUT_OF_MEMORY;
+  tainted_ogg<ogg_page*> page = mSandbox->malloc_in_sandbox<ogg_page>();
+  if (!page) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
+  auto clean_page = MakeScopeExit([&] { mSandbox->free_in_sandbox(page); });
+
+  bool readAllBOS = false;
+  while (!readAllBOS) {
+    if (!ReadOggPage(TrackInfo::kAudioTrack, page.to_opaque())) {
+      // Some kind of error...
+      OGG_DEBUG("OggDemuxer::ReadOggPage failed? leaving ReadMetadata...");
+      return NS_ERROR_FAILURE;
     }
-    auto clean_page = MakeScopeExit([&] { mSandbox->free_in_sandbox(page); });
 
-    bool readAllBOS = false;
-    while (!readAllBOS) {
-      if (!ReadOggPage(tracks[i], page.to_opaque())) {
-        // Some kind of error...
-        OGG_DEBUG("OggDemuxer::ReadOggPage failed? leaving ReadMetadata...");
-        return NS_ERROR_FAILURE;
-      }
+    uint32_t serial = static_cast<uint32_t>(
+        sandbox_invoke(*mSandbox, ogg_page_serialno, page)
+            .unverified_safe_because(RLBOX_OGG_PAGE_SERIAL_REASON));
 
-      uint32_t serial = static_cast<uint32_t>(
-          sandbox_invoke(*mSandbox, ogg_page_serialno, page)
-              .unverified_safe_because(RLBOX_OGG_PAGE_SERIAL_REASON));
-
-      if (!sandbox_invoke(*mSandbox, ogg_page_bos, page)
-               .unverified_safe_because(
-                   "If this value is incorrect, it would mean not all "
-                   "bitstreams are read. This does not affect the memory "
-                   "safety of the renderer.")) {
-        // We've encountered a non Beginning Of Stream page. No more BOS pages
-        // can follow in this Ogg segment, so there will be no other bitstreams
-        // in the Ogg (unless it's invalid).
-        readAllBOS = true;
-      } else if (!mCodecStore.Contains(serial)) {
-        // We've not encountered a stream with this serial number before. Create
-        // an OggCodecState to demux it, and map that to the OggCodecState
-        // in mCodecStates.
-        OggCodecState* const codecState = mCodecStore.Add(
-            serial,
-            OggCodecState::Create(mSandbox.get(), page.to_opaque(), serial));
-        bitstreams.AppendElement(codecState);
-        serials.AppendElement(serial);
-      }
-      if (NS_FAILED(DemuxOggPage(tracks[i], page.to_opaque()))) {
-        return NS_ERROR_FAILURE;
-      }
+    if (!sandbox_invoke(*mSandbox, ogg_page_bos, page)
+             .unverified_safe_because(
+                 "If this value is incorrect, it would mean not all "
+                 "bitstreams are read. This does not affect the memory "
+                 "safety of the renderer.")) {
+      // We've encountered a non Beginning Of Stream page. No more BOS pages
+      // can follow in this Ogg segment, so there will be no other bitstreams
+      // in the Ogg (unless it's invalid).
+      readAllBOS = true;
+    } else if (!mCodecStore.Contains(serial)) {
+      // We've not encountered a stream with this serial number before. Create
+      // an OggCodecState to demux it, and map that to the OggCodecState
+      // in mCodecStates.
+      OggCodecState* const codecState = mCodecStore.Add(
+          serial,
+          OggCodecState::Create(mSandbox.get(), page.to_opaque(), serial));
+      bitstreams.AppendElement(codecState);
+      serials.AppendElement(serial);
+    }
+    if (NS_FAILED(DemuxOggPage(TrackInfo::kAudioTrack, page.to_opaque()))) {
+      return NS_ERROR_FAILURE;
     }
   }
 
   // We've read all BOS pages, so we know the streams contained in the media.
-  // 1. Find the first encountered Theora/Vorbis/Opus bitstream, and configure
+  // 1. Find the first encountered Vorbis/Opus bitstream, and configure
   //    it as the target A/V bitstream.
   // 2. Deactivate the rest of bitstreams for now, until we have MediaInfo
   //    support multiple track infos.
   for (uint32_t i = 0; i < bitstreams.Length(); ++i) {
     OggCodecState* s = bitstreams[i];
     if (s) {
-      if (s->GetType() == OggCodecState::TYPE_THEORA &&
-          ReadHeaders(TrackInfo::kVideoTrack, s)) {
-        if (!mTheoraState) {
-          SetupTarget(&mTheoraState, s);
-        } else {
-          s->Deactivate();
-        }
-      } else if (s->GetType() == OggCodecState::TYPE_VORBIS &&
-                 ReadHeaders(TrackInfo::kAudioTrack, s)) {
+      if (s->GetType() == OggCodecState::TYPE_VORBIS &&
+          ReadHeaders(TrackInfo::kAudioTrack, s)) {
         if (!mVorbisState) {
           SetupTarget(&mVorbisState, s);
         } else {
@@ -569,7 +533,7 @@ nsresult OggDemuxer::ReadMetadata() {
   SetupTargetSkeleton();
   SetupMediaTracksInfo(serials);
 
-  if (HasAudio() || HasVideo()) {
+  if (HasAudio()) {
     TimeUnit startTime = TimeUnit::Invalid();
     FindStartTime(startTime);
     if (startTime.IsValid()) {
@@ -587,25 +551,29 @@ nsresult OggDemuxer::ReadMetadata() {
 
       TimeUnit endTime = RangeEndTime(TrackInfo::kAudioTrack, length);
 
-      if (endTime.IsValid()) {
+      if (endTime.IsValid() && endTime.IsPositive()) {
         mInfo.mUnadjustedMetadataEndTime.emplace(endTime);
-        mInfo.mMetadataDuration.emplace(endTime -
-                                        mStartTime.refOr(TimeUnit::Zero()));
-        OGG_DEBUG("Got Ogg duration from seeking to end %s",
-                  endTime.ToString().get());
+        TimeUnit computedDuration =
+            endTime - mStartTime.refOr(TimeUnit::Zero());
+        if (computedDuration.IsPositive()) {
+          mInfo.mMetadataDuration.emplace(computedDuration);
+          OGG_DEBUG("Got Ogg duration from seeking to end %s",
+                    computedDuration.ToString().get());
+        } else {
+          OGG_DEBUG("Ignoring incorect start time in metadata");
+          mStartTime.reset();
+        }
       }
     }
     if (mInfo.mMetadataDuration.isNothing()) {
+      OGG_DEBUG("Couldn't determine OGG file duration.");
       mInfo.mMetadataDuration.emplace(TimeUnit::FromInfinity());
     }
     if (HasAudio()) {
       mInfo.mAudio.mDuration = mInfo.mMetadataDuration.ref();
     }
-    if (HasVideo()) {
-      mInfo.mVideo.mDuration = mInfo.mMetadataDuration.ref();
-    }
   } else {
-    OGG_DEBUG("no audio or video tracks");
+    OGG_DEBUG("no audio tracks");
     return NS_ERROR_FAILURE;
   }
 
@@ -632,7 +600,7 @@ bool OggDemuxer::ReadOggChain(const media::TimeUnit& aLastEndTime) {
   FlacState* newFlacState = nullptr;
   UniquePtr<MetadataTags> tags;
 
-  if (HasVideo() || HasSkeleton() || !HasAudio()) {
+  if (HasSkeleton() || !HasAudio()) {
     return false;
   }
 
@@ -758,9 +726,7 @@ bool OggDemuxer::ReadOggChain(const media::TimeUnit& aLastEndTime) {
 }
 
 OggDemuxer::OggStateContext& OggDemuxer::OggState(TrackInfo::TrackType aType) {
-  if (aType == TrackInfo::kVideoTrack) {
-    return mVideoOggState;
-  }
+  MOZ_ASSERT(aType != TrackInfo::kVideoTrack);
   return mAudioOggState;
 }
 
@@ -841,12 +807,7 @@ nsresult OggDemuxer::DemuxOggPage(TrackInfo::TrackType aType,
   return NS_OK;
 }
 
-bool OggDemuxer::IsSeekable() const {
-  if (mIsChained) {
-    return false;
-  }
-  return true;
-}
+bool OggDemuxer::IsSeekable() const { return !mIsChained; }
 
 UniquePtr<EncryptionInfo> OggDemuxer::GetCrypto() { return nullptr; }
 
@@ -901,11 +862,11 @@ TimeIntervals OggDemuxer::GetBuffered(TrackInfo::TrackType aType) {
     return TimeIntervals::Invalid();
   }
   TimeIntervals buffered;
-  // HasAudio and HasVideo are not used here as they take a lock and cause
+  // HasAudio is not used here as they take a lock and cause
   // a deadlock. Accessing mInfo doesn't require a lock - it doesn't change
   // after metadata is read.
   if (!mInfo.HasValidMedia()) {
-    // No need to search through the file if there are no audio or video tracks
+    // No need to search through the file if there are no audio tracks
     return buffered;
   }
 
@@ -954,7 +915,8 @@ TimeIntervals OggDemuxer::GetBuffered(TrackInfo::TrackType aType) {
                    startOffset, endOffset, page, discard);
       if (pageSyncResult == PAGE_SYNC_ERROR) {
         return TimeIntervals::Invalid();
-      } else if (pageSyncResult == PAGE_SYNC_END_OF_RANGE) {
+      }
+      if (pageSyncResult == PAGE_SYNC_END_OF_RANGE) {
         // Hit the end of range without reading a page, give up trying to
         // find a start time for this buffered range, skip onto the next one.
         break;
@@ -997,14 +959,9 @@ TimeIntervals OggDemuxer::GetBuffered(TrackInfo::TrackType aType) {
                      .unverified_safe_because(time_interval_reason)) {
         startTime = mFlacState->Time(granulepos);
         MOZ_ASSERT(startTime.IsPositive(), "Must have positive start time");
-      } else if (aType == TrackInfo::kVideoTrack && mTheoraState &&
-                 (serial == mTheoraState->mSerial)
-                     .unverified_safe_because(time_interval_reason)) {
-        startTime = mTheoraState->Time(granulepos);
-        MOZ_ASSERT(startTime.IsPositive(), "Must have positive start time");
       } else if (mCodecStore.Contains(
                      serial.unverified_safe_because(time_interval_reason))) {
-        // Stream is not the theora or vorbis stream we're playing,
+        // Stream is not the vorbis stream we're playing,
         // but is one that we have header data for.
 
         bool failedPageLenVerify = false;
@@ -1046,29 +1003,19 @@ TimeIntervals OggDemuxer::GetBuffered(TrackInfo::TrackType aType) {
 void OggDemuxer::FindStartTime(TimeUnit& aOutStartTime) {
   // Extract the start times of the bitstreams in order to calculate
   // the duration.
-  TimeUnit videoStartTime = TimeUnit::FromInfinity();
   TimeUnit audioStartTime = TimeUnit::FromInfinity();
 
-  if (HasVideo()) {
-    FindStartTime(TrackInfo::kVideoTrack, videoStartTime);
-    if (!videoStartTime.IsPosInf()) {
-      OGG_DEBUG("OggDemuxer::FindStartTime() video=%s",
-                videoStartTime.ToString().get());
-      mVideoOggState.mStartTime = Some(videoStartTime);
-    }
-  }
   if (HasAudio()) {
     FindStartTime(TrackInfo::kAudioTrack, audioStartTime);
-    if (!audioStartTime.IsPosInf()) {
+    if (!audioStartTime.IsPosInf() && audioStartTime.IsValid()) {
       OGG_DEBUG("OggDemuxer::FindStartTime() audio=%s",
                 audioStartTime.ToString().get());
       mAudioOggState.mStartTime = Some(audioStartTime);
     }
   }
 
-  TimeUnit startTime = std::min(videoStartTime, audioStartTime);
-  if (!startTime.IsPosInf()) {
-    aOutStartTime = startTime;
+  if (!audioStartTime.IsPosInf()) {
+    aOutStartTime = audioStartTime;
   }
 }
 
@@ -1108,7 +1055,7 @@ nsresult OggDemuxer::SeekInternal(TrackInfo::TrackType aType,
     res = Reset(aType);
     NS_ENSURE_SUCCESS(res, res);
   } else {
-    // TODO: This may seek back unnecessarily far in the video, but we don't
+    // TODO: This may seek back unnecessarily far in the media, but we don't
     // have a way of asking Skeleton to seek to a different target for each
     // stream yet. Using adjustedTarget here is at least correct, if slow.
     IndexedSeekResult sres = SeekToKeyframeUsingIndex(aType, adjustedTarget);
@@ -1165,7 +1112,12 @@ nsresult OggDemuxer::SeekInternal(TrackInfo::TrackType aType,
       continue;
     }
     TimeUnit startTstamp = state->PacketStartTime(packet);
-    if (foundKeyframe && startTstamp > adjustedTarget) {
+    if (!startTstamp.IsValid()) {
+      OGG_DEBUG("Invalid tstamp on packet %p (granulepos: %" PRId64 ")", packet,
+                packet->granulepos);
+    }
+    if (foundKeyframe && startTstamp.IsValid() &&
+        startTstamp > adjustedTarget) {
       break;
     }
     if (state->IsKeyframe(packet)) {
@@ -1174,13 +1126,14 @@ nsresult OggDemuxer::SeekInternal(TrackInfo::TrackType aType,
       tempPackets.Erase();
       foundKeyframe = true;
     }
-    if (foundKeyframe && startTstamp == adjustedTarget) {
+    if (foundKeyframe && startTstamp.IsValid() &&
+        startTstamp == adjustedTarget) {
       break;
     }
     if (foundKeyframe) {
       tempPackets.Append(state->PacketOut());
     } else {
-      // Discard video packets before the first keyframe.
+      // Discard media packets before the first keyframe.
       Unused << state->PacketOut();
     }
   }
@@ -1357,7 +1310,7 @@ OggDemuxer::PageSyncResult OggDemuxer::PageSync(
             result > (aEndOffset - aOffset) || result < 0) {
           failedSkippedBytesVerify = true;
         } else {
-          aSkippedBytes = result;
+          aSkippedBytes = AssertedCast<int>(result);
         }
       });
       if (failedSkippedBytesVerify) {
@@ -1400,10 +1353,8 @@ RefPtr<OggTrackDemuxer::SeekPromise> OggTrackDemuxer::Seek(
     mQueuedSample = sample;
 
     return SeekPromise::CreateAndResolve(seekTime, __func__);
-  } else {
-    return SeekPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_DEMUXER_ERR,
-                                        __func__);
   }
+  return SeekPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_DEMUXER_ERR, __func__);
 }
 
 RefPtr<MediaRawData> OggTrackDemuxer::NextSample() {
@@ -1475,13 +1426,15 @@ RefPtr<MediaRawData> OggTrackDemuxer::NextSample() {
       data->mOriginalPresentationWindow =
           Some(TimeInterval{data->mTime, data->GetEndTime()});
       data->mDuration -= toTrim;
+      if (data->mDuration.IsNegative()) {
+        data->mDuration = TimeUnit::Zero(data->mTime);
+      }
     }
   }
 
-  OGG_DEBUG("OGG packet demuxed: [%s,%s] (duration: %s, type: %s)",
+  OGG_DEBUG("OGG packet demuxed: [%s,%s] (duration: %s)",
             data->mTime.ToString().get(), data->GetEndTime().ToString().get(),
-            data->mDuration.ToString().get(),
-            mType == TrackInfo::kAudioTrack ? "audio" : "video");
+            data->mDuration.ToString().get());
 
   return data;
 }
@@ -1510,9 +1463,8 @@ RefPtr<OggTrackDemuxer::SamplesPromise> OggTrackDemuxer::GetSamples(
   if (samples->GetSamples().IsEmpty()) {
     return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_END_OF_STREAM,
                                            __func__);
-  } else {
-    return SamplesPromise::CreateAndResolve(samples, __func__);
   }
+  return SamplesPromise::CreateAndResolve(samples, __func__);
 }
 
 void OggTrackDemuxer::Reset() {
@@ -1538,11 +1490,9 @@ OggTrackDemuxer::SkipToNextRandomAccessPoint(const TimeUnit& aTimeThreshold) {
     OGG_DEBUG("next sample: %f (parsed: %d)", sample->mTime.ToSeconds(),
               parsed);
     return SkipAccessPointPromise::CreateAndResolve(parsed, __func__);
-  } else {
-    SkipFailureHolder failure(NS_ERROR_DOM_MEDIA_END_OF_STREAM, parsed);
-    return SkipAccessPointPromise::CreateAndReject(std::move(failure),
-                                                   __func__);
   }
+  SkipFailureHolder failure(NS_ERROR_DOM_MEDIA_END_OF_STREAM, parsed);
+  return SkipAccessPointPromise::CreateAndReject(std::move(failure), __func__);
 }
 
 TimeIntervals OggTrackDemuxer::GetBuffered() {
@@ -1604,7 +1554,7 @@ struct nsDemuxerAutoOggSyncState {
     mSandbox.free_in_sandbox(mState);
   }
   rlbox_sandbox_ogg& mSandbox;
-  tainted_ogg<ogg_sync_state*> mState;
+  tainted_ogg<ogg_sync_state*> mState{};
 };
 
 TimeUnit OggDemuxer::RangeEndTime(TrackInfo::TrackType aType,
@@ -1795,7 +1745,7 @@ nsresult OggDemuxer::GetSeekRanges(TrackInfo::TrackType aType,
   NS_ENSURE_SUCCESS(res, res);
 
   for (uint32_t index = 0; index < cached.Length(); index++) {
-    auto& range = cached[index];
+    const auto& range = cached[index];
     TimeUnit startTime = TimeUnit::Invalid();
     TimeUnit endTime = TimeUnit::Invalid();
     if (NS_FAILED(Reset(aType))) {
@@ -1857,39 +1807,14 @@ nsresult OggDemuxer::SeekInBufferedRange(TrackInfo::TrackType aType,
                                          const SeekRange& aRange) {
   OGG_DEBUG("Seeking in buffered data to %s using bisection search",
             aTarget.ToString().get());
-  if (aType == TrackInfo::kVideoTrack || aAdjustedTarget >= aTarget) {
+  if (aAdjustedTarget >= aTarget) {
     // We know the exact byte range in which the target must lie. It must
     // be buffered in the media cache. Seek there.
-    nsresult res = SeekBisection(aType, aTarget, aRange, TimeUnit::Zero());
-    if (NS_FAILED(res) || aType != TrackInfo::kVideoTrack) {
-      return res;
-    }
-
-    // We have an active Theora bitstream. Peek the next Theora frame, and
-    // extract its keyframe's time.
-    DemuxUntilPacketAvailable(aType, mTheoraState);
-    ogg_packet* packet = mTheoraState->PacketPeek();
-    if (packet && !mTheoraState->IsKeyframe(packet)) {
-      // First post-seek frame isn't a keyframe, seek back to previous keyframe,
-      // otherwise we'll get visual artifacts.
-      MOZ_ASSERT(packet->granulepos != -1, "Must have a granulepos");
-      int shift = mTheoraState->KeyFrameGranuleJobs();
-      int64_t keyframeGranulepos = (packet->granulepos >> shift) << shift;
-      TimeUnit keyframeTime = mTheoraState->StartTime(keyframeGranulepos);
-      SEEK_LOG(LogLevel::Debug,
-               ("Keyframe for %lld is at %lld, seeking back to it", frameTime,
-                keyframeTime));
-      aAdjustedTarget = std::min(aAdjustedTarget, keyframeTime);
-    }
+    return SeekBisection(aType, aTarget, aRange, TimeUnit::Zero());
   }
-
-  nsresult res = NS_OK;
-  if (aAdjustedTarget < aTarget) {
-    SeekRange k = SelectSeekRange(aType, aRanges, aAdjustedTarget, aStartTime,
-                                  aEndTime, false);
-    res = SeekBisection(aType, aAdjustedTarget, k, OGG_SEEK_FUZZ_USECS);
-  }
-  return res;
+  SeekRange k = SelectSeekRange(aType, aRanges, aAdjustedTarget, aStartTime,
+                                aEndTime, false);
+  return SeekBisection(aType, aAdjustedTarget, k, OGG_SEEK_FUZZ_USECS);
 }
 
 nsresult OggDemuxer::SeekInUnbuffered(TrackInfo::TrackType aType,
@@ -1900,23 +1825,8 @@ nsresult OggDemuxer::SeekInUnbuffered(TrackInfo::TrackType aType,
   OGG_DEBUG("Seeking in unbuffered data to %s using bisection search",
             aTarget.ToString().get());
 
-  // If we've got an active Theora bitstream, determine the maximum possible
-  // time in usecs which a keyframe could be before a given interframe. We
-  // subtract this from our seek target, seek to the new target, and then
-  // will decode forward to the original seek target. We should encounter a
-  // keyframe in that interval. This prevents us from needing to run two
-  // bisections; one for the seek target frame, and another to find its
-  // keyframe. It's usually faster to just download this extra data, rather
-  // tham perform two bisections to find the seek target's keyframe. We
-  // don't do this offsetting when seeking in a buffered range,
-  // as the extra decoding causes a noticeable speed hit when all the data
-  // is buffered (compared to just doing a bisection to exactly find the
-  // keyframe).
   TimeUnit keyframeOffset = TimeUnit::Zero();
-  if (aType == TrackInfo::kVideoTrack && mTheoraState) {
-    keyframeOffset = mTheoraState->MaxKeyframeOffset();
-  }
-  // Add in the Opus pre-roll if necessary, as well.
+  // Add in the Opus pre-roll if necessary.
   if (aType == TrackInfo::kAudioTrack && mOpusState) {
     keyframeOffset = std::max(keyframeOffset, OGG_SEEK_OPUS_PREROLL);
   }
@@ -2027,11 +1937,7 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
           interval = 0;
           break;
         }
-
         backsteps = std::min(backsteps + 1, maxBackStep);
-        // We reset mustBackoff. If we still need to backoff further, it will
-        // be set to true again.
-        mustBackoff = false;
       } else {
         backsteps = 0;
       }
@@ -2054,7 +1960,7 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
       hops++;
 
       // Locate the next page after our seek guess, and then figure out the
-      // granule time of the audio and video bitstreams there. We can then
+      // granule time of the audio bitstreams there. We can then
       // make a bisection decision based on our location in the media.
       PageSyncResult pageSyncResult =
           PageSync(mSandbox.get(), Resource(aType), OggSyncState(aType), false,
@@ -2083,10 +1989,9 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
         return NS_ERROR_FAILURE;
       }
 
-      // Read pages until we can determine the granule time of the audio and
-      // video bitstream.
+      // Read pages until we can determine the granule time of the audio
+      // bitstream.
       ogg_int64_t audioTime = -1;
-      ogg_int64_t videoTime = -1;
       do {
         // Add the page to its codec state, determine its granule time.
         uint32_t serial = static_cast<uint32_t>(
@@ -2120,11 +2025,6 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
             }
           }
 
-          if (aType == TrackInfo::kVideoTrack && granulepos > 0 &&
-              serial == mTheoraState->mSerial && videoTime == -1) {
-            videoTime = mTheoraState->Time(granulepos).ToMicroseconds();
-          }
-
           if (pageOffset + pageLength >= endOffset) {
             // Hit end of readable data.
             break;
@@ -2134,11 +2034,9 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
           break;
         }
 
-      } while ((aType == TrackInfo::kAudioTrack && audioTime == -1) ||
-               (aType == TrackInfo::kVideoTrack && videoTime == -1));
+      } while (aType == TrackInfo::kAudioTrack && audioTime == -1);
 
-      if ((aType == TrackInfo::kAudioTrack && audioTime == -1) ||
-          (aType == TrackInfo::kVideoTrack && videoTime == -1)) {
+      if (aType == TrackInfo::kAudioTrack && audioTime == -1) {
         // We don't have timestamps for all active tracks...
         if (pageOffset == startOffset + startLength &&
             pageOffset + pageLength >= endOffset) {
@@ -2159,7 +2057,7 @@ nsresult OggDemuxer::SeekBisection(TrackInfo::TrackType aType,
 
       // We've found appropriate time stamps here. Proceed to bisect
       // the search space.
-      granuleTime = aType == TrackInfo::kAudioTrack ? audioTime : videoTime;
+      granuleTime = audioTime;
       MOZ_ASSERT(granuleTime > 0, "Must get a granuletime");
       break;
     }  // End of "until we determine time at guess offset" loop.

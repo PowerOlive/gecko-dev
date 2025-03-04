@@ -46,6 +46,7 @@ class WebGLChild final : public PWebGLChild, public SupportsWeakPtr {
   Maybe<Range<uint8_t>> AllocPendingCmdBytes(size_t,
                                              size_t fyiAlignmentOverhead);
   void FlushPendingCmds();
+  void Destroy();
   void ActorDestroy(ActorDestroyReason why) override;
 
   FlushedCmdInfo& GetFlushedCmdInfo() { return mFlushedCmdInfo; }
@@ -57,6 +58,7 @@ class WebGLChild final : public PWebGLChild, public SupportsWeakPtr {
  public:
   mozilla::ipc::IPCResult RecvJsWarning(const std::string&) const;
   mozilla::ipc::IPCResult RecvOnContextLoss(webgl::ContextLossReason) const;
+  mozilla::ipc::IPCResult RecvOnSyncComplete(webgl::ObjectId) const;
 };
 
 }  // namespace dom

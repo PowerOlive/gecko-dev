@@ -33,7 +33,7 @@ add_task(async function () {
   );
 
   is(
-    customFormattedElement.querySelector(".arrow"),
+    customFormattedElement.querySelector(".theme-twisty"),
     null,
     "The expression is not expandable…"
   );
@@ -78,7 +78,7 @@ add_task(async function () {
   );
   const index = 4;
   is(
-    getScopeLabel(dbg, index),
+    getScopeNodeLabel(dbg, index),
     VARIABLE_NAME,
     `Got '${VARIABLE_NAME}' at the expected position`
   );

@@ -46,7 +46,12 @@
           "processcpu",
           "power",
           "responsiveness",
-          "cpufreq"
+          "cpufreq",
+          "bandwidth",
+          "memory",
+          "tracing",
+          "sandbox",
+          "flows"
         ]
       },
       {

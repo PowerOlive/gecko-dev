@@ -23,6 +23,7 @@
 #include "mozilla/StoragePrincipalHelper.h"
 #include "mozilla/TaskQueue.h"
 #include "mozilla/Telemetry.h"
+#include "nsAboutProtocolUtils.h"
 #include "nsBufferedStreams.h"
 #include "nsCategoryCache.h"
 #include "nsComponentManagerUtils.h"
@@ -96,9 +97,12 @@
 #include "nsSocketTransportService2.h"
 #include "nsViewSourceHandler.h"
 #include "nsJARURI.h"
-#include "nsIconURI.h"
+#ifndef XP_IOS
+#  include "nsIconURI.h"
+#endif
 #include "nsAboutProtocolHandler.h"
 #include "nsResProtocolHandler.h"
+#include "mozilla/net/MozSrcProtocolHandler.h"
 #include "mozilla/net/ExtensionProtocolHandler.h"
 #include "mozilla/net/PageThumbProtocolHandler.h"
 #include "mozilla/net/SFVService.h"
@@ -126,7 +130,8 @@ using mozilla::dom::ServiceWorkerDescriptor;
 #define MAX_RECURSION_COUNT 50
 
 already_AddRefed<nsIIOService> do_GetIOService(nsresult* error /* = 0 */) {
-  nsCOMPtr<nsIIOService> io = mozilla::components::IO::Service();
+  nsCOMPtr<nsIIOService> io;
+  io = mozilla::components::IO::Service();
   if (error) *error = io ? NS_OK : NS_ERROR_FAILURE;
   return io.forget();
 }
@@ -381,8 +386,7 @@ nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
                        nsIInterfaceRequestor* aCallbacks /* = nullptr */,
                        nsLoadFlags aLoadFlags /* = nsIRequest::LOAD_NORMAL */,
                        nsIIOService* aIoService /* = nullptr */,
-                       uint32_t aSandboxFlags /* = 0 */,
-                       bool aSkipCheckForBrokenURLOrZeroSized /* = false */) {
+                       uint32_t aSandboxFlags /* = 0 */) {
   return NS_NewChannelInternal(
       outChannel, aUri,
       nullptr,  // aLoadingNode,
@@ -390,8 +394,7 @@ nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
       nullptr,  // aTriggeringPrincipal
       Maybe<ClientInfo>(), Maybe<ServiceWorkerDescriptor>(), aSecurityFlags,
       aContentPolicyType, aCookieJarSettings, aPerformanceStorage, aLoadGroup,
-      aCallbacks, aLoadFlags, aIoService, aSandboxFlags,
-      aSkipCheckForBrokenURLOrZeroSized);
+      aCallbacks, aLoadFlags, aIoService, aSandboxFlags);
 }
 
 nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
@@ -406,22 +409,21 @@ nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
                        nsIInterfaceRequestor* aCallbacks /* = nullptr */,
                        nsLoadFlags aLoadFlags /* = nsIRequest::LOAD_NORMAL */,
                        nsIIOService* aIoService /* = nullptr */,
-                       uint32_t aSandboxFlags /* = 0 */,
-                       bool aSkipCheckForBrokenURLOrZeroSized /* = false */) {
+                       uint32_t aSandboxFlags /* = 0 */) {
   AssertLoadingPrincipalAndClientInfoMatch(
       aLoadingPrincipal, aLoadingClientInfo, aContentPolicyType);
 
   Maybe<ClientInfo> loadingClientInfo;
   loadingClientInfo.emplace(aLoadingClientInfo);
 
-  return NS_NewChannelInternal(
-      outChannel, aUri,
-      nullptr,  // aLoadingNode,
-      aLoadingPrincipal,
-      nullptr,  // aTriggeringPrincipal
-      loadingClientInfo, aController, aSecurityFlags, aContentPolicyType,
-      aCookieJarSettings, aPerformanceStorage, aLoadGroup, aCallbacks,
-      aLoadFlags, aIoService, aSandboxFlags, aSkipCheckForBrokenURLOrZeroSized);
+  return NS_NewChannelInternal(outChannel, aUri,
+                               nullptr,  // aLoadingNode,
+                               aLoadingPrincipal,
+                               nullptr,  // aTriggeringPrincipal
+                               loadingClientInfo, aController, aSecurityFlags,
+                               aContentPolicyType, aCookieJarSettings,
+                               aPerformanceStorage, aLoadGroup, aCallbacks,
+                               aLoadFlags, aIoService, aSandboxFlags);
 }
 
 nsresult NS_NewChannelInternal(
@@ -435,8 +437,8 @@ nsresult NS_NewChannelInternal(
     nsILoadGroup* aLoadGroup /* = nullptr */,
     nsIInterfaceRequestor* aCallbacks /* = nullptr */,
     nsLoadFlags aLoadFlags /* = nsIRequest::LOAD_NORMAL */,
-    nsIIOService* aIoService /* = nullptr */, uint32_t aSandboxFlags /* = 0 */,
-    bool aSkipCheckForBrokenURLOrZeroSized /* = false */) {
+    nsIIOService* aIoService /* = nullptr */,
+    uint32_t aSandboxFlags /* = 0 */) {
   NS_ENSURE_ARG_POINTER(outChannel);
 
   nsCOMPtr<nsIIOService> grip;
@@ -447,8 +449,7 @@ nsresult NS_NewChannelInternal(
   rv = aIoService->NewChannelFromURIWithClientAndController(
       aUri, aLoadingNode, aLoadingPrincipal, aTriggeringPrincipal,
       aLoadingClientInfo, aController, aSecurityFlags, aContentPolicyType,
-      aSandboxFlags, aSkipCheckForBrokenURLOrZeroSized,
-      getter_AddRefs(channel));
+      aSandboxFlags, getter_AddRefs(channel));
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -570,8 +571,7 @@ nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
                        nsIInterfaceRequestor* aCallbacks /* = nullptr */,
                        nsLoadFlags aLoadFlags /* = nsIRequest::LOAD_NORMAL */,
                        nsIIOService* aIoService /* = nullptr */,
-                       uint32_t aSandboxFlags /* = 0 */,
-                       bool aSkipCheckForBrokenURLOrZeroSized /* = false */) {
+                       uint32_t aSandboxFlags /* = 0 */) {
   NS_ASSERTION(aLoadingNode, "Can not create channel without a loading Node!");
   return NS_NewChannelInternal(
       outChannel, aUri, aLoadingNode, aLoadingNode->NodePrincipal(),
@@ -579,7 +579,7 @@ nsresult NS_NewChannel(nsIChannel** outChannel, nsIURI* aUri,
       Maybe<ClientInfo>(), Maybe<ServiceWorkerDescriptor>(), aSecurityFlags,
       aContentPolicyType, aLoadingNode->OwnerDoc()->CookieJarSettings(),
       aPerformanceStorage, aLoadGroup, aCallbacks, aLoadFlags, aIoService,
-      aSandboxFlags, aSkipCheckForBrokenURLOrZeroSized);
+      aSandboxFlags);
 }
 
 nsresult NS_GetIsDocumentChannel(nsIChannel* aChannel, bool* aIsDocument) {
@@ -610,7 +610,9 @@ nsresult NS_GetIsDocumentChannel(nsIChannel* aChannel, bool* aIsDocument) {
   if (NS_FAILED(rv)) {
     return rv;
   }
-  if (nsContentUtils::HtmlObjectContentTypeForMIMEType(mimeType, false) ==
+  nsCOMPtr<nsILoadInfo> loadInfo = aChannel->LoadInfo();
+  if (nsContentUtils::HtmlObjectContentTypeForMIMEType(
+          mimeType, loadInfo->GetSandboxFlags()) ==
       nsIObjectLoadingContent::TYPE_DOCUMENT) {
     *aIsDocument = true;
     return NS_OK;
@@ -689,17 +691,6 @@ int32_t NS_GetDefaultPort(const char* scheme,
   int32_t port;
   rv = ioService->GetDefaultPort(scheme, &port);
   return NS_SUCCEEDED(rv) ? port : -1;
-}
-
-/**
- * This function is a helper function to apply the ToAscii conversion
- * to a string
- */
-bool NS_StringToACE(const nsACString& idn, nsACString& result) {
-  nsCOMPtr<nsIIDNService> idnSrv = do_GetService(NS_IDNSERVICE_CONTRACTID);
-  if (!idnSrv) return false;
-  nsresult rv = idnSrv->ConvertUTF8toACE(idn, result);
-  return NS_SUCCEEDED(rv);
 }
 
 int32_t NS_GetRealPort(nsIURI* aURI) {
@@ -1127,8 +1118,8 @@ nsresult NS_CheckPortSafety(nsIURI* uri) {
 nsresult NS_NewProxyInfo(const nsACString& type, const nsACString& host,
                          int32_t port, uint32_t flags, nsIProxyInfo** result) {
   nsresult rv;
-  nsCOMPtr<nsIProtocolProxyService> pps =
-      do_GetService(NS_PROTOCOLPROXYSERVICE_CONTRACTID, &rv);
+  nsCOMPtr<nsIProtocolProxyService> pps;
+  pps = mozilla::components::ProtocolProxy::Service(&rv);
   if (NS_SUCCEEDED(rv)) {
     rv = pps->NewProxyInfo(type, host, port, ""_ns, ""_ns, flags, UINT32_MAX,
                            nullptr, result);
@@ -1217,8 +1208,10 @@ void NS_GetReferrerFromChannel(nsIChannel* channel, nsIURI** referrer) {
 }
 
 already_AddRefed<nsINetUtil> do_GetNetUtil(nsresult* error /* = 0 */) {
-  nsCOMPtr<nsIIOService> io = mozilla::components::IO::Service();
+  nsCOMPtr<nsIIOService> io;
   nsCOMPtr<nsINetUtil> util;
+
+  io = mozilla::components::IO::Service();
   if (io) util = do_QueryInterface(io);
 
   if (error) *error = !!util ? NS_OK : NS_ERROR_FAILURE;
@@ -1551,8 +1544,8 @@ class BufferWriter final : public nsIInputStreamCallback {
     NS_ASSERT_OWNINGTHREAD(BufferWriter);
 
     if (!mTaskQueue) {
-      nsCOMPtr<nsIEventTarget> target =
-          do_GetService(NS_STREAMTRANSPORTSERVICE_CONTRACTID);
+      nsCOMPtr<nsIEventTarget> target;
+      target = mozilla::components::StreamTransport::Service();
       if (!target) {
         return NS_ERROR_FAILURE;
       }
@@ -1814,6 +1807,10 @@ class TlsAutoIncrement {
 nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
                    const char* aCharset /* = nullptr */,
                    nsIURI* aBaseURI /* = nullptr */) {
+  // we don't expect any other processes than: socket, content or parent
+  // to be able to create a URL
+  MOZ_ASSERT(XRE_IsSocketProcess() || XRE_IsContentProcess() ||
+             XRE_IsParentProcess());
   TlsAutoIncrement<decltype(gTlsURLRecursionCount)> inc(gTlsURLRecursionCount);
   if (inc.value() >= MAX_RECURSION_COUNT) {
     return NS_ERROR_MALFORMED_URI;
@@ -1849,6 +1846,14 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
     if (NS_FAILED(rv)) return rv;
   }
 
+  // If encoding is not UTF-8 and url is not special or url’s scheme is "ws" or
+  // "wss" then set encoding to UTF-8.
+  if (aCharset && !scheme.IsEmpty() &&
+      (scheme.EqualsLiteral("ws") || scheme.EqualsLiteral("wss") ||
+       !SchemeIsSpecial(scheme))) {
+    aCharset = "UTF-8";
+  }
+
   if (scheme.EqualsLiteral("http") || scheme.EqualsLiteral("ws")) {
     return NewStandardURI(aSpec, aCharset, aBaseURI, NS_HTTP_DEFAULT_PORT,
                           aURI);
@@ -1860,23 +1865,12 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
   if (scheme.EqualsLiteral("ftp")) {
     return NewStandardURI(aSpec, aCharset, aBaseURI, 21, aURI);
   }
-  if (scheme.EqualsLiteral("ssh")) {
-    return NewStandardURI(aSpec, aCharset, aBaseURI, 22, aURI);
-  }
 
   if (scheme.EqualsLiteral("file")) {
-    nsAutoCString buf(aSpec);
-#if defined(XP_WIN)
-    buf.Truncate();
-    if (!net_NormalizeFileURL(aSpec, buf)) {
-      buf = aSpec;
-    }
-#endif
-
     return NS_MutateURI(new nsStandardURL::Mutator())
         .Apply(&nsIFileURLMutator::MarkFileURL)
         .Apply(&nsIStandardURLMutator::Init,
-               nsIStandardURL::URLTYPE_NO_AUTHORITY, -1, buf, aCharset,
+               nsIStandardURL::URLTYPE_NO_AUTHORITY, -1, aSpec, aCharset,
                aBaseURI, nullptr)
         .Finalize(aURI);
   }
@@ -1887,7 +1881,7 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
 
   if (scheme.EqualsLiteral("moz-safe-about") ||
       scheme.EqualsLiteral("page-icon") || scheme.EqualsLiteral("moz") ||
-      scheme.EqualsLiteral("moz-anno")) {
+      scheme.EqualsLiteral("cached-favicon")) {
     return NS_MutateURI(new nsSimpleURI::Mutator())
         .SetSpec(aSpec)
         .Finalize(aURI);
@@ -1913,6 +1907,15 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
 
   if (scheme.EqualsLiteral("resource")) {
     RefPtr<nsResProtocolHandler> handler = nsResProtocolHandler::GetSingleton();
+    if (!handler) {
+      return NS_ERROR_NOT_AVAILABLE;
+    }
+    return handler->NewURI(aSpec, aCharset, aBaseURI, aURI);
+  }
+
+  if (scheme.EqualsLiteral("moz-src")) {
+    RefPtr<MozSrcProtocolHandler> handler =
+        MozSrcProtocolHandler::GetSingleton();
     if (!handler) {
       return NS_ERROR_NOT_AVAILABLE;
     }
@@ -1962,11 +1965,13 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
         .Finalize(aURI);
   }
 
+#ifndef XP_IOS
   if (scheme.EqualsLiteral("moz-icon")) {
     return NS_MutateURI(new nsMozIconURI::Mutator())
         .SetSpec(aSpec)
         .Finalize(aURI);
   }
+#endif
 
 #ifdef MOZ_WIDGET_GTK
   if (scheme.EqualsLiteral("smb") || scheme.EqualsLiteral("sftp")) {
@@ -1989,6 +1994,10 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
   // manually check agains set of known protocols schemes until more general
   // solution is in place (See Bug 1569733)
   if (!StaticPrefs::network_url_useDefaultURI()) {
+    if (scheme.EqualsLiteral("ssh")) {
+      return NewStandardURI(aSpec, aCharset, aBaseURI, 22, aURI);
+    }
+
     if (scheme.EqualsLiteral("dweb") || scheme.EqualsLiteral("dat") ||
         scheme.EqualsLiteral("ipfs") || scheme.EqualsLiteral("ipns") ||
         scheme.EqualsLiteral("ssb") || scheme.EqualsLiteral("wtp")) {
@@ -2003,6 +2012,17 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
   }
 #endif
 
+  auto mustUseSimpleURI = [](const nsCString& scheme) -> bool {
+    if (!StaticPrefs::network_url_simple_uri_unknown_schemes_enabled()) {
+      return false;
+    }
+
+    bool res = false;
+    RefPtr<nsIIOService> ios = do_GetIOService();
+    MOZ_ALWAYS_SUCCEEDS(ios->IsSimpleURIUnknownScheme(scheme, &res));
+    return res;
+  };
+
   if (aBaseURI) {
     nsAutoCString newSpec;
     rv = aBaseURI->Resolve(aSpec, newSpec);
@@ -2016,6 +2036,12 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
     }
 
     if (StaticPrefs::network_url_useDefaultURI()) {
+      if (mustUseSimpleURI(scheme)) {
+        return NS_MutateURI(new nsSimpleURI::Mutator())
+            .SetSpec(newSpec)
+            .Finalize(aURI);
+      }
+
       return NS_MutateURI(new DefaultURI::Mutator())
           .SetSpec(newSpec)
           .Finalize(aURI);
@@ -2027,6 +2053,11 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
   }
 
   if (StaticPrefs::network_url_useDefaultURI()) {
+    if (mustUseSimpleURI(scheme)) {
+      return NS_MutateURI(new nsSimpleURI::Mutator())
+          .SetSpec(aSpec)
+          .Finalize(aURI);
+    }
     return NS_MutateURI(new DefaultURI::Mutator())
         .SetSpec(aSpec)
         .Finalize(aURI);
@@ -2037,7 +2068,7 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
 }
 
 nsresult NS_GetSanitizedURIStringFromURI(nsIURI* aUri,
-                                         nsAString& aSanitizedSpec) {
+                                         nsACString& aSanitizedSpec) {
   aSanitizedSpec.Truncate();
 
   nsCOMPtr<nsISensitiveInfoHiddenURI> safeUri = do_QueryInterface(aUri);
@@ -2050,7 +2081,7 @@ nsresult NS_GetSanitizedURIStringFromURI(nsIURI* aUri,
   }
 
   if (NS_SUCCEEDED(rv)) {
-    aSanitizedSpec.Assign(NS_ConvertUTF8toUTF16(cSpec));
+    aSanitizedSpec.Assign(cSpec);
   }
   return rv;
 }
@@ -2084,7 +2115,7 @@ bool NS_UsePrivateBrowsing(nsIChannel* channel) {
   bool result = StoragePrincipalHelper::GetOriginAttributes(
       channel, attrs, StoragePrincipalHelper::eRegularPrincipal);
   NS_ENSURE_TRUE(result, result);
-  return attrs.mPrivateBrowsingId > 0;
+  return attrs.IsPrivateBrowsing();
 }
 
 bool NS_HasBeenCrossOrigin(nsIChannel* aChannel, bool aReport) {
@@ -2177,8 +2208,8 @@ bool NS_IsSafeMethodNav(nsIChannel* aChannel) {
 
 void NS_WrapAuthPrompt(nsIAuthPrompt* aAuthPrompt,
                        nsIAuthPrompt2** aAuthPrompt2) {
-  nsCOMPtr<nsIAuthPromptAdapterFactory> factory =
-      do_GetService(NS_AUTHPROMPT_ADAPTER_FACTORY_CONTRACTID);
+  nsCOMPtr<nsIAuthPromptAdapterFactory> factory;
+  factory = mozilla::components::AuthPromptAdapter::Service();
   if (!factory) return;
 
   NS_WARNING("Using deprecated nsIAuthPrompt");
@@ -2421,8 +2452,7 @@ bool NS_SecurityCompareURIs(nsIURI* aSourceURI, nsIURI* aTargetURI,
     return false;
   }
 
-  // For file scheme, reject unless the files are identical. See
-  // NS_RelaxStrictFileOriginPolicy for enforcing file same-origin checking
+  // For file scheme, reject unless the files are identical.
   if (targetScheme.EqualsLiteral("file")) {
     // in traditional unsafe behavior all files are the same origin
     if (!aStrictFileOriginPolicy) return true;
@@ -2489,50 +2519,6 @@ bool NS_URIIsLocalFile(nsIURI* aURI) {
          NS_SUCCEEDED(util->ProtocolHasFlags(
              aURI, nsIProtocolHandler::URI_IS_LOCAL_FILE, &isFile)) &&
          isFile;
-}
-
-bool NS_RelaxStrictFileOriginPolicy(nsIURI* aTargetURI, nsIURI* aSourceURI,
-                                    bool aAllowDirectoryTarget /* = false */) {
-  if (!NS_URIIsLocalFile(aTargetURI)) {
-    // This is probably not what the caller intended
-    MOZ_ASSERT_UNREACHABLE(
-        "NS_RelaxStrictFileOriginPolicy called with non-file URI");
-    return false;
-  }
-
-  if (!NS_URIIsLocalFile(aSourceURI)) {
-    // If the source is not also a file: uri then forget it
-    // (don't want resource: principals in a file: doc)
-    //
-    // note: we're not de-nesting jar: uris here, we want to
-    // keep archive content bottled up in its own little island
-    return false;
-  }
-
-  //
-  // pull out the internal files
-  //
-  nsCOMPtr<nsIFileURL> targetFileURL(do_QueryInterface(aTargetURI));
-  nsCOMPtr<nsIFileURL> sourceFileURL(do_QueryInterface(aSourceURI));
-  nsCOMPtr<nsIFile> targetFile;
-  nsCOMPtr<nsIFile> sourceFile;
-  bool targetIsDir;
-
-  // Make sure targetFile is not a directory (bug 209234)
-  // and that it exists w/out unescaping (bug 395343)
-  if (!sourceFileURL || !targetFileURL ||
-      NS_FAILED(targetFileURL->GetFile(getter_AddRefs(targetFile))) ||
-      NS_FAILED(sourceFileURL->GetFile(getter_AddRefs(sourceFile))) ||
-      !targetFile || !sourceFile || NS_FAILED(targetFile->Normalize()) ||
-#ifndef MOZ_WIDGET_ANDROID
-      NS_FAILED(sourceFile->Normalize()) ||
-#endif
-      (!aAllowDirectoryTarget &&
-       (NS_FAILED(targetFile->IsDirectory(&targetIsDir)) || targetIsDir))) {
-    return false;
-  }
-
-  return false;
 }
 
 bool NS_IsInternalSameURIRedirect(nsIChannel* aOldChannel,
@@ -2657,6 +2643,46 @@ NS_GetCrossOriginEmbedderPolicyFromHeader(
   return nsILoadInfo::EMBEDDER_POLICY_NULL;
 }
 
+bool NS_GetForceLoadAtTopFromHeader(const nsACString& aHeader) {
+  nsCOMPtr<nsISFVService> sfv = mozilla::net::GetSFVService();
+
+  nsCOMPtr<nsISFVDictionary> dict;
+  if (NS_FAILED(sfv->ParseDictionary(aHeader, getter_AddRefs(dict)))) {
+    return false;
+  }
+  nsCOMPtr<nsISFVItemOrInnerList> iil;
+  if (NS_FAILED(dict->Get("force-load-at-top"_ns, getter_AddRefs(iil)))) {
+    return false;
+  }
+
+  nsCOMPtr<nsISFVItem> item(do_QueryInterface(iil));
+  if (!item) {
+    return false;
+  }
+
+  nsCOMPtr<nsISFVBareItem> bareItem;
+  if (NS_FAILED(item->GetValue(getter_AddRefs(bareItem)))) {
+    return false;
+  }
+
+  int32_t type;
+  if (NS_FAILED(bareItem->GetType(&type))) {
+    return false;
+  }
+
+  nsCOMPtr<nsISFVBool> boolItem(do_QueryInterface(bareItem));
+  if (!boolItem) {
+    return false;
+  }
+
+  bool b;
+  if (NS_FAILED(boolItem->GetValue(&b))) {
+    return false;
+  }
+
+  return b;
+}
+
 /** Given the first (disposition) token from a Content-Disposition header,
  * tell whether it indicates the content is inline or attachment
  * @param aDispToken the disposition token from the content-disposition header
@@ -2680,8 +2706,8 @@ uint32_t NS_GetContentDispositionFromToken(const nsAString& aDispToken) {
 uint32_t NS_GetContentDispositionFromHeader(const nsACString& aHeader,
                                             nsIChannel* aChan /* = nullptr */) {
   nsresult rv;
-  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar =
-      do_GetService(NS_MIMEHEADERPARAM_CONTRACTID, &rv);
+  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar;
+  mimehdrpar = mozilla::components::MimeHeaderParam::Service(&rv);
   if (NS_FAILED(rv)) return nsIChannel::DISPOSITION_ATTACHMENT;
 
   nsAutoString dispToken;
@@ -2704,8 +2730,8 @@ nsresult NS_GetFilenameFromDisposition(nsAString& aFilename,
   aFilename.Truncate();
 
   nsresult rv;
-  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar =
-      do_GetService(NS_MIMEHEADERPARAM_CONTRACTID, &rv);
+  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar;
+  mimehdrpar = mozilla::components::MimeHeaderParam::Service(&rv);
   if (NS_FAILED(rv)) return rv;
 
   // Get the value of 'filename' parameter
@@ -2721,8 +2747,8 @@ nsresult NS_GetFilenameFromDisposition(nsAString& aFilename,
 
   // Filename may still be percent-encoded. Fix:
   if (aFilename.FindChar('%') != -1) {
-    nsCOMPtr<nsITextToSubURI> textToSubURI =
-        do_GetService(NS_ITEXTTOSUBURI_CONTRACTID, &rv);
+    nsCOMPtr<nsITextToSubURI> textToSubURI;
+    textToSubURI = mozilla::components::TextToSubURI::Service(&rv);
     if (NS_SUCCEEDED(rv)) {
       nsAutoString unescaped;
       textToSubURI->UnEscapeURIForUI(NS_ConvertUTF16toUTF8(aFilename),
@@ -2759,6 +2785,20 @@ bool NS_IsAboutBlank(nsIURI* uri) {
   }
 
   return spec.EqualsLiteral("about:blank");
+}
+
+bool NS_IsAboutBlankAllowQueryAndFragment(nsIURI* uri) {
+  // GetSpec can be expensive for some URIs, so check the scheme first.
+  if (!uri->SchemeIs("about")) {
+    return false;
+  }
+
+  nsAutoCString name;
+  if (NS_FAILED(NS_GetAboutModuleName(uri, name))) {
+    return false;
+  }
+
+  return name.EqualsLiteral("blank");
 }
 
 bool NS_IsAboutSrcdoc(nsIURI* uri) {
@@ -2889,15 +2929,8 @@ bool handleResultFunc(bool aAllowSTS, bool aIsStsHost) {
   if (aIsStsHost) {
     LOG(("nsHttpChannel::Connect() STS permissions found\n"));
     if (aAllowSTS) {
-      Telemetry::AccumulateCategorical(
-          Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::STS);
       return true;
     }
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::PrefBlockedSTS);
-  } else {
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::NoReasonToUpgrade);
   }
   return false;
 };
@@ -2917,15 +2950,14 @@ static bool ShouldSecureUpgradeNoHSTS(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
     AutoTArray<nsString, 2> params = {reportSpec, reportScheme};
     uint64_t innerWindowId = aLoadInfo->GetInnerWindowID();
     CSP_LogLocalizedStr("upgradeInsecureRequest", params,
-                        u""_ns,  // aSourceFile
+                        ""_ns,   // aSourceFile
                         u""_ns,  // aScriptSample
                         0,       // aLineNumber
-                        0,       // aColumnNumber
+                        1,       // aColumnNumber
                         nsIScriptError::warningFlag,
                         "upgradeInsecureRequest"_ns, innerWindowId,
-                        !!aLoadInfo->GetOriginAttributes().mPrivateBrowsingId);
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::CSP);
+                        aLoadInfo->GetOriginAttributes().IsPrivateBrowsing());
+    aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::CSP_UIR);
     return true;
   }
   // 3. Mixed content auto upgrading
@@ -2952,27 +2984,28 @@ static bool ShouldSecureUpgradeNoHSTS(nsIURI* aURI, nsILoadInfo* aLoadInfo) {
     uint64_t innerWindowId = aLoadInfo->GetInnerWindowID();
     nsContentUtils::ReportToConsoleByWindowID(
         message, nsIScriptError::warningFlag, "Mixed Content Message"_ns,
-        innerWindowId, aURI);
+        innerWindowId, SourceLocation(aURI));
 
     // Set this flag so we know we'll upgrade because of
     // 'security.mixed_content.upgrade_display_content'.
     aLoadInfo->SetBrowserDidUpgradeInsecureRequests(true);
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::BrowserDisplay);
-
     return true;
   }
 
   // 4. Https-Only
   if (nsHTTPSOnlyUtils::ShouldUpgradeRequest(aURI, aLoadInfo)) {
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::HTTPSOnly);
+    aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::HTTPS_ONLY_UPGRADE);
     return true;
   }
   // 4.a Https-First
   if (nsHTTPSOnlyUtils::ShouldUpgradeHttpsFirstRequest(aURI, aLoadInfo)) {
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::HTTPSFirst);
+    if (aLoadInfo->GetSchemelessInput() ==
+        nsILoadInfo::SchemelessInputTypeSchemeless) {
+      aLoadInfo->SetHttpsUpgradeTelemetry(
+          nsILoadInfo::HTTPS_FIRST_SCHEMELESS_UPGRADE);
+    } else {
+      aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::HTTPS_FIRST_UPGRADE);
+    }
     return true;
   }
   return false;
@@ -3005,8 +3038,7 @@ nsresult NS_ShouldSecureUpgrade(
 
   // If request is https, then there is nothing to do here.
   if (isHttps) {
-    Telemetry::AccumulateCategorical(
-        Telemetry::LABELS_HTTP_SCHEME_UPGRADE_TYPE::AlreadyHTTPS);
+    aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::ALREADY_HTTPS);
     aShouldUpgrade = false;
     return NS_OK;
   }
@@ -3018,6 +3050,14 @@ nsresult NS_ShouldSecureUpgrade(
   }
   // If no loadInfo exist there is nothing to upgrade here.
   if (!aLoadInfo) {
+    aShouldUpgrade = false;
+    return NS_OK;
+  }
+  // The loadInfo indicates no HTTPS upgrade.
+  bool skipHTTPSUpgrade = false;
+  Unused << aLoadInfo->GetSkipHTTPSUpgrade(&skipHTTPSUpgrade);
+  if (skipHTTPSUpgrade) {
+    aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::SKIP_HTTPS_UPGRADE);
     aShouldUpgrade = false;
     return NS_OK;
   }
@@ -3089,6 +3129,11 @@ nsresult NS_ShouldSecureUpgrade(
   NS_ENSURE_SUCCESS(rv, rv);
 
   aShouldUpgrade = handleResultFunc(aAllowSTS, isStsHost);
+  // we can't pass the loadinfo to handleResultFunc since it's not threadsafe
+  // hence we set the http telemetry information on the loadinfo here.
+  if (aShouldUpgrade) {
+    aLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::HSTS);
+  }
   if (!aShouldUpgrade) {
     // Check for CSP upgrade-insecure-requests, Mixed content auto upgrading
     // and Https-Only / -First.
@@ -3229,13 +3274,18 @@ bool NS_IsOffline() {
 
 /**
  * This function returns true if this channel should be classified by
- * the URL Classifier, false otherwise.
+ * the URL Classifier, false otherwise. There are two types of classification:
+ *   1. SafeBrowsing
+ *   2. Enhanced Tracking Protection (ETP)
  *
  * The idea of the algorithm to determine if a channel should be
  * classified is based on:
- * 1. Channels created by non-privileged code should be classified.
+ * 1. Channels created by non-privileged code should be classified for
+ *    ETP. For SafeBrowsing, it depends on the pref
+ *    "browser.safebrowsing.only_top_level" to decide if it should be
+ *    classified.
  * 2. Top-level document’s channels, if loaded by privileged code
- *    (system principal), should be classified.
+ *    (system principal), should be classified for both types.
  * 3. Any other channel, created by privileged code, is considered safe.
  *
  * A bad/hacked/corrupted safebrowsing database, plus a mistakenly
@@ -3253,7 +3303,7 @@ bool NS_IsOffline() {
  * 2. nsIChannel::LOAD_BYPASS_URL_CLASSIFIER, channel's opener can use this
  *    flag to enforce bypassing the URL classifier check.
  */
-bool NS_ShouldClassifyChannel(nsIChannel* aChannel) {
+bool NS_ShouldClassifyChannel(nsIChannel* aChannel, ClassifyType aType) {
   nsLoadFlags loadFlags;
   Unused << aChannel->GetLoadFlags(&loadFlags);
   //  If our load flags dictate that we must let this channel through without
@@ -3278,6 +3328,14 @@ bool NS_ShouldClassifyChannel(nsIChannel* aChannel) {
 
   nsCOMPtr<nsILoadInfo> loadInfo = aChannel->LoadInfo();
   ExtContentPolicyType type = loadInfo->GetExternalContentPolicyType();
+
+  // Skip classifying channel for safe browsing unless it is a top-level.
+  if (aType == ClassifyType::SafeBrowsing &&
+      (StaticPrefs::browser_safebrowsing_only_top_level() &&
+       ExtContentPolicy::TYPE_DOCUMENT != type)) {
+    return false;
+  }
+
   // Skip classifying channel triggered by system unless it is a top-level
   // load.
   return !(loadInfo->TriggeringPrincipal()->IsSystemPrincipal() &&
@@ -3397,12 +3455,8 @@ bool IsSchemeChangePermitted(nsIURI* aOldURI, const nsACString& newScheme) {
   // URL Spec: If url includes credentials or has a non-null port, and
   // buffer is "file", then return.
   if (newScheme.EqualsIgnoreCase("file")) {
-    rv = aOldURI->GetUsername(tmp);
-    if (NS_FAILED(rv) || !tmp.IsEmpty()) {
-      return false;
-    }
-    rv = aOldURI->GetPassword(tmp);
-    if (NS_FAILED(rv) || !tmp.IsEmpty()) {
+    bool hasUserPass;
+    if (NS_FAILED(aOldURI->GetHasUserPass(&hasUserPass)) || hasUserPass) {
       return false;
     }
     int32_t port;
@@ -3416,25 +3470,24 @@ bool IsSchemeChangePermitted(nsIURI* aOldURI, const nsACString& newScheme) {
 }
 
 already_AddRefed<nsIURI> TryChangeProtocol(nsIURI* aURI,
-                                           const nsAString& aProtocol) {
+                                           const nsACString& aProtocol) {
   MOZ_ASSERT(aURI);
 
-  nsAString::const_iterator start;
+  nsACString::const_iterator start;
   aProtocol.BeginReading(start);
 
-  nsAString::const_iterator end;
+  nsACString::const_iterator end;
   aProtocol.EndReading(end);
 
-  nsAString::const_iterator iter(start);
+  nsACString::const_iterator iter(start);
   FindCharInReadable(':', iter, end);
 
   // Changing the protocol of a URL, changes the "nature" of the URI
   // implementation. In order to do this properly, we have to serialize the
   // existing URL and reparse it in a new object.
   nsCOMPtr<nsIURI> clone;
-  nsresult rv = NS_MutateURI(aURI)
-                    .SetScheme(NS_ConvertUTF16toUTF8(Substring(start, iter)))
-                    .Finalize(clone);
+  nsresult rv =
+      NS_MutateURI(aURI).SetScheme(Substring(start, iter)).Finalize(clone);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return nullptr;
   }
@@ -3442,6 +3495,14 @@ already_AddRefed<nsIURI> TryChangeProtocol(nsIURI* aURI,
   nsAutoCString newScheme;
   rv = clone->GetScheme(newScheme);
   if (NS_FAILED(rv) || !net::IsSchemeChangePermitted(aURI, newScheme)) {
+    nsAutoCString url;
+    Unused << clone->GetSpec(url);
+    AutoTArray<nsString, 2> params;
+    params.AppendElement(NS_ConvertUTF8toUTF16(url));
+    params.AppendElement(NS_ConvertUTF8toUTF16(newScheme));
+    nsContentUtils::ReportToConsole(
+        nsIScriptError::warningFlag, "Strict Url Protocol Setter"_ns, nullptr,
+        nsContentUtils::eNECKO_PROPERTIES, "StrictUrlProtocolSetter", params);
     return nullptr;
   }
 
@@ -3467,8 +3528,8 @@ already_AddRefed<nsIURI> TryChangeProtocol(nsIURI* aURI,
 // passed value alone)
 static bool Decode5987Format(nsAString& aEncoded) {
   nsresult rv;
-  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar =
-      do_GetService(NS_MIMEHEADERPARAM_CONTRACTID, &rv);
+  nsCOMPtr<nsIMIMEHeaderParam> mimehdrpar;
+  mimehdrpar = mozilla::components::MimeHeaderParam::Service(&rv);
   if (NS_FAILED(rv)) return false;
 
   nsAutoCString asciiValue;
@@ -3514,6 +3575,7 @@ void LinkHeader::Reset() {
   mReferrerPolicy.Truncate();
   mAs.Truncate();
   mCrossOrigin.SetIsVoid(true);
+  mFetchPriority.Truncate();
 }
 
 nsresult LinkHeader::NewResolveHref(nsIURI** aOutURI, nsIURI* aBaseURI) const {
@@ -3537,8 +3599,11 @@ bool LinkHeader::operator==(const LinkHeader& rhs) const {
          mSrcset == rhs.mSrcset && mSizes == rhs.mSizes && mType == rhs.mType &&
          mMedia == rhs.mMedia && mAnchor == rhs.mAnchor &&
          mCrossOrigin == rhs.mCrossOrigin &&
-         mReferrerPolicy == rhs.mReferrerPolicy && mAs == rhs.mAs;
+         mReferrerPolicy == rhs.mReferrerPolicy && mAs == rhs.mAs &&
+         mFetchPriority == rhs.mFetchPriority;
 }
+
+constexpr auto kTitleStar = "title*"_ns;
 
 nsTArray<LinkHeader> ParseLinkHeader(const nsAString& aLinkData) {
   nsTArray<LinkHeader> linkHeaders;
@@ -3681,17 +3746,7 @@ nsTArray<LinkHeader> ParseLinkHeader(const nsAString& aLinkData) {
           *unescaped = kNullCh;
         }
 
-        if (attr.LowerCaseEqualsLiteral("rel")) {
-          if (header.mRel.IsEmpty()) {
-            header.mRel = value;
-            header.mRel.CompressWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("title")) {
-          if (header.mTitle.IsEmpty()) {
-            header.mTitle = value;
-            header.mTitle.CompressWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("title*")) {
+        if (attr.LowerCaseEqualsASCII(kTitleStar.get())) {
           if (titleStar.IsEmpty() && !wasQuotedString) {
             // RFC 5987 encoding; uses token format only, so skip if we get
             // here with a quoted-string
@@ -3705,61 +3760,8 @@ nsTArray<LinkHeader> ParseLinkHeader(const nsAString& aLinkData) {
               titleStar.Truncate();
             }
           }
-        } else if (attr.LowerCaseEqualsLiteral("type")) {
-          if (header.mType.IsEmpty()) {
-            header.mType = value;
-            header.mType.StripWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("media")) {
-          if (header.mMedia.IsEmpty()) {
-            header.mMedia = value;
-
-            // The HTML5 spec is formulated in terms of the CSS3 spec,
-            // which specifies that media queries are case insensitive.
-            nsContentUtils::ASCIIToLower(header.mMedia);
-          }
-        } else if (attr.LowerCaseEqualsLiteral("anchor")) {
-          if (header.mAnchor.IsEmpty()) {
-            header.mAnchor = value;
-            header.mAnchor.StripWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("crossorigin")) {
-          if (header.mCrossOrigin.IsVoid()) {
-            header.mCrossOrigin.SetIsVoid(false);
-            header.mCrossOrigin = value;
-            header.mCrossOrigin.StripWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("as")) {
-          if (header.mAs.IsEmpty()) {
-            header.mAs = value;
-            header.mAs.CompressWhitespace();
-          }
-        } else if (attr.LowerCaseEqualsLiteral("referrerpolicy")) {
-          // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute
-          // Specs says referrer policy attribute is an enumerated attribute,
-          // case insensitive and includes the empty string
-          // We will parse the value with AttributeReferrerPolicyFromString
-          // later, which will handle parsing it as an enumerated attribute.
-          if (header.mReferrerPolicy.IsEmpty()) {
-            header.mReferrerPolicy = value;
-          }
-
-        } else if (attr.LowerCaseEqualsLiteral("nonce")) {
-          if (header.mNonce.IsEmpty()) {
-            header.mNonce = value;
-          }
-        } else if (attr.LowerCaseEqualsLiteral("integrity")) {
-          if (header.mIntegrity.IsEmpty()) {
-            header.mIntegrity = value;
-          }
-        } else if (attr.LowerCaseEqualsLiteral("imagesrcset")) {
-          if (header.mSrcset.IsEmpty()) {
-            header.mSrcset = value;
-          }
-        } else if (attr.LowerCaseEqualsLiteral("imagesizes")) {
-          if (header.mSizes.IsEmpty()) {
-            header.mSizes = value;
-          }
+        } else {
+          header.MaybeUpdateAttribute(attr, value);
         }
       }
     }
@@ -3797,6 +3799,84 @@ nsTArray<LinkHeader> ParseLinkHeader(const nsAString& aLinkData) {
   return linkHeaders;
 }
 
+void LinkHeader::MaybeUpdateAttribute(const nsAString& aAttribute,
+                                      const char16_t* aValue) {
+  MOZ_ASSERT(!aAttribute.LowerCaseEqualsASCII(kTitleStar.get()));
+
+  if (aAttribute.LowerCaseEqualsLiteral("rel")) {
+    if (mRel.IsEmpty()) {
+      mRel = aValue;
+      mRel.CompressWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("title")) {
+    if (mTitle.IsEmpty()) {
+      mTitle = aValue;
+      mTitle.CompressWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("type")) {
+    if (mType.IsEmpty()) {
+      mType = aValue;
+      mType.StripWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("media")) {
+    if (mMedia.IsEmpty()) {
+      mMedia = aValue;
+
+      // The HTML5 spec is formulated in terms of the CSS3 spec,
+      // which specifies that media queries are case insensitive.
+      nsContentUtils::ASCIIToLower(mMedia);
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("anchor")) {
+    if (mAnchor.IsEmpty()) {
+      mAnchor = aValue;
+      mAnchor.StripWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("crossorigin")) {
+    if (mCrossOrigin.IsVoid()) {
+      mCrossOrigin.SetIsVoid(false);
+      mCrossOrigin = aValue;
+      mCrossOrigin.StripWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("as")) {
+    if (mAs.IsEmpty()) {
+      mAs = aValue;
+      mAs.CompressWhitespace();
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("referrerpolicy")) {
+    // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#referrer-policy-attribute
+    // Specs says referrer policy attribute is an enumerated attribute,
+    // case insensitive and includes the empty string
+    // We will parse the aValue with AttributeReferrerPolicyFromString
+    // later, which will handle parsing it as an enumerated attribute.
+    if (mReferrerPolicy.IsEmpty()) {
+      mReferrerPolicy = aValue;
+    }
+
+  } else if (aAttribute.LowerCaseEqualsLiteral("nonce")) {
+    if (mNonce.IsEmpty()) {
+      mNonce = aValue;
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("integrity")) {
+    if (mIntegrity.IsEmpty()) {
+      mIntegrity = aValue;
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("imagesrcset")) {
+    if (mSrcset.IsEmpty()) {
+      mSrcset = aValue;
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("imagesizes")) {
+    if (mSizes.IsEmpty()) {
+      mSizes = aValue;
+    }
+  } else if (aAttribute.LowerCaseEqualsLiteral("fetchpriority")) {
+    if (mFetchPriority.IsEmpty()) {
+      LOG(("Update fetchPriority to \"%s\"",
+           NS_ConvertUTF16toUTF8(aValue).get()));
+      mFetchPriority = aValue;
+    }
+  }
+}
+
 // We will use official mime-types from:
 // https://www.iana.org/assignments/media-types/media-types.xhtml#font
 // We do not support old deprecated mime-types for preload feature.
@@ -3818,11 +3898,17 @@ bool IsFontMimeType(const nsAString& aType) {
 }
 
 static const nsAttrValue::EnumTable kAsAttributeTable[] = {
-    {"", DESTINATION_INVALID},      {"audio", DESTINATION_AUDIO},
-    {"font", DESTINATION_FONT},     {"image", DESTINATION_IMAGE},
-    {"script", DESTINATION_SCRIPT}, {"style", DESTINATION_STYLE},
-    {"track", DESTINATION_TRACK},   {"video", DESTINATION_VIDEO},
-    {"fetch", DESTINATION_FETCH},   {nullptr, 0}};
+    {"", DESTINATION_INVALID},
+    {"audio", DESTINATION_AUDIO},
+    {"font", DESTINATION_FONT},
+    {"image", DESTINATION_IMAGE},
+    {"script", DESTINATION_SCRIPT},
+    {"style", DESTINATION_STYLE},
+    {"track", DESTINATION_TRACK},
+    {"video", DESTINATION_VIDEO},
+    {"fetch", DESTINATION_FETCH},
+    {"json", DESTINATION_JSON},
+    {nullptr, 0}};
 
 void ParseAsValue(const nsAString& aValue, nsAttrValue& aResult) {
   DebugOnly<bool> success =
@@ -3854,6 +3940,8 @@ nsContentPolicyType AsValueToContentPolicy(const nsAttrValue& aValue) {
       return nsIContentPolicy::TYPE_STYLESHEET;
     case DESTINATION_FETCH:
       return nsIContentPolicy::TYPE_INTERNAL_FETCH_PRELOAD;
+    case DESTINATION_JSON:
+      return nsIContentPolicy::TYPE_JSON;
   }
   return nsIContentPolicy::TYPE_INVALID;
 }
@@ -3873,7 +3961,7 @@ bool IsScriptLikeOrInvalid(const nsAString& aAs) {
       aAs.LowerCaseEqualsASCII("report") || aAs.LowerCaseEqualsASCII("style") ||
       aAs.LowerCaseEqualsASCII("track") || aAs.LowerCaseEqualsASCII("video") ||
       aAs.LowerCaseEqualsASCII("webidentity") ||
-      aAs.LowerCaseEqualsASCII("xslt"));
+      aAs.LowerCaseEqualsASCII("xslt") || aAs.LowerCaseEqualsASCII("json"));
 }
 
 bool CheckPreloadAttrs(const nsAttrValue& aAs, const nsAString& aType,
@@ -3929,6 +4017,9 @@ bool CheckPreloadAttrs(const nsAttrValue& aAs, const nsAString& aType,
   }
   if (policyType == nsIContentPolicy::TYPE_STYLESHEET) {
     return type.EqualsASCII("text/css");
+  }
+  if (policyType == nsIContentPolicy::TYPE_JSON) {
+    return nsContentUtils::IsJsonMimeType(type);
   }
   return false;
 }
@@ -4006,15 +4097,6 @@ void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI) {
     return;
   }
 
-  if (aLoadInfo) {
-    bool shouldSkipCheckForBrokenURLOrZeroSized;
-    MOZ_ALWAYS_SUCCEEDS(aLoadInfo->GetShouldSkipCheckForBrokenURLOrZeroSized(
-        &shouldSkipCheckForBrokenURLOrZeroSized));
-    if (shouldSkipCheckForBrokenURLOrZeroSized) {
-      return;
-    }
-  }
-
   nsCString spec;
   aURI->GetSpec(spec);
 
@@ -4064,6 +4146,36 @@ bool IsCoepCredentiallessEnabled(bool aIsOriginTrialCoepCredentiallessEnabled) {
   return StaticPrefs::
              browser_tabs_remote_coep_credentialless_DoNotUseDirectly() ||
          aIsOriginTrialCoepCredentiallessEnabled;
+}
+
+nsresult AddExtraHeaders(nsIHttpChannel* aHttpChannel,
+                         const nsACString& aExtraHeaders,
+                         bool aMerge /* = true */) {
+  nsresult rv;
+  nsAutoCString oneHeader;
+  nsAutoCString headerName;
+  nsAutoCString headerValue;
+  int32_t crlf = 0;
+  int32_t colon = 0;
+  const char* kWhitespace = "\b\t\r\n ";
+  nsAutoCString extraHeaders(aExtraHeaders);
+  while (true) {
+    crlf = extraHeaders.Find("\r\n");
+    if (crlf == -1) break;
+    extraHeaders.Mid(oneHeader, 0, crlf);
+    extraHeaders.Cut(0, crlf + 2);
+    colon = oneHeader.Find(":");
+    if (colon == -1) break;  // Should have a colon.
+    oneHeader.Left(headerName, colon);
+    colon++;
+    oneHeader.Mid(headerValue, colon, oneHeader.Length() - colon);
+    headerName.Trim(kWhitespace);
+    headerValue.Trim(kWhitespace);
+    // Add the header (merging if required).
+    rv = aHttpChannel->SetRequestHeader(headerName, headerValue, aMerge);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+  return NS_OK;
 }
 
 }  // namespace net

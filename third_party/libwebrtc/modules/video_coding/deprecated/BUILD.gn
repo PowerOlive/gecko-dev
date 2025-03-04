@@ -65,7 +65,6 @@ rtc_library("deprecated_jitter_buffer") {
     "../../../rtc_base/synchronization:mutex",
     "../../../system_wrappers",
   ]
-  absl_deps = [ "//third_party/abseil-cpp/absl/memory" ]
 }
 
 rtc_library("deprecated_frame_buffer") {
@@ -100,7 +99,30 @@ rtc_library("deprecated_packet") {
     "../../../modules/rtp_rtcp:rtp_rtcp_format",
     "../../../modules/rtp_rtcp:rtp_video_header",
   ]
-  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
+}
+
+rtc_library("deprecated_receiver") {
+  sources = [
+    "receiver.cc",
+    "receiver.h",
+  ]
+  deps = [
+    ":deprecated_event_wrapper",
+    ":deprecated_jitter_buffer",
+    ":deprecated_jitter_buffer_common",
+    ":deprecated_packet",
+    "../../../api:field_trials_view",
+    "../../../api/video:encoded_image",
+    "../../../modules/video_coding",
+    "../../../modules/video_coding:encoded_frame",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding/timing:timing_module",
+    "../../../rtc_base:event_tracer",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:safe_conversions",
+    "../../../system_wrappers",
+    "//third_party/abseil-cpp/absl/memory",
+  ]
 }
 
 rtc_library("deprecated_session_info") {
@@ -111,12 +133,13 @@ rtc_library("deprecated_session_info") {
     "../../../modules:module_api_public",
     "../../../modules/video_coding:codec_globals_headers",
     "../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/algorithm:container",
+    "//third_party/abseil-cpp/absl/types:variant",
   ]
   sources = [
     "session_info.cc",
     "session_info.h",
   ]
-  absl_deps = [ "//third_party/abseil-cpp/absl/types:variant" ]
 }
 
 rtc_library("deprecated_stream_generator") {
@@ -135,6 +158,7 @@ rtc_library("deprecated_unittests") {
   sources = [
     "decoding_state_unittest.cc",
     "jitter_buffer_unittest.cc",
+    "receiver_unittest.cc",
     "session_info_unittest.cc",
   ]
   visibility += [ "../../../modules/*" ]
@@ -142,15 +166,20 @@ rtc_library("deprecated_unittests") {
     ":deprecated_decoding_state",
     ":deprecated_frame_buffer",
     ":deprecated_jitter_buffer",
+    ":deprecated_jitter_buffer_common",
     ":deprecated_packet",
+    ":deprecated_receiver",
     ":deprecated_session_info",
     ":deprecated_stream_generator",
     "../../../common_video",
     "../../../modules/rtp_rtcp:rtp_video_header",
     "../../../modules/video_coding:codec_globals_headers",
+    "../../../modules/video_coding:encoded_frame",
+    "../../../modules/video_coding/timing:timing_module",
+    "../../../rtc_base:checks",
     "../../../system_wrappers",
     "../../../test:scoped_key_value_config",
     "../../../test:test_support",
+    "//third_party/abseil-cpp/absl/memory",
   ]
-  absl_deps = [ "//third_party/abseil-cpp/absl/memory" ]
 }

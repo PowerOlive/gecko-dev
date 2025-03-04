@@ -12,26 +12,19 @@
 #include "mozilla/ServoUtils.h"
 #include "mozilla/RustCell.h"
 #include "js/HeapAPI.h"
+#include "js/RootingAPI.h"
 #include "js/TracingAPI.h"
 #include "js/TypeDecls.h"
 #include "nsISupports.h"
 #include "nsISupportsUtils.h"
 #include <type_traits>
 
-namespace mozilla::dom {
-class ContentProcessMessageManager;
-class InProcessBrowserChildMessageManager;
-class BrowserChildMessageManager;
-}  // namespace mozilla::dom
-class SandboxPrivate;
-class nsWindowRoot;
+namespace mozilla::dom::binding_detail {
+class CastableToWrapperCacheHelper;
+}  // namespace mozilla::dom::binding_detail
 
-#define NS_WRAPPERCACHE_IID                          \
-  {                                                  \
-    0x6f3179a1, 0x36f7, 0x4a5c, {                    \
-      0x8c, 0xf1, 0xad, 0xc8, 0x7c, 0xde, 0x3e, 0x87 \
-    }                                                \
-  }
+#define NS_WRAPPERCACHE_IID \
+  {0x6f3179a1, 0x36f7, 0x4a5c, {0x8c, 0xf1, 0xad, 0xc8, 0x7c, 0xde, 0x3e, 0x87}}
 
 // There are two sets of flags used by DOM nodes. One comes from reusing the
 // remaining bits of the inherited nsWrapperCache flags (mFlags), and another is
@@ -196,6 +189,11 @@ class JS_HAZ_ROOTED nsWrapperCache {
     if (mWrapper) {
       MOZ_ASSERT(mWrapper == aOldObject);
       mWrapper = aNewObject;
+      if (PreservingWrapper() && !JS::ObjectIsTenured(mWrapper)) {
+        // Can pass prevp as null here since a previous store buffer entry has
+        // been cleared by the current nursery collection.
+        JS::HeapObjectPostWriteBarrier(&mWrapper, nullptr, mWrapper);
+      }
     }
   }
 
@@ -374,9 +372,10 @@ class JS_HAZ_ROOTED nsWrapperCache {
  public:
   void CheckCCWrapperTraversal(void* aScriptObjectHolder,
                                nsScriptObjectTracer* aTracer);
+#endif  // DEBUG
 
  private:
-#endif  // DEBUG
+  friend class mozilla::dom::binding_detail::CastableToWrapperCacheHelper;
 
   /**
    * If this bit is set then we're preserving the wrapper, which in effect ties

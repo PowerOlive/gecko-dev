@@ -14,7 +14,7 @@ var helpers = require("../helpers");
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/var-only-at-top-level.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/var-only-at-top-level.html",
     },
     messages: {
       unexpectedVar: "Unexpected var, use let or const instead.",
@@ -27,7 +27,9 @@ module.exports = {
     return {
       VariableDeclaration(node) {
         if (node.kind === "var") {
-          if (helpers.getIsTopLevelScript(context.getAncestors())) {
+          if (
+            helpers.getIsTopLevelScript(context.sourceCode.getAncestors(node))
+          ) {
             return;
           }
 

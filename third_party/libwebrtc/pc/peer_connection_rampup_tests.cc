@@ -9,17 +9,18 @@
  */
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "absl/types/optional.h"
-#include "api/audio/audio_mixer.h"
+#include "api/audio/audio_device.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/audio_options.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/jsep.h"
+#include "api/make_ref_counted.h"
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
@@ -29,6 +30,7 @@
 #include "api/stats/rtcstats_objects.h"
 #include "api/test/metrics/global_metrics_logger_and_exporter.h"
 #include "api/test/metrics/metric.h"
+#include "api/test/rtc_error_matchers.h"
 #include "api/video_codecs/video_decoder_factory_template.h"
 #include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
 #include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
@@ -39,8 +41,7 @@
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
-#include "modules/audio_device/include/audio_device.h"
-#include "modules/audio_processing/include/audio_processing.h"
+#include "p2p/base/basic_packet_socket_factory.h"
 #include "p2p/base/port_allocator.h"
 #include "p2p/base/port_interface.h"
 #include "p2p/base/test_turn_server.h"
@@ -51,19 +52,19 @@
 #include "pc/test/frame_generator_capturer_video_track_source.h"
 #include "pc/test/mock_peer_connection_observers.h"
 #include "rtc_base/checks.h"
+#include "rtc_base/crypto_random.h"
 #include "rtc_base/fake_network.h"
 #include "rtc_base/firewall_socket_server.h"
-#include "rtc_base/gunit.h"
-#include "rtc_base/helpers.h"
 #include "rtc_base/socket_address.h"
 #include "rtc_base/socket_factory.h"
-#include "rtc_base/ssl_certificate.h"
 #include "rtc_base/task_queue_for_test.h"
 #include "rtc_base/test_certificate_verifier.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/virtual_socket_server.h"
 #include "system_wrappers/include/clock.h"
+#include "test/gmock.h"
 #include "test/gtest.h"
+#include "test/wait_until.h"
 
 namespace webrtc {
 namespace {
@@ -75,7 +76,6 @@ using ::webrtc::test::Unit;
 static const int kDefaultTestTimeMs = 15000;
 static const int kRampUpTimeMs = 5000;
 static const int kPollIntervalTimeMs = 50;
-static const int kDefaultTimeoutMs = 10000;
 static const rtc::SocketAddress kDefaultLocalAddress("1.1.1.1", 0);
 static const char kTurnInternalAddress[] = "88.88.88.0";
 static const char kTurnExternalAddress[] = "88.88.88.1";
@@ -160,6 +160,8 @@ class PeerConnectionRampUpTest : public ::testing::Test {
         virtual_socket_server_(new rtc::VirtualSocketServer()),
         firewall_socket_server_(
             new rtc::FirewallSocketServer(virtual_socket_server_.get())),
+        firewall_socket_factory_(
+            new rtc::BasicPacketSocketFactory(firewall_socket_server_.get())),
         network_thread_(new rtc::Thread(firewall_socket_server_.get())),
         worker_thread_(rtc::Thread::Create()) {
     network_thread_->SetName("PCNetworkThread", this);
@@ -199,12 +201,11 @@ class PeerConnectionRampUpTest : public ::testing::Test {
     fake_network_managers_.emplace_back(fake_network_manager);
 
     auto observer = std::make_unique<MockPeerConnectionObserver>();
-    webrtc::PeerConnectionDependencies dependencies(observer.get());
+    PeerConnectionDependencies dependencies(observer.get());
     cricket::BasicPortAllocator* port_allocator =
-        new cricket::BasicPortAllocator(
-            fake_network_manager,
-            std::make_unique<rtc::BasicPacketSocketFactory>(
-                firewall_socket_server_.get()));
+        new cricket::BasicPortAllocator(fake_network_manager,
+                                        firewall_socket_factory_.get());
+
     port_allocator->set_step_delay(cricket::kDefaultStepDelay);
     dependencies.allocator =
         std::unique_ptr<cricket::BasicPortAllocator>(port_allocator);
@@ -233,11 +234,15 @@ class PeerConnectionRampUpTest : public ::testing::Test {
 
     // Do the SDP negotiation, and also exchange ice candidates.
     ASSERT_TRUE(caller_->ExchangeOfferAnswerWith(callee_.get()));
-    ASSERT_TRUE_WAIT(
-        caller_->signaling_state() == PeerConnectionInterface::kStable,
-        kDefaultTimeoutMs);
-    ASSERT_TRUE_WAIT(caller_->IsIceGatheringDone(), kDefaultTimeoutMs);
-    ASSERT_TRUE_WAIT(callee_->IsIceGatheringDone(), kDefaultTimeoutMs);
+    ASSERT_THAT(WaitUntil([&] { return caller_->signaling_state(); },
+                          ::testing::Eq(PeerConnectionInterface::kStable)),
+                IsRtcOk());
+    ASSERT_THAT(WaitUntil([&] { return caller_->IsIceGatheringDone(); },
+                          ::testing::IsTrue()),
+                IsRtcOk());
+    ASSERT_THAT(WaitUntil([&] { return callee_->IsIceGatheringDone(); },
+                          ::testing::IsTrue()),
+                IsRtcOk());
 
     // Connect an ICE candidate pairs.
     ASSERT_TRUE(
@@ -245,8 +250,12 @@ class PeerConnectionRampUpTest : public ::testing::Test {
     ASSERT_TRUE(
         caller_->AddIceCandidates(callee_->observer()->GetAllCandidates()));
     // This means that ICE and DTLS are connected.
-    ASSERT_TRUE_WAIT(callee_->IsIceConnected(), kDefaultTimeoutMs);
-    ASSERT_TRUE_WAIT(caller_->IsIceConnected(), kDefaultTimeoutMs);
+    ASSERT_THAT(WaitUntil([&] { return callee_->IsIceConnected(); },
+                          ::testing::IsTrue()),
+                IsRtcOk());
+    ASSERT_THAT(WaitUntil([&] { return caller_->IsIceConnected(); },
+                          ::testing::IsTrue()),
+                IsRtcOk());
   }
 
   void CreateTurnServer(cricket::ProtocolType type,
@@ -307,16 +316,18 @@ class PeerConnectionRampUpTest : public ::testing::Test {
   double GetCallerAvailableBitrateEstimate() {
     auto stats = caller_->GetStats();
     auto transport_stats = stats->GetStatsOfType<RTCTransportStats>();
-    if (transport_stats.size() == 0u ||
-        !transport_stats[0]->selected_candidate_pair_id.is_defined()) {
+    if (transport_stats.empty() ||
+        !transport_stats[0]->selected_candidate_pair_id.has_value()) {
       return 0;
     }
     std::string selected_ice_id =
-        transport_stats[0]->selected_candidate_pair_id.ValueToString();
+        transport_stats[0]
+            ->GetAttribute(transport_stats[0]->selected_candidate_pair_id)
+            .ToString();
     // Use the selected ICE candidate pair ID to get the appropriate ICE stats.
     const RTCIceCandidatePairStats ice_candidate_pair_stats =
         stats->Get(selected_ice_id)->cast_to<const RTCIceCandidatePairStats>();
-    if (ice_candidate_pair_stats.available_outgoing_bitrate.is_defined()) {
+    if (ice_candidate_pair_stats.available_outgoing_bitrate.has_value()) {
       return *ice_candidate_pair_stats.available_outgoing_bitrate;
     }
     // We couldn't get the `available_outgoing_bitrate` for the active candidate
@@ -344,6 +355,8 @@ class PeerConnectionRampUpTest : public ::testing::Test {
   // up queue.
   std::unique_ptr<rtc::VirtualSocketServer> virtual_socket_server_;
   std::unique_ptr<rtc::FirewallSocketServer> firewall_socket_server_;
+  std::unique_ptr<rtc::BasicPacketSocketFactory> firewall_socket_factory_;
+
   std::unique_ptr<rtc::Thread> network_thread_;
   std::unique_ptr<rtc::Thread> worker_thread_;
   // The `pc_factory` uses `network_thread_` & `worker_thread_`, so it must be

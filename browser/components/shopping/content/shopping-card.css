@@ -2,79 +2,59 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-@import url("chrome://global/skin/in-content/common.css");
-
-:host {
-  display: block;
-  border: 1px solid var(--in-content-box-border-color);
-  border-radius: 8px;
-  background-color: var(--in-content-page-background);
-  box-shadow: var(--shadow-10);
-  box-sizing: border-box;
-}
-
 .shopping-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 12px;
+  position: relative;
 }
 
-button {
-  margin: 0;
+moz-card {
+  --card-padding: var(--space-medium);
+
+  &::part(heading) {
+    font-size: unset;
+  }
 }
 
-#shopping-details {
-  width: 100%;
+#content {
+  align-self: stretch;
 }
 
 #label-wrapper {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  align-self: stretch;
-}
-
-:host([type="accordion"]) #label-wrapper {
-  cursor: pointer;
-}
-
-#header {
-  color: var(--in-content-text-color);
-  font-size: 1em;
-  font-weight: 600;
-}
-
-#footer {
-  display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 8px 0;
-  border-top: 1px solid var(--in-content-box-border-color);
+  gap: 0.5rem;
+  width: 100%;
+  margin-bottom: var(--space-small);
 }
 
-details > summary {
-  list-style: none;
+#heading {
+  font-weight: var(--font-weight-bold);
+  margin: 0;
 }
 
-details > summary:focus-visible {
-  outline: var(--in-content-focus-outline);
+.show-more footer {
+  width: 100%;
+  background-color: var(--background-color-box);
+  box-shadow: 2px -10px 11px var(--background-color-box);
+  border-top: var(--border-width) solid var(--card-border-color);
+  border-radius: 0 0 var(--border-radius-medium) var(--border-radius-medium);
+  position: absolute;
+  bottom: 0;
+  text-align: center;
+  padding-block: var(--space-small);
+  inset-inline: 0;
 }
 
-.chevron-icon {
-  background-image: url("chrome://global/skin/icons/arrow-down.svg");
-  background-position: center;
-  background-repeat: no-repeat;
-  -moz-context-properties: fill;
-  fill: currentColor;
-  width: 24px;
-  height: 24px;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  flex-shrink: 0;
+.show-more[expanded="false"]  {
+  overflow: clip;
+  height: 200px;
 }
 
-details[open] .chevron-icon {
-  background-image: url("chrome://global/skin/icons/arrow-up.svg");
+:host(:not([showMoreButtonDisabled])) .show-more ::slotted(div) {
+  margin-block-end: 4rem;
+}
+
+:host([showMoreButtonDisabled]) footer {
+  display: none;
 }

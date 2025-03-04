@@ -17,6 +17,7 @@
 #  include "Logging.h"
 #endif
 
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/Components.h"
 #include "mozilla/EventListenerManager.h"
 #include "mozilla/PresShell.h"
@@ -85,22 +86,20 @@ LocalAccessible* DocManager::FindAccessibleInCache(nsINode* aNode) const {
   return nullptr;
 }
 
-void DocManager::RemoveFromXPCDocumentCache(DocAccessible* aDocument,
-                                            bool aAllowServiceShutdown) {
+void DocManager::RemoveFromXPCDocumentCache(DocAccessible* aDocument) {
   xpcAccessibleDocument* xpcDoc = mXPCDocumentCache.GetWeak(aDocument);
-  if (xpcDoc) {
-    xpcDoc->Shutdown();
-    mXPCDocumentCache.Remove(aDocument);
-
-    if (aAllowServiceShutdown && !HasXPCDocuments()) {
-      MaybeShutdownAccService(nsAccessibilityService::eXPCOM);
-    }
+  if (!xpcDoc) {
+    return;
+  }
+  xpcDoc->Shutdown();
+  mXPCDocumentCache.Remove(aDocument);
+  if (!HasXPCDocuments()) {
+    MaybeShutdownAccService(nsAccessibilityService::eXPCOM, /* aAsync */ true);
   }
 }
 
 void DocManager::NotifyOfDocumentShutdown(DocAccessible* aDocument,
-                                          Document* aDOMDocument,
-                                          bool aAllowServiceShutdown) {
+                                          Document* aDOMDocument) {
   // We need to remove listeners in both cases, when document is being shutdown
   // or when accessibility service is being shut down as well.
   RemoveListeners(aDOMDocument);
@@ -111,19 +110,19 @@ void DocManager::NotifyOfDocumentShutdown(DocAccessible* aDocument,
     return;
   }
 
-  RemoveFromXPCDocumentCache(aDocument, aAllowServiceShutdown);
+  RemoveFromXPCDocumentCache(aDocument);
   mDocAccessibleCache.Remove(aDOMDocument);
 }
 
 void DocManager::RemoveFromRemoteXPCDocumentCache(DocAccessibleParent* aDoc) {
   xpcAccessibleDocument* doc = GetCachedXPCDocument(aDoc);
-  if (doc) {
-    doc->Shutdown();
-    sRemoteXPCDocumentCache->Remove(aDoc);
+  if (!doc) {
+    return;
   }
-
+  doc->Shutdown();
+  sRemoteXPCDocumentCache->Remove(aDoc);
   if (sRemoteXPCDocumentCache && sRemoteXPCDocumentCache->Count() == 0) {
-    MaybeShutdownAccService(nsAccessibilityService::eXPCOM);
+    MaybeShutdownAccService(nsAccessibilityService::eXPCOM, /* aAsync */ true);
   }
 }
 
@@ -464,7 +463,18 @@ DocAccessible* DocManager::CreateDocOrRootAccessible(Document* aDocument) {
     // XXXaaronl: ideally we would traverse the presshell chain. Since there's
     // no easy way to do that, we cheat and use the document hierarchy.
     parentDocAcc = GetDocAccessible(aDocument->GetInProcessParentDocument());
-    NS_ASSERTION(parentDocAcc, "Can't create an accessible for the document!");
+    // We should always get parentDocAcc except sometimes for background
+    // extension pages, where the parent has an invisible DocShell but the child
+    // does not. See bug 1888649.
+    NS_ASSERTION(
+        parentDocAcc ||
+            (BasePrincipal::Cast(aDocument->GetPrincipal())->AddonPolicy() &&
+             aDocument->GetInProcessParentDocument() &&
+             aDocument->GetInProcessParentDocument()->GetDocShell() &&
+             aDocument->GetInProcessParentDocument()
+                 ->GetDocShell()
+                 ->IsInvisible()),
+        "Can't create an accessible for the document!");
     if (!parentDocAcc) return nullptr;
   }
 

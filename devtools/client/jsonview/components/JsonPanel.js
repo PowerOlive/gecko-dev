@@ -4,28 +4,34 @@
 
 "use strict";
 
-define(function (require, exports, module) {
+define(function (require, exports) {
   const {
     createFactory,
     Component,
-  } = require("devtools/client/shared/vendor/react");
-  const dom = require("devtools/client/shared/vendor/react-dom-factories");
-  const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
-  const { createFactories } = require("devtools/client/shared/react-utils");
+  } = require("resource://devtools/client/shared/vendor/react.js");
+  const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
+  const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-types.js");
+  const {
+    createFactories,
+  } = require("resource://devtools/client/shared/react-utils.js");
 
   const TreeView = createFactory(
-    require("devtools/client/shared/components/tree/TreeView")
+    require("resource://devtools/client/shared/components/tree/TreeView.js")
   );
   const { JsonToolbar } = createFactories(
-    require("devtools/client/jsonview/components/JsonToolbar")
+    require("resource://devtools/client/jsonview/components/JsonToolbar.js")
   );
 
   const {
     MODE,
-  } = require("devtools/client/shared/components/reps/reps/constants");
-  const { Rep } = require("devtools/client/shared/components/reps/reps/rep");
+  } = require("resource://devtools/client/shared/components/reps/reps/constants.js");
+  const {
+    Rep,
+  } = require("resource://devtools/client/shared/components/reps/reps/rep.js");
 
   const { div } = dom;
+
+  const MAX_STRING_LENGTH = 250;
 
   function isObject(value) {
     return Object(value) === value;
@@ -71,7 +77,7 @@ define(function (require, exports, module) {
       document.removeEventListener("keypress", this.onKeyPress, true);
     }
 
-    onKeyPress(e) {
+    onKeyPress() {
       // XXX shortcut for focusing the Filter field (see Bug 1178771).
     }
 
@@ -95,7 +101,7 @@ define(function (require, exports, module) {
       // Render the value (summary) using Reps library.
       return Rep(
         Object.assign({}, props, {
-          cropLimit: 50,
+          cropLimit: MAX_STRING_LENGTH,
           noGrip: true,
           isInContentPage: true,
         })
@@ -115,11 +121,12 @@ define(function (require, exports, module) {
       // Render tree component.
       return TreeView({
         object: this.props.data,
-        mode: MODE.TINY,
+        mode: MODE.LONG,
         onFilter: this.onFilter,
         columns,
         renderValue: this.renderValue,
         expandedNodes: this.props.expandedNodes,
+        maxStringLength: MAX_STRING_LENGTH,
       });
     }
 

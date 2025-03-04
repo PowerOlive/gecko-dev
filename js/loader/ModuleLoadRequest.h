@@ -18,12 +18,13 @@
 
 namespace JS::loader {
 
+class LoadedScript;
 class ModuleScript;
 class ModuleLoaderBase;
 
-// A reference counted set of URLs we have visited in the process of loading a
-// module graph.
-class VisitedURLSet : public nsTHashtable<nsURIHashKey> {
+// A reference counted set of module keys (URL and module type) we have visited
+// in the process of loading a module graph.
+class VisitedURLSet : public nsTHashtable<ModuleMapKey> {
   NS_INLINE_DECL_REFCOUNTING(VisitedURLSet)
 
  private:
@@ -49,13 +50,16 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
                                                          ScriptLoadRequest)
   using SRIMetadata = mozilla::dom::SRIMetadata;
 
-  ModuleLoadRequest(nsIURI* aURI, ScriptFetchOptions* aFetchOptions,
+  ModuleLoadRequest(nsIURI* aURI, JS::ModuleType aModuleType,
+                    mozilla::dom::ReferrerPolicy aReferrerPolicy,
+                    ScriptFetchOptions* aFetchOptions,
                     const SRIMetadata& aIntegrity, nsIURI* aReferrer,
                     LoadContextBase* aContext, bool aIsTopLevel,
                     bool aIsDynamicImport, ModuleLoaderBase* aLoader,
                     VisitedURLSet* aVisitedSet, ModuleLoadRequest* aRootModule);
 
-  static VisitedURLSet* NewVisitedSetForTopLevelImport(nsIURI* aURI);
+  static VisitedURLSet* NewVisitedSetForTopLevelImport(
+      nsIURI* aURI, JS::ModuleType aModuleType);
 
   bool IsTopLevel() const override { return mIsTopLevel; }
 
@@ -67,6 +71,10 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
 
   void SetReady() override;
   void Cancel() override;
+
+  void SetDynamicImport(LoadedScript* aReferencingScript,
+                        JS::Handle<JSString*> aSpecifier,
+                        JS::Handle<JSObject*> aPromise);
   void ClearDynamicImport();
 
   void ModuleLoaded();
@@ -81,13 +89,7 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
     return mRootModule;
   }
 
-  bool IsModuleMarkedForBytecodeEncoding() const {
-    return mIsMarkedForBytecodeEncoding;
-  }
-  void MarkModuleForBytecodeEncoding() {
-    MOZ_ASSERT(!IsModuleMarkedForBytecodeEncoding());
-    mIsMarkedForBytecodeEncoding = true;
-  }
+  void MarkModuleForBytecodeEncoding() { MarkForBytecodeEncoding(); }
 
   // Convenience methods to call into the module loader for this request.
 
@@ -119,6 +121,8 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
   void CancelImports();
   void CheckModuleDependenciesLoaded();
 
+  void ChildModuleUnlinked();
+
   void AssertAllImportsFinished() const;
   void AssertAllImportsCancelled() const;
 
@@ -126,13 +130,11 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
   // Is this a request for a top level module script or an import?
   const bool mIsTopLevel;
 
+  // Type of module (JavaScript, JSON)
+  const JS::ModuleType mModuleType;
+
   // Is this the top level request for a dynamic module import?
   const bool mIsDynamicImport;
-
-  // True if this module is planned to be saved in the bytecode cache.
-  // ModuleLoadRequest doesn't use ScriptLoadRequest::mScriptForBytecodeEncoding
-  // field because the JSScript reference isn't always avaialble for module.
-  bool mIsMarkedForBytecodeEncoding = false;
 
   // Pointer to the script loader, used to trigger actions when the module load
   // finishes.
@@ -162,7 +164,7 @@ class ModuleLoadRequest final : public ScriptLoadRequest {
   RefPtr<VisitedURLSet> mVisitedSet;
 
   // For dynamic imports, the details to pass to FinishDynamicImport.
-  JS::Heap<JS::Value> mDynamicReferencingPrivate;
+  RefPtr<LoadedScript> mDynamicReferencingScript;
   JS::Heap<JSString*> mDynamicSpecifier;
   JS::Heap<JSObject*> mDynamicPromise;
 };

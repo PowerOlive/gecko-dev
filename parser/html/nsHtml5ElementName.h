@@ -118,8 +118,8 @@ class nsHtml5ElementName {
     return -1;
   }
 
-  inline static nsHtml5ElementName* elementNameByBuffer(
-      char16_t* buf, int32_t length, nsHtml5AtomTable* interner) {
+  inline static nsHtml5ElementName* elementNameByBuffer(char16_t* buf,
+                                                        int32_t length) {
     uint32_t hash = nsHtml5ElementName::bufToHash(buf, length);
     jArray<int32_t, int32_t> hashes;
     hashes = nsHtml5ElementName::ELEMENT_HASHES;
@@ -237,6 +237,7 @@ class nsHtml5ElementName {
   static nsHtml5ElementName* ELT_DESC;
   static nsHtml5ElementName* ELT_DD;
   static nsHtml5ElementName* ELT_BGSOUND;
+  static nsHtml5ElementName* ELT_DISCARD;
   static nsHtml5ElementName* ELT_EMBED;
   static nsHtml5ElementName* ELT_FEBLEND;
   static nsHtml5ElementName* ELT_FEFLOOD;

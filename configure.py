@@ -3,7 +3,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import codecs
-import errno
 import io
 import itertools
 import logging
@@ -18,11 +17,10 @@ sys.path.insert(0, os.path.join(base_dir, "python", "mach"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozboot"))
 sys.path.insert(0, os.path.join(base_dir, "python", "mozbuild"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "packaging"))
-sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "pyparsing"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "six"))
 sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "looseversion"))
+sys.path.insert(0, os.path.join(base_dir, "third_party", "python", "filelock"))
 import mozpack.path as mozpath
-import six
 from mach.requirements import MachEnvRequirements
 from mach.site import (
     CommandSiteManager,
@@ -34,6 +32,16 @@ from mach.site import (
 from mozbuild.backend.configenvironment import PartialConfigEnvironment
 from mozbuild.configure import TRACE, ConfigureSandbox
 from mozbuild.pythonutil import iter_modules_in_path
+
+if "MOZ_CONFIGURE_BUILDSTATUS" in os.environ:
+
+    def buildstatus(message):
+        print("BUILDSTATUS", message)
+
+else:
+
+    def buildstatus(message):
+        return
 
 
 def main(argv):
@@ -112,7 +120,9 @@ def main(argv):
                 file=sys.stderr,
             )
             return 1
+        buildstatus("START_configure activate virtualenv")
         _activate_build_virtualenv()
+        buildstatus("END_configure activate virtualenv")
 
     clobber_file = "CLOBBER"
     if not os.path.exists(clobber_file):
@@ -123,44 +133,50 @@ def main(argv):
     if os.environ.get("MOZ_CONFIGURE_TRACE"):
         sandbox._logger.setLevel(TRACE)
 
-    sandbox.run(os.path.join(os.path.dirname(__file__), "moz.configure"))
+    buildstatus("START_configure read moz.configure")
+    sandbox.include_file(os.path.join(os.path.dirname(__file__), "moz.configure"))
+    buildstatus("END_configure read moz.configure")
+    buildstatus("START_configure run moz.configure")
+    sandbox.run()
+    buildstatus("END_configure run moz.configure")
 
     if sandbox._help:
         return 0
 
+    buildstatus("START_configure config.status")
     logging.getLogger("moz.configure").info("Creating config.status")
 
     old_js_configure_substs = config.pop("OLD_JS_CONFIGURE_SUBSTS", None)
     old_js_configure_defines = config.pop("OLD_JS_CONFIGURE_DEFINES", None)
-    if old_js_configure_substs or old_js_configure_defines:
-        js_config = config.copy()
-        pwd = os.getcwd()
-        try:
+    try:
+        if old_js_configure_substs or old_js_configure_defines:
+            js_config = config.copy()
+            pwd = os.getcwd()
             try:
-                os.makedirs("js/src")
-            except OSError as e:
-                if e.errno != errno.EEXIST:
-                    raise
+                os.makedirs("js/src", exist_ok=True)
+                os.chdir("js/src")
+                js_config["OLD_CONFIGURE_SUBSTS"] = old_js_configure_substs
+                js_config["OLD_CONFIGURE_DEFINES"] = old_js_configure_defines
+                # The build system frontend expects $objdir/js/src/config.status
+                # to have $objdir/js/src as topobjdir.
+                # We want forward slashes on all platforms.
+                js_config["TOPOBJDIR"] += "/js/src"
+                ret = config_status(js_config, execute=False)
+                if ret:
+                    return ret
+            finally:
+                os.chdir(pwd)
 
-            os.chdir("js/src")
-            js_config["OLD_CONFIGURE_SUBSTS"] = old_js_configure_substs
-            js_config["OLD_CONFIGURE_DEFINES"] = old_js_configure_defines
-            # The build system frontend expects $objdir/js/src/config.status
-            # to have $objdir/js/src as topobjdir.
-            # We want forward slashes on all platforms.
-            js_config["TOPOBJDIR"] += "/js/src"
-            config_status(js_config, execute=False)
-        finally:
-            os.chdir(pwd)
-
-    return config_status(config)
+        return config_status(config)
+    finally:
+        buildstatus("END_configure config.status")
 
 
 def check_unicode(obj):
     """Recursively check that all strings in the object are unicode strings."""
     if isinstance(obj, dict):
         result = True
-        for k, v in six.iteritems(obj):
+        for k, v in obj.items():
             if not check_unicode(k):
                 print("%s key is not unicode." % k, file=sys.stderr)
                 result = False
@@ -170,7 +186,7 @@ def check_unicode(obj):
         return result
     if isinstance(obj, bytes):
         return False
-    if isinstance(obj, six.text_type):
+    if isinstance(obj, str):
         return True
     if isinstance(obj, Iterable):
         return all(check_unicode(o) for o in obj)
@@ -188,14 +204,14 @@ def config_status(config, execute=True):
         if v is False:
             return ""
         # Serialize types that look like lists and tuples as lists.
-        if not isinstance(v, (bytes, six.text_type, dict)) and isinstance(v, Iterable):
+        if not isinstance(v, (bytes, str, dict)) and isinstance(v, Iterable):
             return list(v)
         return v
 
     sanitized_config = {}
     sanitized_config["substs"] = {
         k: sanitize_config(v)
-        for k, v in six.iteritems(config)
+        for k, v in config.items()
         if k
         not in (
             "DEFINES",
@@ -209,7 +225,7 @@ def config_status(config, execute=True):
     for k, v in config["OLD_CONFIGURE_SUBSTS"]:
         sanitized_config["substs"][k] = sanitize_config(v)
     sanitized_config["defines"] = {
-        k: sanitize_config(v) for k, v in six.iteritems(config["DEFINES"])
+        k: sanitize_config(v) for k, v in config["DEFINES"].items()
     }
     for k, v in config["OLD_CONFIGURE_DEFINES"]:
         sanitized_config["defines"][k] = sanitize_config(v)
@@ -220,7 +236,7 @@ def config_status(config, execute=True):
     if not check_unicode(sanitized_config):
         print("Configuration should be all unicode.", file=sys.stderr)
         print("Please file a bug for the above.", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     # Create config.status. Eventually, we'll want to just do the work it does
     # here, when we're able to skip configure tests/use cached results/not rely
@@ -236,7 +252,7 @@ def config_status(config, execute=True):
             )
             % {"python": config["PYTHON3"]}
         )
-        for k, v in sorted(six.iteritems(sanitized_config)):
+        for k, v in sorted(sanitized_config.items()):
             fh.write("%s = " % k)
             pprint.pprint(v, stream=fh, indent=4)
         fh.write(

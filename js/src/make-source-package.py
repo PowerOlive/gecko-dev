@@ -122,8 +122,7 @@ rsync_filter_list = """
 + /moz.configure
 + /test.mozbuild
 + /.babel-eslint.rc.js
-+ /.eslintignore
-+ /.eslintrc.js
++ /.eslintrc*.js
 + /.flake8
 + /.gitignore
 + /.hgignore
@@ -137,12 +136,15 @@ rsync_filter_list = """
 + /mfbt/**
 + /nsprpub/**
 
++ /intl/bidi/**
+
 - /intl/icu/source/data
 - /intl/icu/source/test
 - /intl/icu/source/tools
 + /intl/icu/**
 
-+ /intl/icu_testdata/**
++ /intl/icu_capi/**
++ /intl/icu_segmenter_data/**
 
 - /intl/components/gtest
 + /intl/components/**
@@ -176,8 +178,9 @@ rsync_filter_list = """
 + /config/**
 + /python/**
 
-+ /.cargo/config.in
++ /.cargo/config.toml.in
 
++ /third_party/fmt/**
 + /third_party/function2/**
 - /third_party/python/gyp
 + /third_party/python/**
@@ -189,7 +192,9 @@ rsync_filter_list = """
 + /testing/mach_commands.py
 + /testing/moz.build
 + /testing/mozbase/**
++ /testing/mozharness/**
 + /testing/performance/**
++ /testing/test/**
 + /testing/web-platform/*.ini
 + /testing/web-platform/*.py
 + /testing/web-platform/meta/streams/**
@@ -202,6 +207,9 @@ rsync_filter_list = """
 + /toolkit/mozapps/installer/package-name.mk
 
 + /xpcom/geckoprocesstypes_generator/**
+
+# List of prefs.
++ /modules/libpref/init/StaticPrefList.yaml
 
 # SpiderMonkey itself
 

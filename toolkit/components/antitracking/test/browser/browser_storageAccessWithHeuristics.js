@@ -24,15 +24,16 @@ add_setup(async function () {
       ["dom.storage_access.enabled", true],
       [
         "network.cookie.cookieBehavior",
-        Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER,
+        Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN,
       ],
       [
         "network.cookie.cookieBehavior.pbmode",
-        Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER,
+        Ci.nsICookieService.BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN,
       ],
       ["privacy.trackingprotection.enabled", false],
       ["privacy.trackingprotection.pbmode.enabled", false],
       ["privacy.trackingprotection.annotate_channels", true],
+      ["privacy.restrict3rdpartystorage.heuristic.window_open", true],
       [
         "privacy.restrict3rdpartystorage.userInteractionRequiredForHosts",
         "tracking.example.com,tracking.example.org",
@@ -131,7 +132,7 @@ async function runTestWindowOpenHeuristic(disableHeuristics) {
 
   info("Cleaning up.");
   await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
       resolve()
     );
   });
@@ -216,7 +217,7 @@ add_task(async function testDoublyNestedWindowOpenHeuristic() {
 add_task(async function () {
   info("Cleaning up.");
   await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
       resolve()
     );
   });
@@ -294,23 +295,21 @@ async function runTestUserInteractionHeuristic(disableHeuristics) {
       info("Opening a window from the iframe.");
       await SpecialPowers.spawn(ifr, [obj.popup], async popup => {
         let windowClosed = new content.Promise(resolve => {
-          Services.ww.registerNotification(function notification(
-            aSubject,
-            aTopic,
-            aData
-          ) {
-            // We need to check the document URI for Fission. It's because the
-            // 'domwindowclosed' would be triggered twice, one for the
-            // 'about:blank' page and another for the tracker page.
-            if (
-              aTopic == "domwindowclosed" &&
-              aSubject.document.documentURI ==
-                "https://tracking.example.org/browser/toolkit/components/antitracking/test/browser/3rdPartyOpenUI.html"
-            ) {
-              Services.ww.unregisterNotification(notification);
-              resolve();
+          Services.ww.registerNotification(
+            function notification(aSubject, aTopic) {
+              // We need to check the document URI for Fission. It's because the
+              // 'domwindowclosed' would be triggered twice, one for the
+              // 'about:blank' page and another for the tracker page.
+              if (
+                aTopic == "domwindowclosed" &&
+                aSubject.document.documentURI ==
+                  "https://tracking.example.org/browser/toolkit/components/antitracking/test/browser/3rdPartyOpenUI.html"
+              ) {
+                Services.ww.unregisterNotification(notification);
+                resolve();
+              }
             }
-          });
+          );
         });
 
         content.open(popup);
@@ -416,22 +415,20 @@ async function runTestUserInteractionHeuristic(disableHeuristics) {
       info("Opening a window from the iframe.");
       await SpecialPowers.spawn(ifr, [obj.popup], async popup => {
         let windowClosed = new content.Promise(resolve => {
-          Services.ww.registerNotification(function notification(
-            aSubject,
-            aTopic,
-            aData
-          ) {
-            // We need to check the document URI here as well for the same
-            // reason above.
-            if (
-              aTopic == "domwindowclosed" &&
-              aSubject.document.documentURI ==
-                "https://tracking.example.org/browser/toolkit/components/antitracking/test/browser/3rdPartyOpenUI.html"
-            ) {
-              Services.ww.unregisterNotification(notification);
-              resolve();
+          Services.ww.registerNotification(
+            function notification(aSubject, aTopic) {
+              // We need to check the document URI here as well for the same
+              // reason above.
+              if (
+                aTopic == "domwindowclosed" &&
+                aSubject.document.documentURI ==
+                  "https://tracking.example.org/browser/toolkit/components/antitracking/test/browser/3rdPartyOpenUI.html"
+              ) {
+                Services.ww.unregisterNotification(notification);
+                resolve();
+              }
             }
-          });
+          );
         });
 
         content.open(popup);
@@ -479,7 +476,7 @@ async function runTestUserInteractionHeuristic(disableHeuristics) {
 
   info("Cleaning up.");
   await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
       resolve()
     );
   });
@@ -489,6 +486,12 @@ async function runTestUserInteractionHeuristic(disableHeuristics) {
 
 add_task(async function testUserInteractionHeuristic() {
   await runTestUserInteractionHeuristic(false);
+});
+
+add_task(async function testUserInteractionHeuristicWithoutTracker() {
+  UrlClassifierTestUtils.cleanupTestTrackers();
+  await runTestUserInteractionHeuristic(false);
+  await UrlClassifierTestUtils.addTestTrackers();
 });
 
 add_task(async function testUserInteractionHeuristicDisabled() {
@@ -562,16 +565,14 @@ add_task(async function testDoublyNestedUserInteractionHeuristic() {
       });
 
       let windowClosed = new content.Promise(resolve => {
-        Services.ww.registerNotification(function notification(
-          aSubject,
-          aTopic,
-          aData
-        ) {
-          if (aTopic == "domwindowclosed") {
-            Services.ww.unregisterNotification(notification);
-            resolve();
+        Services.ww.registerNotification(
+          function notification(aSubject, aTopic) {
+            if (aTopic == "domwindowclosed") {
+              Services.ww.unregisterNotification(notification);
+              resolve();
+            }
           }
-        });
+        );
       });
 
       info("Opening a window from the iframe.");
@@ -672,16 +673,14 @@ add_task(async function testDoublyNestedUserInteractionHeuristic() {
       });
 
       let windowClosed = new content.Promise(resolve => {
-        Services.ww.registerNotification(function notification(
-          aSubject,
-          aTopic,
-          aData
-        ) {
-          if (aTopic == "domwindowclosed") {
-            Services.ww.unregisterNotification(notification);
-            resolve();
+        Services.ww.registerNotification(
+          function notification(aSubject, aTopic) {
+            if (aTopic == "domwindowclosed") {
+              Services.ww.unregisterNotification(notification);
+              resolve();
+            }
           }
-        });
+        );
       });
 
       info("Opening a window from the iframe.");
@@ -732,7 +731,7 @@ add_task(async function () {
 
   info("Cleaning up.");
   await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
       resolve()
     );
   });
@@ -893,7 +892,7 @@ async function runTestFirstPartyWindowOpenHeuristic(disableHeuristics) {
 
   info("Cleaning up.");
   await new Promise(resolve => {
-    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, value =>
+    Services.clearData.deleteData(Ci.nsIClearDataService.CLEAR_ALL, () =>
       resolve()
     );
   });

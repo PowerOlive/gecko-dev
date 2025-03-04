@@ -34,8 +34,6 @@ with Files("WebRTCChild.sys.mjs"):
 FINAL_TARGET_FILES.actors += [
     "AboutNewTabChild.sys.mjs",
     "AboutNewTabParent.sys.mjs",
-    "AboutPluginsChild.sys.mjs",
-    "AboutPluginsParent.sys.mjs",
     "AboutPocketChild.sys.mjs",
     "AboutPocketParent.sys.mjs",
     "AboutPrivateBrowsingChild.sys.mjs",
@@ -77,8 +75,6 @@ FINAL_TARGET_FILES.actors += [
     "PromptParent.sys.mjs",
     "RefreshBlockerChild.sys.mjs",
     "RefreshBlockerParent.sys.mjs",
-    "RFPHelperChild.sys.mjs",
-    "RFPHelperParent.sys.mjs",
     "ScreenshotsComponentChild.sys.mjs",
     "SearchSERPTelemetryChild.sys.mjs",
     "SearchSERPTelemetryParent.sys.mjs",
@@ -90,5 +86,5 @@ FINAL_TARGET_FILES.actors += [
 ]
 
 BROWSER_CHROME_MANIFESTS += [
-    "test/browser/browser.ini",
+    "test/browser/browser.toml",
 ]

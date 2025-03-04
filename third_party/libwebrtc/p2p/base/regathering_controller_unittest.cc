@@ -40,7 +40,6 @@ const rtc::SocketAddress kTurnUdpIntAddr("99.99.99.3",
 const cricket::RelayCredentials kRelayCredentials("test", "test");
 const char kIceUfrag[] = "UF00";
 const char kIcePwd[] = "TESTICEPWD00000000000000";
-constexpr uint64_t kTiebreakerDefault = 44444;
 
 }  // namespace
 
@@ -59,7 +58,6 @@ class RegatheringControllerTest : public ::testing::Test,
             rtc::Thread::Current(),
             packet_socket_factory_.get(),
             &field_trials_)) {
-    allocator_->SetIceTiebreaker(kTiebreakerDefault);
     BasicRegatheringController::Config regathering_config;
     regathering_config.regather_on_failed_networks_interval = 0;
     regathering_controller_.reset(new BasicRegatheringController(
@@ -97,7 +95,7 @@ class RegatheringControllerTest : public ::testing::Test,
     allocator_session_->ClearGettingPorts();
   }
 
-  void OnIceRegathering(cricket::PortAllocatorSession* allocator_session,
+  void OnIceRegathering(cricket::PortAllocatorSession* /* allocator_session */,
                         cricket::IceRegatheringReason reason) {
     ++count_[reason];
   }

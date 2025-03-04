@@ -4,7 +4,10 @@
 
 "use strict";
 
-const { l10n } = require("resource://devtools/shared/inspector/css-logic.js");
+const {
+  l10n,
+  l10nFormatStr,
+} = require("resource://devtools/shared/inspector/css-logic.js");
 const {
   InplaceEditor,
   editableField,
@@ -38,26 +41,28 @@ loader.lazyRequireGetter(
   "resource://devtools/shared/inspector/css-logic.js",
   true
 );
+loader.lazyGetter(this, "PROPERTY_NAME_INPUT_LABEL", function () {
+  return l10n("rule.propertyName.label");
+});
+loader.lazyGetter(this, "SHORTHAND_EXPANDER_TOOLTIP", function () {
+  return l10n("rule.shorthandExpander.tooltip");
+});
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   AppConstants: "resource://gre/modules/AppConstants.sys.mjs",
 });
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
-// @backward-compat { version 117 } The pref is enabled by default since 117.
-//                                  Let's completely remove it once 117 hits release.
-const inlineCompatibilityWarningEnabled = Services.prefs.getBoolPref(
-  "devtools.inspector.ruleview.inline-compatibility-warning.enabled"
-);
 
-const SHARED_SWATCH_CLASS = "ruleview-swatch";
-const COLOR_SWATCH_CLASS = "ruleview-colorswatch";
-const BEZIER_SWATCH_CLASS = "ruleview-bezierswatch";
-const LINEAR_EASING_SWATCH_CLASS = "ruleview-lineareasingswatch";
-const FILTER_SWATCH_CLASS = "ruleview-filterswatch";
-const ANGLE_SWATCH_CLASS = "ruleview-angleswatch";
+const SHARED_SWATCH_CLASS = "inspector-swatch";
+const COLOR_SWATCH_CLASS = "inspector-colorswatch";
+const BEZIER_SWATCH_CLASS = "inspector-bezierswatch";
+const LINEAR_EASING_SWATCH_CLASS = "inspector-lineareasingswatch";
+const FILTER_SWATCH_CLASS = "inspector-filterswatch";
+const ANGLE_SWATCH_CLASS = "inspector-angleswatch";
 const FONT_FAMILY_CLASS = "ruleview-font-family";
-const SHAPE_SWATCH_CLASS = "ruleview-shapeswatch";
+const SHAPE_SWATCH_CLASS = "inspector-shapeswatch";
 
 /*
  * An actionable element is an element which on click triggers a specific action
@@ -85,21 +90,6 @@ const DRAGGING_DEADZONE_DISTANCE = 5;
 
 const DRAGGABLE_VALUE_CLASSNAME = "ruleview-propertyvalue-draggable";
 const IS_DRAGGING_CLASSNAME = "ruleview-propertyvalue-dragging";
-
-// In order to highlight the used fonts in font-family properties, we
-// retrieve the list of used fonts from the server. That always
-// returns the actually used font family name(s). If the property's
-// authored value is sans-serif for instance, the used font might be
-// arial instead.  So we need the list of all generic font family
-// names to underline those when we find them.
-const GENERIC_FONT_FAMILIES = [
-  "serif",
-  "sans-serif",
-  "cursive",
-  "fantasy",
-  "monospace",
-  "system-ui",
-];
 
 /**
  * TextPropertyEditor is responsible for the following:
@@ -131,6 +121,7 @@ function TextPropertyEditor(ruleEditor, property) {
   this.telemetry = this.toolbox.telemetry;
 
   this._isDragging = false;
+  this._capturingPointerId = null;
   this._hasDragged = false;
   this._draggingController = null;
   this._draggingValueCache = null;
@@ -151,9 +142,9 @@ function TextPropertyEditor(ruleEditor, property) {
   this._onValidate = this.ruleView.debounce(this._previewValue, 10, this);
   this._onValueDone = this._onValueDone.bind(this);
 
-  this._draggingOnMouseDown = this._draggingOnMouseDown.bind(this);
+  this._draggingOnPointerDown = this._draggingOnPointerDown.bind(this);
   this._draggingOnMouseMove = throttle(this._draggingOnMouseMove, 30, this);
-  this._draggingOnMouseUp = this._draggingOnMouseUp.bind(this);
+  this._draggingOnPointerUp = this._draggingOnPointerUp.bind(this);
   this._draggingOnKeydown = this._draggingOnKeydown.bind(this);
 
   this._create();
@@ -211,8 +202,7 @@ TextPropertyEditor.prototype = {
     this.enable = createChild(this.container, "input", {
       type: "checkbox",
       class: "ruleview-enableproperty",
-      "aria-labelledby": this.prop.id,
-      tabindex: "-1",
+      title: l10nFormatStr("rule.propertyToggle.label", this.prop.name),
     });
 
     this.nameContainer = createChild(this.container, "span", {
@@ -230,8 +220,10 @@ TextPropertyEditor.prototype = {
     appendText(this.nameContainer, ": ");
 
     // Click to expand the computed properties of the text property.
-    this.expander = createChild(this.container, "span", {
+    this.expander = createChild(this.container, "button", {
+      "aria-expanded": "false",
       class: "ruleview-expander theme-twisty",
+      title: SHORTHAND_EXPANDER_TOOLTIP,
     });
     this.expander.addEventListener("click", this._onExpandClicked, true);
 
@@ -263,21 +255,28 @@ TextPropertyEditor.prototype = {
       title: l10n("rule.warning.title"),
     });
 
+    this.invalidAtComputedValueTimeWarning = createChild(
+      this.container,
+      "div",
+      {
+        class: "ruleview-invalid-at-computed-value-time-warning",
+        hidden: "",
+      }
+    );
+
     this.unusedState = createChild(this.container, "div", {
       class: "ruleview-unused-warning",
       hidden: "",
     });
 
-    if (inlineCompatibilityWarningEnabled) {
-      this.compatibilityState = createChild(this.container, "div", {
-        class: "ruleview-compatibility-warning",
-        hidden: "",
-      });
-    }
+    this.compatibilityState = createChild(this.container, "div", {
+      class: "ruleview-compatibility-warning",
+      hidden: "",
+    });
 
     // Filter button that filters for the current property name and is
     // displayed when the property is overridden by another rule.
-    this.filterProperty = createChild(this.container, "div", {
+    this.filterProperty = createChild(this.container, "button", {
       class: "ruleview-overridden-rule-filter",
       hidden: "",
       title: l10n("rule.filterProperty.title"),
@@ -315,6 +314,9 @@ TextPropertyEditor.prototype = {
         }
       });
 
+      const getCssVariables = () =>
+        this.rule.elementStyle.getAllCustomProperties(this.rule.pseudoElement);
+
       editableField({
         start: this._onStartEditing,
         element: this.nameSpan,
@@ -324,6 +326,17 @@ TextPropertyEditor.prototype = {
         contentType: InplaceEditor.CONTENT_TYPES.CSS_PROPERTY,
         popup: this.popup,
         cssProperties: this.cssProperties,
+        getCssVariables,
+        // (Shift+)Tab will move the focus to the previous/next editable field (so property value
+        // or new selector).
+        focusEditableFieldAfterApply: true,
+        focusEditableFieldContainerSelector: ".ruleview-rule",
+        // We don't want Enter to trigger the next editable field, just to validate
+        // what the user entered, close the editor, and focus the span so the user can
+        // navigate with the keyboard as expected, unless the user has
+        // devtools.inspector.rule-view.focusNextOnEnter set to true
+        stopOnReturn: this.ruleView.inplaceEditorFocusNextOnEnter !== true,
+        inputAriaLabel: PROPERTY_NAME_INPUT_LABEL,
       });
 
       // Auto blur name field on multiple CSS rules get pasted in.
@@ -371,8 +384,8 @@ TextPropertyEditor.prototype = {
         }
       });
 
-      this.valueSpan.addEventListener("mouseup", event => {
-        // if we have dragged, we will handle the pending click in _draggingOnMouseUp instead
+      this.valueSpan.addEventListener("pointerup", () => {
+        // if we have dragged, we will handle the pending click in _draggingOnPointerUp instead
         if (this._hasDragged) {
           return;
         }
@@ -412,11 +425,21 @@ TextPropertyEditor.prototype = {
         multiline: true,
         maxWidth: () => this.container.getBoundingClientRect().width,
         cssProperties: this.cssProperties,
-        cssVariables:
-          this.rule.elementStyle.variablesMap.get(this.rule.pseudoElement) ||
-          [],
+        getCssVariables,
         getGridLineNames: this.getGridlineNames,
         showSuggestCompletionOnEmpty: true,
+        // (Shift+)Tab will move the focus to the previous/next editable field (so property name,
+        // or new property).
+        focusEditableFieldAfterApply: true,
+        focusEditableFieldContainerSelector: ".ruleview-rule",
+        // We don't want Enter to trigger the next editable field, just to validate
+        // what the user entered, close the editor, and focus the span so the user can
+        // navigate with the keyboard as expected, unless the user has
+        // devtools.inspector.rule-view.focusNextOnEnter set to true
+        stopOnReturn: this.ruleView.inplaceEditorFocusNextOnEnter !== true,
+        // Label the value input with the name span so screenreader users know what this
+        // applies to.
+        inputAriaLabelledBy: this.nameSpan.id,
       });
     }
   },
@@ -522,6 +545,10 @@ TextPropertyEditor.prototype = {
 
     const name = this.prop.name;
     this.nameSpan.textContent = name;
+    this.enable.setAttribute(
+      "title",
+      l10nFormatStr("rule.propertyToggle.label", name)
+    );
 
     // Combine the property's value and priority into one string for
     // the value.
@@ -544,7 +571,7 @@ TextPropertyEditor.prototype = {
     }
 
     const outputParser = this.ruleView._outputParser;
-    const parserOptions = {
+    this.outputParserOptions = {
       angleClass: "ruleview-angle",
       angleSwatchClass: SHARED_SWATCH_CLASS + " " + ANGLE_SWATCH_CLASS,
       bezierClass: "ruleview-bezier",
@@ -553,25 +580,38 @@ TextPropertyEditor.prototype = {
       colorSwatchClass: SHARED_SWATCH_CLASS + " " + COLOR_SWATCH_CLASS,
       filterClass: "ruleview-filter",
       filterSwatchClass: SHARED_SWATCH_CLASS + " " + FILTER_SWATCH_CLASS,
-      flexClass: "ruleview-flex js-toggle-flexbox-highlighter",
-      gridClass: "ruleview-grid js-toggle-grid-highlighter",
+      flexClass: "inspector-flex js-toggle-flexbox-highlighter",
+      gridClass: "inspector-grid js-toggle-grid-highlighter",
       linearEasingClass: "ruleview-lineareasing",
       linearEasingSwatchClass:
         SHARED_SWATCH_CLASS + " " + LINEAR_EASING_SWATCH_CLASS,
-      shapeClass: "ruleview-shape",
+      shapeClass: "inspector-shape",
       shapeSwatchClass: SHAPE_SWATCH_CLASS,
       // Only ask the parser to convert colors to the default color type specified by the
       // user if the property hasn't been changed yet.
-      defaultColorType: !propDirty,
+      useDefaultColorUnit: !propDirty,
+      defaultColorUnit: this.ruleView.inspector.defaultColorUnit,
       urlClass: "theme-link",
       fontFamilyClass: FONT_FAMILY_CLASS,
       baseURI: this.sheetHref,
-      unmatchedVariableClass: "ruleview-unmatched-variable",
-      matchedVariableClass: "ruleview-variable",
-      getVariableValue: varName =>
-        this.rule.elementStyle.getVariable(varName, this.rule.pseudoElement),
+      unmatchedClass: "inspector-unmatched",
+      matchedVariableClass: "inspector-variable",
+      getVariableData: varName =>
+        this.rule.elementStyle.getVariableData(
+          varName,
+          this.rule.pseudoElement
+        ),
+      inStartingStyleRule: this.rule.isInStartingStyle(),
     };
-    const frag = outputParser.parseCssProperty(name, val, parserOptions);
+
+    if (this.rule.darkColorScheme !== undefined) {
+      this.outputParserOptions.isDarkColorScheme = this.rule.darkColorScheme;
+    }
+    const frag = outputParser.parseCssProperty(
+      name,
+      val,
+      this.outputParserOptions
+    );
 
     // Save the initial value as the last committed value,
     // for restoring after pressing escape.
@@ -615,28 +655,14 @@ TextPropertyEditor.prototype = {
       this.rule.elementStyle
         .getUsedFontFamilies()
         .then(families => {
-          const usedFontFamilies = families.map(font => font.toLowerCase());
-          let foundMatchingFamily = false;
-          let firstGenericSpan = null;
-
           for (const span of fontFamilySpans) {
             const authoredFont = span.textContent.toLowerCase();
-
-            if (
-              !firstGenericSpan &&
-              GENERIC_FONT_FAMILIES.includes(authoredFont)
-            ) {
-              firstGenericSpan = span;
-            }
-
-            if (usedFontFamilies.includes(authoredFont)) {
+            if (families.has(authoredFont)) {
               span.classList.add("used-font");
-              foundMatchingFamily = true;
+              // In case a font-family appears multiple time in the value, we only want
+              // to highlight the first occurence.
+              families.delete(authoredFont);
             }
-          }
-
-          if (!foundMatchingFamily && firstGenericSpan) {
-            firstGenericSpan.classList.add("used-font");
           }
 
           this.ruleView.emit("font-highlighted", this.valueSpan);
@@ -709,7 +735,7 @@ TextPropertyEditor.prototype = {
     const span = this.valueSpan.querySelector("." + FILTER_SWATCH_CLASS);
     if (this.ruleEditor.isEditable) {
       if (span) {
-        parserOptions.filterSwatch = true;
+        this.outputParserOptions.filterSwatch = true;
 
         this.ruleView.tooltips.getTooltip("filterEditor").addSwatch(
           span,
@@ -720,7 +746,7 @@ TextPropertyEditor.prototype = {
             onRevert: this._onSwatchRevert,
           },
           outputParser,
-          parserOptions
+          this.outputParserOptions
         );
         const title = l10n("rule.filterSwatch.tooltip");
         span.setAttribute("title", title);
@@ -732,7 +758,7 @@ TextPropertyEditor.prototype = {
     );
     if (this.ruleEditor.isEditable) {
       for (const angleSpan of this.angleSwatchSpans) {
-        angleSpan.on("unit-change", this._onSwatchCommit);
+        angleSpan.addEventListener("unit-change", this._onSwatchCommit);
         const title = l10n("rule.angleSwatch.tooltip");
         angleSpan.setAttribute("title", title);
       }
@@ -740,22 +766,22 @@ TextPropertyEditor.prototype = {
 
     const nodeFront = this.ruleView.inspector.selection.nodeFront;
 
-    const flexToggle = this.valueSpan.querySelector(".ruleview-flex");
+    const flexToggle = this.valueSpan.querySelector(".inspector-flex");
     if (flexToggle) {
       flexToggle.setAttribute("title", l10n("rule.flexToggle.tooltip"));
-      flexToggle.classList.toggle(
-        "active",
+      flexToggle.setAttribute(
+        "aria-pressed",
         this.ruleView.inspector.highlighters.getNodeForActiveHighlighter(
           this.ruleView.inspector.highlighters.TYPES.FLEXBOX
         ) === nodeFront
       );
     }
 
-    const gridToggle = this.valueSpan.querySelector(".ruleview-grid");
+    const gridToggle = this.valueSpan.querySelector(".inspector-grid");
     if (gridToggle) {
       gridToggle.setAttribute("title", l10n("rule.gridToggle.tooltip"));
-      gridToggle.classList.toggle(
-        "active",
+      gridToggle.setAttribute(
+        "aria-pressed",
         this.ruleView.highlighters.gridHighlighters.has(nodeFront)
       );
       gridToggle.toggleAttribute(
@@ -764,7 +790,7 @@ TextPropertyEditor.prototype = {
       );
     }
 
-    const shapeToggle = this.valueSpan.querySelector(".ruleview-shapeswatch");
+    const shapeToggle = this.valueSpan.querySelector(".inspector-shapeswatch");
     if (shapeToggle) {
       const mode =
         "css" +
@@ -775,6 +801,8 @@ TextPropertyEditor.prototype = {
           })
           .join("");
       shapeToggle.setAttribute("data-mode", mode);
+      shapeToggle.setAttribute("aria-pressed", false);
+      shapeToggle.setAttribute("title", l10n("rule.shapeToggle.tooltip"));
     }
 
     // Now that we have updated the property's value, we might have a pending
@@ -852,6 +880,17 @@ TextPropertyEditor.prototype = {
       : l10n("rule.warning.title");
 
     this.warning.hidden = this.editing || this.isValid();
+
+    if (!this.editing && this.isInvalidAtComputedValueTime()) {
+      this.invalidAtComputedValueTimeWarning.title = l10nFormatStr(
+        "rule.warningInvalidAtComputedValueTime.title",
+        `"${this.prop.getExpectedSyntax()}"`
+      );
+      this.invalidAtComputedValueTimeWarning.hidden = false;
+    } else {
+      this.invalidAtComputedValueTimeWarning.hidden = true;
+    }
+
     this.filterProperty.hidden =
       this.editing ||
       !this.isValid() ||
@@ -872,10 +911,7 @@ TextPropertyEditor.prototype = {
     }
 
     this.updatePropertyUsedIndicator();
-
-    if (inlineCompatibilityWarningEnabled) {
-      this.updatePropertyCompatibilityIndicator();
-    }
+    this.updatePropertyCompatibilityIndicator();
   },
 
   updatePropertyUsedIndicator() {
@@ -913,7 +949,7 @@ TextPropertyEditor.prototype = {
         : "none";
 
     this._populatedComputed = false;
-    if (this.expander.hasAttribute("open")) {
+    if (this.expander.getAttribute("aria-expanded" === "true")) {
       this._populateComputed();
     }
   },
@@ -1008,7 +1044,7 @@ TextPropertyEditor.prototype = {
 
     const outputParser = this.ruleView._outputParser;
     const frag = outputParser.parseCssProperty(computed.name, computed.value, {
-      colorSwatchClass: "ruleview-swatch ruleview-colorswatch",
+      colorSwatchClass: "inspector-swatch inspector-colorswatch",
       urlClass: "theme-link",
       baseURI: this.sheetHref,
       fontFamilyClass: "ruleview-font-family",
@@ -1066,17 +1102,17 @@ TextPropertyEditor.prototype = {
    * expanded by manually by the user.
    */
   _onExpandClicked(event) {
-    if (
+    const isOpened =
       this.computed.hasAttribute("filter-open") ||
-      this.computed.hasAttribute("user-open")
-    ) {
-      this.expander.removeAttribute("open");
+      this.computed.hasAttribute("user-open");
+
+    this.expander.setAttribute("aria-expanded", !isOpened);
+    if (isOpened) {
       this.computed.removeAttribute("filter-open");
       this.computed.removeAttribute("user-open");
       this.shorthandOverridden.hidden = false;
       this._populateShorthandOverridden();
     } else {
-      this.expander.setAttribute("open", "true");
       this.computed.setAttribute("user-open", "");
       this.shorthandOverridden.hidden = true;
       this._populateComputed();
@@ -1092,7 +1128,7 @@ TextPropertyEditor.prototype = {
    */
   expandForFilter() {
     if (!this.computed.hasAttribute("user-open")) {
-      this.expander.setAttribute("open", "true");
+      this.expander.setAttribute("aria-expanded", "true");
       this.computed.setAttribute("filter-open", "");
       this._populateComputed();
     }
@@ -1105,7 +1141,7 @@ TextPropertyEditor.prototype = {
     this.computed.removeAttribute("filter-open");
 
     if (!this.computed.hasAttribute("user-open")) {
-      this.expander.removeAttribute("open");
+      this.expander.setAttribute("aria-expanded", "false");
     }
   },
 
@@ -1136,9 +1172,16 @@ TextPropertyEditor.prototype = {
       return;
     }
 
-    // Remove a property if the property value is empty and the property
-    // value is not about to be focused
-    if (!this.prop.value && direction !== Services.focus.MOVEFOCUS_FORWARD) {
+    const isVariable = value.startsWith("--");
+
+    // Remove a property if:
+    // - the property value is empty and is not a variable (empty variables are valid)
+    // - and the property value is not about to be focused
+    if (
+      !this.prop.value &&
+      !isVariable &&
+      direction !== Services.focus.MOVEFOCUS_FORWARD
+    ) {
       this.remove(direction);
       return;
     }
@@ -1174,13 +1217,12 @@ TextPropertyEditor.prototype = {
     if (this._colorSwatchSpans && this._colorSwatchSpans.length) {
       for (const span of this._colorSwatchSpans) {
         this.ruleView.tooltips.getTooltip("colorPicker").removeSwatch(span);
-        span.off("unit-change", this._onSwatchCommit);
       }
     }
 
     if (this.angleSwatchSpans && this.angleSwatchSpans.length) {
       for (const span of this.angleSwatchSpans) {
-        span.off("unit-change", this._onSwatchCommit);
+        span.removeEventListener("unit-change", this._onSwatchCommit);
       }
     }
 
@@ -1219,9 +1261,11 @@ TextPropertyEditor.prototype = {
         this.committed.value === val.value &&
         this.committed.priority === val.priority);
 
-    // If the value is not empty and unchanged, revert the property back to
-    // its original value and enabled or disabled state
-    if (value.trim() && isValueUnchanged) {
+    const isVariable = this.prop.name.startsWith("--");
+
+    // If the value is not empty (or is an empty variable) and unchanged,
+    // revert the property back to its original value and enabled or disabled state
+    if ((value.trim() || isVariable) && isValueUnchanged) {
       this.ruleEditor.rule.previewPropertyValue(
         this.prop,
         val.value,
@@ -1253,12 +1297,17 @@ TextPropertyEditor.prototype = {
     // If needed, add any new properties after this.prop.
     this.ruleEditor.addProperties(parsedProperties.propertiesToAdd, this.prop);
 
-    // If the input value is empty and the focus is moving forward to the next
-    // editable field, then remove the whole property.
+    // If the input value is empty and is not a variable (empty variables are valid),
+    // and the focus is moving forward to the next editable field,
+    // then remove the whole property.
     // A timeout is used here to accurately check the state, since the inplace
     // editor `done` and `destroy` events fire before the next editor
     // is focused.
-    if (!value.trim() && direction !== Services.focus.MOVEFOCUS_BACKWARD) {
+    if (
+      !value.trim() &&
+      !isVariable &&
+      direction !== Services.focus.MOVEFOCUS_BACKWARD
+    ) {
       setTimeout(() => {
         if (!this.editing) {
           this.remove(direction);
@@ -1418,9 +1467,16 @@ TextPropertyEditor.prototype = {
     return !!dimensionMatchObj;
   },
 
-  _draggingOnMouseDown(event) {
+  _draggingOnPointerDown(event) {
+    // We want to handle a drag during a mouse button is pressed.  So, we can
+    // ignore pointer events which are caused by other devices.
+    if (event.pointerType != "mouse") {
+      return;
+    }
+
     this._isDragging = true;
     this.valueSpan.setPointerCapture(event.pointerId);
+    this._capturingPointerId = event.pointerId;
     this._draggingController = new AbortController();
     const { signal } = this._draggingController;
 
@@ -1436,10 +1492,12 @@ TextPropertyEditor.prototype = {
       unit,
     };
 
+    // "pointermove" is fired when the button state is changed too.  Therefore,
+    // we should listen to "mousemove" to handle the pointer position changes.
     this.valueSpan.addEventListener("mousemove", this._draggingOnMouseMove, {
       signal,
     });
-    this.valueSpan.addEventListener("mouseup", this._draggingOnMouseUp, {
+    this.valueSpan.addEventListener("pointerup", this._draggingOnPointerUp, {
       signal,
     });
     this.valueSpan.addEventListener("keydown", this._draggingOnKeydown, {
@@ -1489,12 +1547,13 @@ TextPropertyEditor.prototype = {
     const { value, unit } = this._draggingValueCache;
     // We use toFixed to avoid the case where value is too long, 9.00001px for example
     const roundedValue = Number.isInteger(value) ? value : value.toFixed(1);
-    this.prop.setValue(roundedValue + unit, this.prop.priority);
-    this.ruleView.emitForTests("property-updated-by-dragging");
+    this.prop
+      .setValue(roundedValue + unit, this.prop.priority)
+      .then(() => this.ruleView.emitForTests("property-updated-by-dragging"));
     this._hasDragged = true;
   },
 
-  _draggingOnMouseUp(event) {
+  _draggingOnPointerUp() {
     if (!this._isDragging) {
       return;
     }
@@ -1502,18 +1561,18 @@ TextPropertyEditor.prototype = {
       this.committed.value = this.prop.value;
       this.prop.setEnabled(true);
     }
-    this._onStopDragging(event);
+    this._onStopDragging();
   },
 
   _draggingOnKeydown(event) {
     if (event.key == "Escape") {
       this.prop.setValue(this.committed.value, this.committed.priority);
-      this._onStopDragging(event);
+      this._onStopDragging();
       event.preventDefault();
     }
   },
 
-  _onStopDragging(event) {
+  _onStopDragging() {
     // childHasDragged is used to stop the propagation of a click event when we
     // release the mouse in the ruleview.
     // The click event is not emitted when we have a pending click on the text property.
@@ -1523,7 +1582,15 @@ TextPropertyEditor.prototype = {
     this._isDragging = false;
     this._hasDragged = false;
     this._draggingValueCache = null;
-    this.valueSpan.releasePointerCapture(event.pointerId);
+    if (this._capturingPointerId !== null) {
+      this._capturingPointerId = null;
+      try {
+        this.valueSpan.releasePointerCapture(this._capturingPointerId);
+      } catch (e) {
+        // Ignore exception even if the pointerId has already been invalidated
+        // before the capture has already been released implicitly.
+      }
+    }
     this.valueSpan.classList.remove(IS_DRAGGING_CLASSNAME);
     this._draggingController.abort();
   },
@@ -1537,7 +1604,11 @@ TextPropertyEditor.prototype = {
       return;
     }
     this.valueSpan.classList.add(DRAGGABLE_VALUE_CLASSNAME);
-    this.valueSpan.addEventListener("mousedown", this._draggingOnMouseDown);
+    this.valueSpan.addEventListener(
+      "pointerdown",
+      this._draggingOnPointerDown,
+      { passive: true }
+    );
   },
 
   _removeDraggingCapacity() {
@@ -1546,7 +1617,11 @@ TextPropertyEditor.prototype = {
     }
     this._draggingController = null;
     this.valueSpan.classList.remove(DRAGGABLE_VALUE_CLASSNAME);
-    this.valueSpan.removeEventListener("mousedown", this._draggingOnMouseDown);
+    this.valueSpan.removeEventListener(
+      "pointerdown",
+      this._draggingOnPointerDown,
+      { passive: true }
+    );
   },
 
   /**
@@ -1565,6 +1640,10 @@ TextPropertyEditor.prototype = {
    */
   isNameValid() {
     return this.prop.isNameValid();
+  },
+
+  isInvalidAtComputedValueTime() {
+    return this.prop.isInvalidAtComputedValueTime();
   },
 
   /**

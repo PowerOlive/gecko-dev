@@ -7,23 +7,33 @@
 // Make this available to both AMD and CJS environments
 define(function (require, exports, module) {
   // Dependencies
-  const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
-  const { span } = require("devtools/client/shared/vendor/react-dom-factories");
+  const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-types.js");
+  const {
+    span,
+  } = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
 
   const {
     wrapRender,
     ellipsisElement,
-  } = require("devtools/client/shared/components/reps/reps/rep-utils");
-  const PropRep = require("devtools/client/shared/components/reps/reps/prop-rep");
+  } = require("resource://devtools/client/shared/components/reps/reps/rep-utils.js");
+  const PropRep = require("resource://devtools/client/shared/components/reps/reps/prop-rep.js");
   const {
     MODE,
-  } = require("devtools/client/shared/components/reps/reps/constants");
+  } = require("resource://devtools/client/shared/components/reps/reps/constants.js");
 
   const DEFAULT_TITLE = "Object";
 
   /**
    * Renders an object. An object is represented by a list of its
    * properties enclosed in curly brackets.
+   *
+   * This rep receives only an `object` property which is the actual object to render a
+   * preview for.
+   * This is used by JSON Viewer and Netmonitor to render JSON objects fetched from the
+   * frontend, which doesn't involve any Object Actor/Front or any grip (which is the
+   * object actor's form).
+   * In the console and debugger, plain JS objects are rendered via GripRep (in grip.js),
+   * as they involve an object actor.
    */
 
   ObjectRep.propTypes = {
@@ -70,24 +80,27 @@ define(function (require, exports, module) {
 
     const propsArray = safePropIterator(props, object);
 
+    const showTitle = getTitle(props) !== DEFAULT_TITLE;
+    const isEmptyObject = !propsArray.length;
+
     return span(
       {
         className: "objectBox objectBox-object",
         title: shouldRenderTooltip ? getTitle(props) : null,
       },
-      getTitleElement(props),
+      showTitle ? getTitleElement(props) : null,
       span(
         {
           className: "objectLeftBrace",
         },
-        " { "
+        (showTitle ? " " : "") + "{" + (isEmptyObject ? "" : " ")
       ),
       ...propsArray,
       span(
         {
           className: "objectRightBrace",
         },
-        " }"
+        (isEmptyObject ? "" : " ") + "}"
       )
     );
   }

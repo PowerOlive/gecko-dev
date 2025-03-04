@@ -39,14 +39,13 @@ class Text;
  * enum classes
  ******************************************************************************/
 
+enum class BlockInlineCheck : uint8_t;         // HTMLEditHelpers.h
 enum class CollectChildrenOption;              // HTMLEditUtils.h
 enum class EditAction;                         // mozilla/EditAction.h
 enum class EditorCommandParamType : uint16_t;  // mozilla/EditorCommands.h
 enum class EditSubAction : int32_t;            // mozilla/EditAction.h
-enum class JoinNodesDirection;                 // JoinSplitNodeDirection.h
 enum class ParagraphSeparator;                 // mozilla/HTMLEditor.h
 enum class SpecifiedStyle : uint8_t;           // mozilla/PendingStyles.h
-enum class SplitNodeDirection;                 // JoinSplitNodeDirection.h
 enum class SuggestCaret;                       // EditorUtils.h
 enum class WithTransaction;                    // HTMLEditHelpers.h
 
@@ -70,6 +69,12 @@ using EditorRawDOMPoint = EditorDOMPointBase<nsINode*, nsIContent*>;
 using EditorDOMPointInText = EditorDOMPointBase<RefPtr<dom::Text>, nsIContent*>;
 using EditorRawDOMPointInText = EditorDOMPointBase<dom::Text*, nsIContent*>;
 
+template <typename CT>
+class EditorLineBreakBase;  // EditorLineBreak.h
+
+using EditorLineBreak = EditorLineBreakBase<nsCOMPtr<nsIContent>>;
+using EditorRawLineBreak = EditorLineBreakBase<nsIContent*>;
+
 /******************************************************************************
  * classes
  ******************************************************************************/
@@ -86,16 +91,20 @@ class RangeUpdater;                // mozilla/SelectionState.h
 class SelectionState;              // mozilla/SelectionState.h
 class TextEditor;                  // mozilla/TextEditor.h
 
-class AutoRangeArray;                   // AutoRangeArray.h
+class AutoClonedRangeArray;             // AutoClonedRangeArray.h
+class AutoClonedSelectionRangeArray;    // AutoClonedRangeArray.h
+class AutoSelectionRestorer;            // AutoSelectionRestorer.h
 class AutoSelectionRangeArray;          // EditorUtils.h
 class CaretPoint;                       // EditorUtils.h
 class ChangeAttributeTransaction;       // ChangeAttributeTransaction.h
 class ChangeStyleTransaction;           // ChangeStyleTransaction.h
 class CompositionTransaction;           // CompositionTransaction.h
+class CreateLineBreakResult;            // EditorLineBreak.h
 class CSSEditUtils;                     // CSSEditUtils.h
 class DeleteContentTransactionBase;     // DeleteContentTransactionBase.h
 class DeleteMultipleRangesTransaction;  // DeleteMultipleRangesTransaction.h
 class DeleteNodeTransaction;            // DeleteNodeTransaction.h
+class DeleteRangeResult;                // HTMLEditHelpers.h
 class DeleteRangeTransaction;           // DeleteRangeTransaction.h
 class DeleteTextTransaction;            // DeleteTextTransaction.h
 class EditActionResult;                 // EditorUtils.h
@@ -117,9 +126,9 @@ class SplitNodeResult;                  // HTMLEditHelpers.h
 class SplitNodeTransaction;             // SplitNodeTransaction.h
 class SplitRangeOffFromNodeResult;      // HTMLEditHelpers.h
 class SplitRangeOffResult;              // HTMLEditHelpers.h
-class WhiteSpaceVisibilityKeeper;       // WSRunObject.h
-class WSRunScanner;                     // WSRunObject.h
-class WSScanResult;                     // WSRunObject.h
+class WhiteSpaceVisibilityKeeper;       // WhiteSpaceVisibilityKeeper.h
+class WSRunScanner;                     // WSRunScanner.h
+class WSScanResult;                     // WSRunScanner.h
 
 /******************************************************************************
  * structs

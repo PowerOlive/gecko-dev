@@ -60,6 +60,31 @@ export class EventsDispatcher {
   }
 
   /**
+   * Check for existing listeners for a given event name and a given context.
+   *
+   * @param {string} name
+   *     Name of the event to check.
+   * @param {ContextInfo} contextInfo
+   *     ContextInfo identifying the context to check.
+   *
+   * @returns {boolean}
+   *     True if there is a registered listener matching the provided arguments.
+   */
+  hasListener(name, contextInfo) {
+    if (!this.#listenersByEventName.has(name)) {
+      return false;
+    }
+
+    const listeners = this.#listenersByEventName.get(name);
+    for (const { contextDescriptor } of listeners.values()) {
+      if (this.#matchesContext(contextInfo, contextDescriptor)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Stop listening for an event relying on SessionData and relayed by the
    * message handler.
    *
@@ -125,7 +150,13 @@ export class EventsDispatcher {
    */
   async update(subscriptions) {
     const sessionDataItemUpdates = [];
-    subscriptions.forEach(({ event, contextDescriptor, callback, enable }) => {
+    subscriptions.forEach(subscription => {
+      // Skip invalid subscriptions
+      if (subscription === null) {
+        return;
+      }
+
+      const { event, contextDescriptor, callback, enable } = subscription;
       if (enable) {
         // Setup listeners.
         if (!this.#listenersByEventName.has(event)) {
@@ -209,6 +240,16 @@ export class EventsDispatcher {
         contextInfo.contextId
       );
       return eventBrowsingContext?.browserId === contextDescriptor.id;
+    }
+
+    if (contextDescriptor.type === lazy.ContextDescriptorType.UserContext) {
+      const eventBrowsingContext = lazy.TabManager.getBrowsingContextById(
+        contextInfo.contextId
+      );
+      return (
+        eventBrowsingContext?.originAttributes.userContextId ===
+        contextDescriptor.id
+      );
     }
 
     return false;

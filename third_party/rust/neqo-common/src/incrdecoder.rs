@@ -21,46 +21,43 @@ impl IncrementalDecoderUint {
     }
 
     /// Consume some data.
-    #[allow(clippy::missing_panics_doc)] // See https://github.com/rust-lang/rust-clippy/issues/6699
+    ///
+    /// # Panics
+    ///
+    /// Never, but this is not something the compiler can tell.
     pub fn consume(&mut self, dv: &mut Decoder) -> Option<u64> {
         if let Some(r) = &mut self.remaining {
             let amount = min(*r, dv.remaining());
             if amount < 8 {
                 self.v <<= amount * 8;
             }
-            self.v |= dv.decode_uint(amount).unwrap();
+            self.v |= dv.decode_n(amount).unwrap();
             *r -= amount;
-            if *r == 0 {
-                Some(self.v)
-            } else {
-                None
-            }
+            (*r == 0).then_some(self.v)
         } else {
-            let (v, remaining) = match dv.decode_byte() {
-                Some(b) => (
-                    u64::from(b & 0x3f),
-                    match b >> 6 {
-                        0 => 0,
-                        1 => 1,
-                        2 => 3,
-                        3 => 7,
-                        _ => unreachable!(),
-                    },
-                ),
-                None => unreachable!(),
-            };
+            let (v, remaining) = dv.decode_uint::<u8>().map_or_else(
+                || unreachable!(),
+                |b| {
+                    (
+                        u64::from(b & 0x3f),
+                        match b >> 6 {
+                            0 => 0,
+                            1 => 1,
+                            2 => 3,
+                            3 => 7,
+                            _ => unreachable!(),
+                        },
+                    )
+                },
+            );
             self.remaining = Some(remaining);
             self.v = v;
-            if remaining == 0 {
-                Some(v)
-            } else {
-                None
-            }
+            (remaining == 0).then_some(v)
         }
     }
 
     #[must_use]
-    pub fn decoding_in_progress(&self) -> bool {
+    pub const fn decoding_in_progress(&self) -> bool {
         self.remaining.is_some()
     }
 }
@@ -73,7 +70,7 @@ pub struct IncrementalDecoderBuffer {
 
 impl IncrementalDecoderBuffer {
     #[must_use]
-    pub fn new(n: usize) -> Self {
+    pub const fn new(n: usize) -> Self {
         Self {
             v: Vec::new(),
             remaining: n,
@@ -81,23 +78,21 @@ impl IncrementalDecoderBuffer {
     }
 
     #[must_use]
-    pub fn min_remaining(&self) -> usize {
+    pub const fn min_remaining(&self) -> usize {
         self.remaining
     }
 
     /// Consume some bytes from the decoder.
+    ///
     /// # Panics
+    ///
     /// Never; but rust doesn't know that.
     pub fn consume(&mut self, dv: &mut Decoder) -> Option<Vec<u8>> {
         let amount = min(self.remaining, dv.remaining());
         let b = dv.decode(amount).unwrap();
         self.v.extend_from_slice(b);
         self.remaining -= amount;
-        if self.remaining == 0 {
-            Some(mem::take(&mut self.v))
-        } else {
-            None
-        }
+        (self.remaining == 0).then(|| mem::take(&mut self.v))
     }
 }
 
@@ -108,7 +103,9 @@ pub struct IncrementalDecoderIgnore {
 
 impl IncrementalDecoderIgnore {
     /// Make a new ignoring decoder.
+    ///
     /// # Panics
+    ///
     /// If the amount to ignore is zero.
     #[must_use]
     pub fn new(n: usize) -> Self {
@@ -117,7 +114,7 @@ impl IncrementalDecoderIgnore {
     }
 
     #[must_use]
-    pub fn min_remaining(&self) -> usize {
+    pub const fn min_remaining(&self) -> usize {
         self.remaining
     }
 

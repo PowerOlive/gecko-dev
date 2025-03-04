@@ -9,6 +9,7 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/FetchPriority.h"
 #include "mozilla/dom/ReferrerInfo.h"
 #include "mozilla/dom/SVGStyleElementBinding.h"
 #include "nsCOMPtr.h"
@@ -49,6 +50,8 @@ SVGStyleElement::SVGStyleElement(
     already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
     : SVGStyleElementBase(std::move(aNodeInfo)) {
   AddMutationObserver(this);
+  SetEnabledCallbacks(kCharacterDataChanged | kContentAppended |
+                      kContentInserted | kContentWillBeRemoved);
 }
 
 //----------------------------------------------------------------------
@@ -66,10 +69,10 @@ nsresult SVGStyleElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   return rv;
 }
 
-void SVGStyleElement::UnbindFromTree(bool aNullParent) {
+void SVGStyleElement::UnbindFromTree(UnbindContext& aContext) {
   nsCOMPtr<Document> oldDoc = GetUncomposedDoc();
   ShadowRoot* oldShadow = GetContainingShadow();
-  SVGStyleElementBase::UnbindFromTree(aNullParent);
+  SVGStyleElementBase::UnbindFromTree(aContext);
   Unused << UpdateStyleSheetInternal(oldDoc, oldShadow);
 }
 
@@ -119,9 +122,18 @@ void SVGStyleElement::ContentInserted(nsIContent* aChild) {
   ContentChanged(aChild);
 }
 
-void SVGStyleElement::ContentRemoved(nsIContent* aChild,
-                                     nsIContent* aPreviousSibling) {
-  ContentChanged(aChild);
+void SVGStyleElement::ContentWillBeRemoved(nsIContent* aChild,
+                                           const BatchRemovalState* aState) {
+  if (!nsContentUtils::IsInSameAnonymousTree(this, aChild)) {
+    return;
+  }
+  if (aState && !aState->mIsFirst) {
+    return;
+  }
+  // Make sure to run this once the removal has taken place.
+  nsContentUtils::AddScriptRunner(NS_NewRunnableFunction(
+      "SVGStyleElement::ContentWillBeRemoved",
+      [self = RefPtr{this}] { self->UpdateStyleSheetInternal(); }));
 }
 
 void SVGStyleElement::ContentChanged(nsIContent* aContent) {
@@ -199,6 +211,7 @@ Maybe<LinkStyle::SheetInfo> SVGStyleElement::GetStyleSheetInfo() {
       HasAlternateRel::No,
       IsInline::Yes,
       IsExplicitlyEnabled::No,
+      FetchPriority::Auto,
   });
 }
 

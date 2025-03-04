@@ -8,36 +8,45 @@ use authenticator::ctap2::{
     attestation::{
         AAGuid, AttestationObject, AttestationStatement, AttestationStatementPacked,
         AttestedCredentialData, AuthenticatorData, AuthenticatorDataFlags, Extension,
+        HmacSecretResponse,
     },
     client_data::ClientDataHash,
     commands::{
         client_pin::{ClientPIN, ClientPinResponse, PINSubcommand},
-        get_assertion::{Assertion, GetAssertion, GetAssertionResponse, GetAssertionResult},
+        get_assertion::{
+            GetAssertion, GetAssertionResponse, GetAssertionResult, HmacGetSecretOrPrf,
+            HmacSecretExtension,
+        },
         get_info::{AuthenticatorInfo, AuthenticatorOptions, AuthenticatorVersion},
         get_version::{GetVersion, U2FInfo},
-        make_credentials::{MakeCredentials, MakeCredentialsResult},
+        make_credentials::{HmacCreateSecretOrPrf, MakeCredentials, MakeCredentialsResult},
         reset::Reset,
         selection::Selection,
-        Request, RequestCtap1, RequestCtap2, StatusCode,
+        RequestCtap1, RequestCtap2, StatusCode,
     },
     preflight::CheckKeyHandle,
-    server::{PublicKeyCredentialDescriptor, RelyingParty, RelyingPartyWrapper, User},
+    server::{
+        AuthenticatorAttachment, PublicKeyCredentialDescriptor, PublicKeyCredentialUserEntity,
+        RelyingParty,
+    },
 };
 use authenticator::errors::{AuthenticatorError, CommandError, HIDError, U2FTokenError};
 use authenticator::{ctap2, statecallback::StateCallback};
 use authenticator::{FidoDevice, FidoDeviceIO, FidoProtocol, VirtualFidoDevice};
 use authenticator::{RegisterResult, SignResult, StatusUpdate};
-use nserror::{nsresult, NS_ERROR_FAILURE, NS_ERROR_INVALID_ARG, NS_ERROR_NOT_IMPLEMENTED, NS_OK};
-use nsstring::{nsACString, nsCString};
+use base64::Engine;
+use moz_task::RunnableBuilder;
+use nserror::{nsresult, NS_ERROR_FAILURE, NS_ERROR_INVALID_ARG, NS_OK};
+use nsstring::{nsACString, nsAString, nsCString, nsString};
 use rand::{thread_rng, RngCore};
 use std::cell::{Ref, RefCell};
 use std::collections::{hash_map::Entry, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use thin_vec::ThinVec;
-use xpcom::interfaces::nsICredentialParameters;
+use xpcom::interfaces::{nsICredentialParameters, nsIWebAuthnAutoFillEntry};
 use xpcom::{xpcom_method, RefPtr};
 
 // All TestTokens use this fixed, randomly generated, AAGUID
@@ -52,7 +61,7 @@ struct TestTokenCredential {
     user_handle: Vec<u8>,
     sign_count: AtomicU32,
     is_discoverable_credential: bool,
-    rp: RelyingPartyWrapper,
+    rp: RelyingParty,
 }
 
 impl TestTokenCredential {
@@ -60,7 +69,7 @@ impl TestTokenCredential {
         &self,
         client_data_hash: &ClientDataHash,
         flags: AuthenticatorDataFlags,
-    ) -> GetAssertionResponse {
+    ) -> Result<GetAssertionResponse, HIDError> {
         let credentials = Some(PublicKeyCredentialDescriptor {
             id: self.id.clone(),
             transports: vec![],
@@ -74,27 +83,30 @@ impl TestTokenCredential {
             extensions: Extension::default(),
         };
 
-        let user = Some(User {
+        let user = Some(PublicKeyCredentialUserEntity {
             id: self.user_handle.clone(),
             ..Default::default()
         });
 
-        let mut data = auth_data.to_vec().unwrap();
+        let mut data = auth_data.to_vec();
         data.extend_from_slice(client_data_hash.as_ref());
-        let signature = ecdsa_p256_sha256_sign_raw(&self.privkey, &data).unwrap();
-        GetAssertionResponse {
+        let signature =
+            ecdsa_p256_sha256_sign_raw(&self.privkey, &data).or(Err(HIDError::DeviceError))?;
+
+        Ok(GetAssertionResponse {
             credentials,
             auth_data,
             signature,
             user,
             number_of_credentials: Some(1),
-        }
+        })
     }
 }
 
 #[derive(Debug)]
 struct TestToken {
     protocol: FidoProtocol,
+    transport: String,
     versions: Vec<AuthenticatorVersion>,
     has_resident_key: bool,
     has_user_verification: bool,
@@ -110,6 +122,7 @@ struct TestToken {
 impl TestToken {
     fn new(
         versions: Vec<AuthenticatorVersion>,
+        transport: String,
         has_resident_key: bool,
         has_user_verification: bool,
         is_user_consenting: bool,
@@ -119,6 +132,7 @@ impl TestToken {
         thread_rng().fill_bytes(&mut pin_token);
         Self {
             protocol: FidoProtocol::CTAP2,
+            transport,
             versions,
             has_resident_key,
             has_user_verification,
@@ -135,7 +149,7 @@ impl TestToken {
         &self,
         id: &[u8],
         privkey: &[u8],
-        rp_id: &RelyingPartyWrapper,
+        rp: &RelyingParty,
         is_discoverable_credential: bool,
         user_handle: &[u8],
         sign_count: u32,
@@ -143,7 +157,7 @@ impl TestToken {
         let c = TestTokenCredential {
             id: id.to_vec(),
             privkey: privkey.to_vec(),
-            rp: rp_id.clone(),
+            rp: rp.clone(),
             is_discoverable_credential,
             user_handle: user_handle.to_vec(),
             sign_count: AtomicU32::new(sign_count),
@@ -180,6 +194,14 @@ impl TestToken {
             .borrow()
             .binary_search_by_key(&id, |probe| &probe.id)
             .is_ok()
+    }
+
+    fn max_supported_version(&self) -> AuthenticatorVersion {
+        self.authenticator_info
+            .as_ref()
+            .map_or(AuthenticatorVersion::U2F_V2, |info| {
+                info.max_supported_version()
+            })
     }
 }
 
@@ -226,7 +248,7 @@ impl FidoDevice for TestToken {
 }
 
 impl FidoDeviceIO for TestToken {
-    fn send_msg_cancellable<Out, Req: Request<Out>>(
+    fn send_msg_cancellable<Out, Req: RequestCtap1<Output = Out> + RequestCtap2<Output = Out>>(
         &mut self,
         msg: &Req,
         keep_alive: &dyn Fn() -> bool,
@@ -259,8 +281,16 @@ impl FidoDeviceIO for TestToken {
 }
 
 impl VirtualFidoDevice for TestToken {
-    fn check_key_handle(&self, _req: &CheckKeyHandle) -> Result<(), HIDError> {
-        Err(HIDError::UnsupportedCommand)
+    fn check_key_handle(&self, req: &CheckKeyHandle) -> Result<(), HIDError> {
+        let credlist = self.credentials.borrow();
+        let req_rp_hash = req.rp.hash();
+        let eligible_cred_iter = credlist.iter().filter(|x| x.rp.hash() == req_rp_hash);
+        for credential in eligible_cred_iter {
+            if req.key_handle == credential.id {
+                return Ok(());
+            }
+        }
+        Err(HIDError::DeviceError)
     }
 
     fn client_pin(&self, req: &ClientPIN) -> Result<ClientPinResponse, HIDError> {
@@ -300,7 +330,7 @@ impl VirtualFidoDevice for TestToken {
         }
     }
 
-    fn get_assertion(&self, req: &GetAssertion) -> Result<GetAssertionResult, HIDError> {
+    fn get_assertion(&self, req: &GetAssertion) -> Result<Vec<GetAssertionResult>, HIDError> {
         // Algorithm 6.2.2 from CTAP 2.1
         // https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-errata-20220621.html#sctn-makeCred-authnr-alg
 
@@ -350,38 +380,102 @@ impl VirtualFidoDevice for TestToken {
         // (not applicable, we use pinUvAuthParam)
 
         // 9. User presence test
-        if self.is_user_consenting && effective_up_opt {
-            flags |= AuthenticatorDataFlags::USER_PRESENT;
+        if effective_up_opt {
+            if self.is_user_consenting {
+                flags |= AuthenticatorDataFlags::USER_PRESENT;
+            } else {
+                return Err(HIDError::Command(CommandError::StatusCode(
+                    StatusCode::UpRequired,
+                    None,
+                )));
+            }
         }
 
         // 10. Extensions
-        // (not implemented)
+        let hmac_secret_response = match &req.extensions.hmac_secret {
+            Some(HmacGetSecretOrPrf::Prf(HmacSecretExtension {
+                salt1, salt2: None, ..
+            })) => {
+                // Not much point in using an actual PRF here, the identity function
+                // will work since salt1 is guaranteed to be 32 bytes.
+                let mut eval = vec![0u8; 32];
+                eval[..].copy_from_slice(salt1);
+                self.get_shared_secret()
+                    .map(|secret| secret.encrypt(&eval).ok())
+                    .flatten()
+            }
+            Some(HmacGetSecretOrPrf::Prf(HmacSecretExtension {
+                salt1,
+                salt2: Some(salt2),
+                ..
+            })) => {
+                // Likewise, the identity function is fine for tests.
+                let mut eval = vec![0u8; 64];
+                eval[0..32].copy_from_slice(salt1);
+                eval[32..64].copy_from_slice(salt2);
+                self.get_shared_secret()
+                    .map(|secret| secret.encrypt(&eval).ok())
+                    .flatten()
+            }
+            _ => None,
+        };
 
-        let mut assertions: Vec<Assertion> = vec![];
+        let mut assertions: Vec<GetAssertionResult> = vec![];
         if !req.allow_list.is_empty() {
             // 11. Non-discoverable credential case
             // return at most one assertion matching an allowed credential ID
             for credential in eligible_cred_iter {
                 if req.allow_list.iter().any(|x| x.id == credential.id) {
-                    let assertion = credential.assert(&req.client_data_hash, flags).into();
-                    assertions.push(assertion);
+                    let mut assertion: GetAssertionResponse =
+                        credential.assert(&req.client_data_hash, flags)?;
+                    if req.allow_list.len() == 1
+                        && self.max_supported_version() == AuthenticatorVersion::FIDO_2_0
+                    {
+                        // CTAP 2.0 authenticators are allowed to omit the credential ID in the
+                        // response if the allow list contains exactly one entry. This behavior is
+                        // a common source of bugs, e.g. Bug 1864504, so we'll exercise it here.
+                        assertion.credentials = None;
+                    }
+                    assertion.auth_data.extensions = Extension::default();
+                    assertion.auth_data.extensions.hmac_secret = match &hmac_secret_response {
+                        Some(resp) => Some(HmacSecretResponse::Secret(resp.clone())),
+                        None => None,
+                    };
+                    assertions.push(GetAssertionResult {
+                        assertion: assertion.into(),
+                        attachment: AuthenticatorAttachment::Unknown,
+                        extensions: Default::default(),
+                    });
                     break;
                 }
             }
         } else {
             // 12. Discoverable credential case
             // return any number of assertions from credentials bound to this RP ID
-            // TODO(Bug 1838932) Until we have conditional mediation we actually don't want to
-            // return a list of credentials here. The UI to select one of the results blocks
-            // testing.
             for credential in eligible_cred_iter.filter(|x| x.is_discoverable_credential) {
-                let assertion = credential.assert(&req.client_data_hash, flags).into();
-                assertions.push(assertion);
-                break;
+                let mut assertion: GetAssertionResponse =
+                    credential.assert(&req.client_data_hash, flags)?.into();
+                assertion.auth_data.extensions = Extension::default();
+                assertion.auth_data.extensions.hmac_secret = match &hmac_secret_response {
+                    Some(resp) => Some(HmacSecretResponse::Secret(resp.clone())),
+                    None => None,
+                };
+                assertions.push(GetAssertionResult {
+                    assertion: assertion.into(),
+                    attachment: AuthenticatorAttachment::Unknown,
+                    extensions: Default::default(),
+                });
             }
         }
 
-        Ok(GetAssertionResult(assertions))
+        if assertions.is_empty() {
+            return Err(HIDError::Command(CommandError::StatusCode(
+                StatusCode::NoCredentials,
+                None,
+            )));
+        }
+
+        Ok(assertions)
     }
 
     fn get_info(&self) -> Result<AuthenticatorInfo, HIDError> {
@@ -389,8 +483,10 @@ impl VirtualFidoDevice for TestToken {
         Ok(AuthenticatorInfo {
             versions: self.versions.clone(),
             options: AuthenticatorOptions {
-                pin_uv_auth_token: Some(true),
-                user_verification: Some(true),
+                platform_device: self.transport == "internal",
+                resident_key: self.has_resident_key,
+                pin_uv_auth_token: Some(self.has_user_verification),
+                user_verification: Some(self.has_user_verification),
                 ..Default::default()
             },
             ..Default::default()
@@ -481,10 +577,34 @@ impl VirtualFidoDevice for TestToken {
         // 14. User presence test
         if self.is_user_consenting {
             flags |= AuthenticatorDataFlags::USER_PRESENT;
+        } else {
+            return Err(HIDError::Command(CommandError::StatusCode(
+                StatusCode::UpRequired,
+                None,
+            )));
         }
 
         // 15. process extensions
-        // (not implemented)
+        let mut extensions = Extension::default();
+        if req.extensions.min_pin_length == Some(true) {
+            // a real authenticator would
+            //  1) return an actual minimum pin length, and
+            //  2) check the RP ID against an allowlist before providing any data
+            extensions.min_pin_length = Some(4);
+        }
+
+        if let Some(req_hmac_or_prf) = &req.extensions.hmac_secret {
+            match req_hmac_or_prf {
+                HmacCreateSecretOrPrf::HmacCreateSecret(true) | HmacCreateSecretOrPrf::Prf => {
+                    extensions.hmac_secret = Some(HmacSecretResponse::Confirmed(true));
+                }
+                _ => (),
+            }
+        }
+
+        if extensions.has_some() {
+            flags |= AuthenticatorDataFlags::EXTENSION_DATA;
+        }
 
         // 16. Generate a new credential.
         let (private, public) =
@@ -519,23 +639,28 @@ impl VirtualFidoDevice for TestToken {
                 credential_id: id.to_vec(),
                 credential_public_key: public,
             }),
-            extensions: Extension::default(),
+            extensions,
         };
 
-        let mut data = auth_data.to_vec().unwrap();
+        let mut data = auth_data.to_vec();
         data.extend_from_slice(req.client_data_hash.as_ref());
-        let sig = ecdsa_p256_sha256_sign_raw(&private, &data).unwrap();
 
-        let att_statement = AttestationStatement::Packed(AttestationStatementPacked {
+        let sig = ecdsa_p256_sha256_sign_raw(&private, &data).or(Err(HIDError::DeviceError))?;
+
+        let att_stmt = AttestationStatement::Packed(AttestationStatementPacked {
             alg: COSEAlgorithm::ES256,
             sig: sig.as_slice().into(),
             attestation_cert: vec![],
         });
 
-        let result = MakeCredentialsResult(AttestationObject {
-            auth_data,
-            att_statement,
-        });
+        let result = MakeCredentialsResult {
+            attachment: AuthenticatorAttachment::Unknown,
+            att_obj: AttestationObject {
+                att_stmt,
+                auth_data,
+            },
+            extensions: Default::default(),
+        };
         Ok(result)
     }
 
@@ -561,7 +686,9 @@ struct CredentialParameters {
 impl CredentialParameters {
     xpcom_method!(get_credential_id => GetCredentialId() -> nsACString);
     fn get_credential_id(&self) -> Result<nsCString, nsresult> {
-        Ok(nsCString::from(&self.credential_id))
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(&self.credential_id)
+            .into())
     }
 
     xpcom_method!(get_is_resident_credential => GetIsResidentCredential() -> bool);
@@ -576,12 +703,16 @@ impl CredentialParameters {
 
     xpcom_method!(get_private_key => GetPrivateKey() -> nsACString);
     fn get_private_key(&self) -> Result<nsCString, nsresult> {
-        Ok(nsCString::from(&self.private_key))
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(&self.private_key)
+            .into())
     }
 
     xpcom_method!(get_user_handle => GetUserHandle() -> nsACString);
     fn get_user_handle(&self) -> Result<nsCString, nsresult> {
-        Ok(nsCString::from(&self.user_handle))
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(&self.user_handle)
+            .into())
     }
 
     xpcom_method!(get_sign_count => GetSignCount() -> u32);
@@ -590,9 +721,37 @@ impl CredentialParameters {
     }
 }
 
+#[xpcom(implement(nsIWebAuthnAutoFillEntry), atomic)]
+struct WebAuthnAutoFillEntry {
+    rp: String,
+    credential_id: Vec<u8>,
+}
+
+impl WebAuthnAutoFillEntry {
+    xpcom_method!(get_provider => GetProvider() -> u8);
+    fn get_provider(&self) -> Result<u8, nsresult> {
+        Ok(nsIWebAuthnAutoFillEntry::PROVIDER_TEST_TOKEN)
+    }
+
+    xpcom_method!(get_user_name => GetUserName() -> nsAString);
+    fn get_user_name(&self) -> Result<nsString, nsresult> {
+        Ok(nsString::from("Test User"))
+    }
+
+    xpcom_method!(get_rp_id => GetRpId() -> nsAString);
+    fn get_rp_id(&self) -> Result<nsString, nsresult> {
+        Ok(nsString::from(&self.rp))
+    }
+
+    xpcom_method!(get_credential_id => GetCredentialId() -> ThinVec<u8>);
+    fn get_credential_id(&self) -> Result<ThinVec<u8>, nsresult> {
+        Ok(self.credential_id.as_slice().into())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TestTokenManager {
-    state: Mutex<HashMap<u64, TestToken>>,
+    state: Arc<Mutex<HashMap<u64, TestToken>>>,
 }
 
 impl TestTokenManager {
@@ -603,6 +762,7 @@ impl TestTokenManager {
     pub fn add_virtual_authenticator(
         &self,
         protocol: AuthenticatorVersion,
+        transport: String,
         has_resident_key: bool,
         has_user_verification: bool,
         is_user_consenting: bool,
@@ -611,6 +771,7 @@ impl TestTokenManager {
         let mut guard = self.state.lock().map_err(|_| NS_ERROR_FAILURE)?;
         let token = TestToken::new(
             vec![protocol],
+            transport,
             has_resident_key,
             has_user_verification,
             is_user_consenting,
@@ -652,15 +813,11 @@ impl TestTokenManager {
             .deref_mut()
             .get_mut(&authenticator_id)
             .ok_or(NS_ERROR_INVALID_ARG)?;
-        let rp = RelyingParty {
-            id: rp_id,
-            name: None,
-            icon: None,
-        };
+        let rp = RelyingParty::from(rp_id);
         token.insert_credential(
             id,
             privkey,
-            &RelyingPartyWrapper::Data(rp),
+            &rp,
             is_resident_credential,
             user_handle,
             sign_count,
@@ -680,15 +837,10 @@ impl TestTokenManager {
         let mut credentials_parameters = ThinVec::with_capacity(credentials.len());
         for credential in credentials.deref() {
             // CTAP1 credentials are not currently supported here.
-            let rp_id = credential
-                .rp
-                .id()
-                .map(|id| id.clone())
-                .ok_or(NS_ERROR_NOT_IMPLEMENTED)?;
             let credential_parameters = CredentialParameters::allocate(InitCredentialParameters {
                 credential_id: credential.id.clone(),
                 is_resident_credential: credential.is_discoverable_credential,
-                rp_id,
+                rp_id: credential.rp.id.clone(),
                 private_key: credential.privkey.clone(),
                 user_handle: credential.user_handle.clone(),
                 sign_count: credential.sign_count.load(Ordering::Relaxed),
@@ -739,7 +891,7 @@ impl TestTokenManager {
 
     pub fn register(
         &self,
-        _timeout: u64,
+        _timeout_ms: u64,
         ctap_args: RegisterArgs,
         status: Sender<StatusUpdate>,
         callback: StateCallback<Result<RegisterResult, AuthenticatorError>>,
@@ -748,30 +900,37 @@ impl TestTokenManager {
             return;
         }
 
-        let mut state_obj = self.state.lock().unwrap();
+        let state_obj = self.state.clone();
 
-        // We query the tokens sequentially since the register operation will not block.
-        for token in state_obj.values_mut() {
-            let _ = token.init();
-            if ctap2::register(
-                token,
-                ctap_args.clone(),
-                status.clone(),
-                callback.clone(),
-                &|| true,
-            ) {
-                // callback was called
-                return;
+        // Registration doesn't currently block, but it might in a future version, so we run it on
+        // a background thread.
+        let _ = RunnableBuilder::new("TestTokenManager::register", move || {
+            // TODO(Bug 1854278) We should actually run one thread per token here
+            // and attempt to fulfill this request in parallel.
+            for token in state_obj.lock().unwrap().values_mut() {
+                let _ = token.init();
+                if ctap2::register(
+                    token,
+                    ctap_args.clone(),
+                    status.clone(),
+                    callback.clone(),
+                    &|| true,
+                ) {
+                    // callback was called
+                    return;
+                }
             }
-        }
 
-        // Send an error, if the callback wasn't called already.
-        callback.call(Err(AuthenticatorError::U2FToken(U2FTokenError::NotAllowed)));
+            // Send an error, if the callback wasn't called already.
+            callback.call(Err(AuthenticatorError::U2FToken(U2FTokenError::NotAllowed)));
+        })
+        .may_block(true)
+        .dispatch_background_task();
     }
 
     pub fn sign(
         &self,
-        _timeout: u64,
+        _timeout_ms: u64,
         ctap_args: SignArgs,
         status: Sender<StatusUpdate>,
         callback: StateCallback<Result<SignResult, AuthenticatorError>>,
@@ -780,23 +939,86 @@ impl TestTokenManager {
             return;
         }
 
-        let mut state_obj = self.state.lock().unwrap();
+        let state_obj = self.state.clone();
 
-        // We query the tokens sequentially since the sign operation will not block.
-        for token in state_obj.values_mut() {
+        // Signing can block during signature selection, so we need to run it on a background thread.
+        let _ = RunnableBuilder::new("TestTokenManager::sign", move || {
+            // TODO(Bug 1854278) We should actually run one thread per token here
+            // and attempt to fulfill this request in parallel.
+            for token in state_obj.lock().unwrap().values_mut() {
+                let _ = token.init();
+                if ctap2::sign(
+                    token,
+                    ctap_args.clone(),
+                    status.clone(),
+                    callback.clone(),
+                    &|| true,
+                ) {
+                    // callback was called
+                    return;
+                }
+            }
+
+            // Send an error, if the callback wasn't called already.
+            callback.call(Err(AuthenticatorError::U2FToken(U2FTokenError::NotAllowed)));
+        })
+        .may_block(true)
+        .dispatch_background_task();
+    }
+
+    pub fn has_platform_authenticator(&self) -> bool {
+        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
+            return false;
+        }
+
+        for token in self.state.lock().unwrap().values_mut() {
             let _ = token.init();
-            if ctap2::sign(
-                token,
-                ctap_args.clone(),
-                status.clone(),
-                callback.clone(),
-                &|| true,
-            ) {
-                // callback was called
-                return;
+            if token.transport.as_str() == "internal" {
+                return true;
             }
         }
-        // Send an error, if the callback wasn't called already.
-        callback.call(Err(AuthenticatorError::U2FToken(U2FTokenError::NotAllowed)));
+
+        false
+    }
+
+    pub fn get_autofill_entries(
+        &self,
+        rp_id: &str,
+        credential_filter: &Vec<PublicKeyCredentialDescriptor>,
+    ) -> Result<ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>>, nsresult> {
+        let guard = self.state.lock().map_err(|_| NS_ERROR_FAILURE)?;
+        let mut entries = ThinVec::new();
+
+        for token in guard.values() {
+            let credentials = token.get_credentials();
+            for credential in credentials.deref() {
+                // The relying party ID must match.
+                if !rp_id.eq(&credential.rp.id) {
+                    continue;
+                }
+                // Only discoverable credentials are admissible.
+                if !credential.is_discoverable_credential {
+                    continue;
+                }
+                // Only credentials listed in the credential filter (if it is
+                // non-empty) are admissible.
+                if credential_filter.len() > 0
+                    && credential_filter
+                        .iter()
+                        .find(|cred| cred.id == credential.id)
+                        .is_none()
+                {
+                    continue;
+                }
+                let entry = WebAuthnAutoFillEntry::allocate(InitWebAuthnAutoFillEntry {
+                    rp: credential.rp.id.clone(),
+                    credential_id: credential.id.clone(),
+                })
+                .query_interface::<nsIWebAuthnAutoFillEntry>()
+                .ok_or(NS_ERROR_FAILURE)?;
+                entries.push(Some(entry));
+            }
+        }
+        Ok(entries)
     }
 }

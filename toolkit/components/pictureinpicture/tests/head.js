@@ -276,7 +276,7 @@ async function toggleOpacityReachesThreshold(
     for (let hiddenElement of toggleStylesForStage.hidden) {
       let el = shadowRoot.querySelector(hiddenElement);
       ok(
-        ContentTaskUtils.is_hidden(el),
+        ContentTaskUtils.isHidden(el),
         `Expected ${hiddenElement} to be hidden.`
       );
     }
@@ -1150,4 +1150,17 @@ async function waitForTelemeryEvents(filter, length, process) {
     200,
     100
   );
+}
+
+/**
+ * Asserts that no Picture-in-Picture player windows are currently open.
+ */
+function assertNoPiPWindowsOpen() {
+  for (let win of Services.wm.getEnumerator(WINDOW_TYPE)) {
+    if (!win.closed) {
+      Assert.ok(false, "Found a Picture-in-Picture window unexpectedly.");
+      return;
+    }
+  }
+  Assert.ok(true, "Found no open Picture-in-Picture player windows.");
 }

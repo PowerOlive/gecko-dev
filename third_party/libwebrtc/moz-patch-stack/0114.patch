@@ -1,170 +1,190 @@
-From: Michael Froman <mjfroman@mac.com>
-Date: Thu, 27 Jul 2023 12:42:44 -0500
-Subject: Bug 1838080: Store the rid in TransformableVideoSenderFrame.
- r=ng,webrtc-reviewers
+From: Jan Grulich <jgrulich@redhat.com>
+Date: Thu, 5 Sep 2024 16:04:00 +0000
+Subject: Bug 1830275 - Add missing support for device change notifications
+ r=pehrsons,webrtc-reviewers
 
-This is necessary to reliably detect what rid a given keyframe is for, for the
-purposes of resolving promises from RTCRtpScriptTransformer.generateKeyFrame.
+Registers each DeviceInfoPipeWire in PipeWireSession we use and calls
+DeviceChange() for each once there is a new camera added or removed to
+invoke OnDeviceChange() for every registered VideoInputFeedback.
 
-Differential Revision: https://phabricator.services.mozilla.com/D180737
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/2f1a0ba74bf71cfa0bc4e77714b8a5276a70cc36
+Differential Revision: https://phabricator.services.mozilla.com/D219218
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/60eb5ef11c8df7eb6e0d616cb76885d9109f114d
 ---
- api/frame_transformer_interface.h                |  1 +
- modules/rtp_rtcp/source/rtp_sender.h             |  4 ++++
- modules/rtp_rtcp/source/rtp_sender_video.cc      |  1 +
- ...tp_sender_video_frame_transformer_delegate.cc | 16 +++++++++++-----
- ...rtp_sender_video_frame_transformer_delegate.h |  2 ++
- ...stream_receiver_frame_transformer_delegate.cc |  5 +++++
- 6 files changed, 24 insertions(+), 5 deletions(-)
+ .../linux/device_info_pipewire.cc             | 10 +++-
+ .../video_capture/linux/pipewire_session.cc   | 47 ++++++++++++++++++-
+ .../video_capture/linux/pipewire_session.h    | 26 +++++++++-
+ 3 files changed, 79 insertions(+), 4 deletions(-)
 
-diff --git a/api/frame_transformer_interface.h b/api/frame_transformer_interface.h
-index 2f7b139f9f..43fedd8595 100644
---- a/api/frame_transformer_interface.h
-+++ b/api/frame_transformer_interface.h
-@@ -57,6 +57,7 @@ class TransformableVideoFrameInterface : public TransformableFrameInterface {
-  public:
-   virtual ~TransformableVideoFrameInterface() = default;
-   virtual bool IsKeyFrame() const = 0;
-+  virtual const std::string& GetRid() const = 0;
+diff --git a/modules/video_capture/linux/device_info_pipewire.cc b/modules/video_capture/linux/device_info_pipewire.cc
+index db2a3c7099..a0607b4aba 100644
+--- a/modules/video_capture/linux/device_info_pipewire.cc
++++ b/modules/video_capture/linux/device_info_pipewire.cc
+@@ -29,13 +29,19 @@
+ namespace webrtc {
+ namespace videocapturemodule {
+ DeviceInfoPipeWire::DeviceInfoPipeWire(VideoCaptureOptions* options)
+-    : DeviceInfoImpl(), pipewire_session_(options->pipewire_session()) {}
++    : DeviceInfoImpl(), pipewire_session_(options->pipewire_session()) {
++  const bool ret = pipewire_session_->RegisterDeviceInfo(this);
++  RTC_CHECK(ret);
++}
  
-   virtual VideoFrameMetadata Metadata() const = 0;
- 
-diff --git a/modules/rtp_rtcp/source/rtp_sender.h b/modules/rtp_rtcp/source/rtp_sender.h
-index fb6c8001f0..70a5c773ab 100644
---- a/modules/rtp_rtcp/source/rtp_sender.h
-+++ b/modules/rtp_rtcp/source/rtp_sender.h
-@@ -140,6 +140,10 @@ class RTPSender {
- 
-   uint32_t SSRC() const RTC_LOCKS_EXCLUDED(send_mutex_) { return ssrc_; }
- 
-+  const std::string& Rid() const RTC_LOCKS_EXCLUDED(send_mutex_) {
-+    return rid_;
-+  }
-+
-   absl::optional<uint32_t> FlexfecSsrc() const RTC_LOCKS_EXCLUDED(send_mutex_) {
-     return flexfec_ssrc_;
-   }
-diff --git a/modules/rtp_rtcp/source/rtp_sender_video.cc b/modules/rtp_rtcp/source/rtp_sender_video.cc
-index c863db4ccf..adc53d2243 100644
---- a/modules/rtp_rtcp/source/rtp_sender_video.cc
-+++ b/modules/rtp_rtcp/source/rtp_sender_video.cc
-@@ -169,6 +169,7 @@ RTPSenderVideo::RTPSenderVideo(const Config& config)
-                     config.frame_transformer,
-                     rtp_sender_->SSRC(),
-                     rtp_sender_->Csrcs(),
-+                    rtp_sender_->Rid(),
-                     config.task_queue_factory)
-               : nullptr) {
-   if (frame_transformer_delegate_)
-diff --git a/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.cc b/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.cc
-index 34b4af0ec9..71f7db6f70 100644
---- a/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.cc
-+++ b/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.cc
-@@ -31,7 +31,8 @@ class TransformableVideoSenderFrame : public TransformableVideoFrameInterface {
-       uint32_t rtp_timestamp,
-       absl::optional<int64_t> expected_retransmission_time_ms,
-       uint32_t ssrc,
--      std::vector<uint32_t> csrcs)
-+      std::vector<uint32_t> csrcs,
-+      const std::string& rid)
-       : encoded_data_(encoded_image.GetEncodedData()),
-         header_(video_header),
-         frame_type_(encoded_image._frameType),
-@@ -42,7 +43,8 @@ class TransformableVideoSenderFrame : public TransformableVideoFrameInterface {
-         capture_time_identifier_(encoded_image.CaptureTimeIdentifier()),
-         expected_retransmission_time_ms_(expected_retransmission_time_ms),
-         ssrc_(ssrc),
--        csrcs_(csrcs) {
-+        csrcs_(csrcs),
-+        rid_(rid) {
-     RTC_DCHECK_GE(payload_type_, 0);
-     RTC_DCHECK_LE(payload_type_, 127);
-   }
-@@ -92,6 +94,8 @@ class TransformableVideoSenderFrame : public TransformableVideoFrameInterface {
- 
-   Direction GetDirection() const override { return Direction::kSender; }
- 
-+  const std::string& GetRid() const override { return rid_; }
-+
-  private:
-   rtc::scoped_refptr<EncodedImageBufferInterface> encoded_data_;
-   RTPVideoHeader header_;
-@@ -105,6 +109,7 @@ class TransformableVideoSenderFrame : public TransformableVideoFrameInterface {
- 
-   uint32_t ssrc_;
-   std::vector<uint32_t> csrcs_;
-+  const std::string rid_;
- };
- }  // namespace
- 
-@@ -113,11 +118,12 @@ RTPSenderVideoFrameTransformerDelegate::RTPSenderVideoFrameTransformerDelegate(
-     rtc::scoped_refptr<FrameTransformerInterface> frame_transformer,
-     uint32_t ssrc,
-     std::vector<uint32_t> csrcs,
-+    const std::string& rid,
-     TaskQueueFactory* task_queue_factory)
-     : sender_(sender),
-       frame_transformer_(std::move(frame_transformer)),
-       ssrc_(ssrc),
--      csrcs_(csrcs),
-+      rid_(rid),
-       transformation_queue_(task_queue_factory->CreateTaskQueue(
-           "video_frame_transformer",
-           TaskQueueFactory::Priority::NORMAL)) {}
-@@ -136,7 +142,7 @@ bool RTPSenderVideoFrameTransformerDelegate::TransformFrame(
-     absl::optional<int64_t> expected_retransmission_time_ms) {
-   frame_transformer_->Transform(std::make_unique<TransformableVideoSenderFrame>(
-       encoded_image, video_header, payload_type, codec_type, rtp_timestamp,
--      expected_retransmission_time_ms, ssrc_, csrcs_));
-+      expected_retransmission_time_ms, ssrc_, csrcs_, rid_));
-   return true;
+ int32_t DeviceInfoPipeWire::Init() {
+   return 0;
  }
  
-@@ -215,7 +221,7 @@ std::unique_ptr<TransformableVideoFrameInterface> CloneSenderVideoFrame(
-       encoded_image, new_header, original->GetPayloadType(), new_header.codec,
-       original->GetTimestamp(),
-       absl::nullopt,  // expected_retransmission_time_ms
--      original->GetSsrc(), metadata.GetCsrcs());
-+      original->GetSsrc(), metadata.GetCsrcs(), original->GetRid());
+-DeviceInfoPipeWire::~DeviceInfoPipeWire() = default;
++DeviceInfoPipeWire::~DeviceInfoPipeWire() {
++  const bool ret = pipewire_session_->DeRegisterDeviceInfo(this);
++  RTC_CHECK(ret);
++}
+ 
+ uint32_t DeviceInfoPipeWire::NumberOfDevices() {
+   RTC_CHECK(pipewire_session_);
+diff --git a/modules/video_capture/linux/pipewire_session.cc b/modules/video_capture/linux/pipewire_session.cc
+index 98eb656096..0b1504170b 100644
+--- a/modules/video_capture/linux/pipewire_session.cc
++++ b/modules/video_capture/linux/pipewire_session.cc
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "modules/video_capture/linux/pipewire_session.h"
++#include "modules/video_capture/linux/device_info_pipewire.h"
+ 
+ #include <spa/monitor/device.h>
+ #include <spa/param/format-utils.h>
+@@ -286,6 +287,28 @@ void PipeWireSession::InitPipeWire(int fd) {
+     Finish(VideoCaptureOptions::Status::ERROR);
  }
  
- }  // namespace webrtc
-diff --git a/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.h b/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.h
-index a397041811..83a475dc72 100644
---- a/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.h
-+++ b/modules/rtp_rtcp/source/rtp_sender_video_frame_transformer_delegate.h
-@@ -57,6 +57,7 @@ class RTPSenderVideoFrameTransformerDelegate : public TransformedFrameCallback {
-       rtc::scoped_refptr<FrameTransformerInterface> frame_transformer,
-       uint32_t ssrc,
-       std::vector<uint32_t> csrcs,
-+      const std::string& rid,
-       TaskQueueFactory* send_transport_queue);
++bool PipeWireSession::RegisterDeviceInfo(DeviceInfoPipeWire* device_info) {
++  RTC_CHECK(device_info);
++  MutexLock lock(&device_info_lock_);
++  auto it = std::find(device_info_list_.begin(), device_info_list_.end(), device_info);
++  if (it == device_info_list_.end()) {
++    device_info_list_.push_back(device_info);
++    return true;
++  }
++  return false;
++}
++
++bool PipeWireSession::DeRegisterDeviceInfo(DeviceInfoPipeWire* device_info) {
++  RTC_CHECK(device_info);
++  MutexLock lock(&device_info_lock_);
++  auto it = std::find(device_info_list_.begin(), device_info_list_.end(), device_info);
++  if (it != device_info_list_.end()) {
++    device_info_list_.erase(it);
++    return true;
++  }
++  return false;
++}
++
+ RTC_NO_SANITIZE("cfi-icall")
+ bool PipeWireSession::StartPipeWire(int fd) {
+   pw_init(/*argc=*/nullptr, /*argv=*/nullptr);
+@@ -358,6 +381,21 @@ void PipeWireSession::PipeWireSync() {
+   sync_seq_ = pw_core_sync(pw_core_, PW_ID_CORE, sync_seq_);
+ }
  
-   void Init();
-@@ -104,6 +105,7 @@ class RTPSenderVideoFrameTransformerDelegate : public TransformedFrameCallback {
-   rtc::scoped_refptr<FrameTransformerInterface> frame_transformer_;
-   const uint32_t ssrc_;
-   std::vector<uint32_t> csrcs_;
-+  const std::string rid_;
-   // Used when the encoded frames arrives without a current task queue. This can
-   // happen if a hardware encoder was used.
-   std::unique_ptr<TaskQueueBase, TaskQueueDeleter> transformation_queue_;
-diff --git a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
-index ba26b391fe..71e58eab24 100644
---- a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
-+++ b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
-@@ -51,6 +51,11 @@ class TransformableVideoReceiverFrame
-     return frame_->FrameType() == VideoFrameType::kVideoFrameKey;
-   }
- 
-+  const std::string& GetRid() const override {
-+    static const std::string empty;
-+    return empty;
++void PipeWireSession::NotifyDeviceChange() {
++  RTC_LOG(LS_INFO) << "Notify about device list changes";
++  MutexLock lock(&device_info_lock_);
++
++  // It makes sense to notify about device changes only once we are
++  // properly initialized.
++  if (status_ != VideoCaptureOptions::Status::SUCCESS) {
++    return;
 +  }
 +
-   VideoFrameMetadata Metadata() const override { return metadata_; }
++  for (auto* deviceInfo : device_info_list_) {
++    deviceInfo->DeviceChange();
++  }
++}
++
+ // static
+ void PipeWireSession::OnCoreError(void* data,
+                                   uint32_t id,
+@@ -416,6 +454,8 @@ void PipeWireSession::OnRegistryGlobal(void* data,
  
-   void SetMetadata(const VideoFrameMetadata&) override {
--- 
-2.34.1
-
+   that->nodes_.push_back(PipeWireNode::Create(that, id, props));
+   that->PipeWireSync();
++
++  that->NotifyDeviceChange();
+ }
+ 
+ // static
+@@ -427,10 +467,15 @@ void PipeWireSession::OnRegistryGlobalRemove(void* data, uint32_t id) {
+                              return node->id() == id;
+                            });
+   that->nodes_.erase(it, that->nodes_.end());
++
++  that->NotifyDeviceChange();
+ }
+ 
+ void PipeWireSession::Finish(VideoCaptureOptions::Status status) {
+-  status_ = status;
++  {
++    MutexLock lock(&device_info_lock_);
++    status_ = status;
++  }
+ 
+   webrtc::MutexLock lock(&callback_lock_);
+ 
+diff --git a/modules/video_capture/linux/pipewire_session.h b/modules/video_capture/linux/pipewire_session.h
+index 84273ea695..1f3a00614f 100644
+--- a/modules/video_capture/linux/pipewire_session.h
++++ b/modules/video_capture/linux/pipewire_session.h
+@@ -29,6 +29,7 @@
+ namespace webrtc {
+ namespace videocapturemodule {
+ 
++class DeviceInfoPipeWire;
+ class PipeWireSession;
+ class VideoCaptureModulePipeWire;
+ 
+@@ -97,6 +98,21 @@ class PipeWireSession : public rtc::RefCountedNonVirtual<PipeWireSession> {
+ 
+   void Init(VideoCaptureOptions::Callback* callback,
+             int fd = kInvalidPipeWireFd);
++
++  // [De]Register DeviceInfo for device change updates
++  // These methods will add or remove references to DeviceInfo
++  // objects that we want to notify about device changes.
++  // NOTE: We do not take ownership of these objects and
++  // they should never be released by us. All the instances
++  // of DeviceInfoPipeWire must outlive their registration.
++
++  // Returns true when DeviceInfo was successfuly registered
++  // or false otherwise, when it was already registered before.
++  bool RegisterDeviceInfo(DeviceInfoPipeWire* device_info);
++  // Returns true when DeviceInfo was successfuly unregistered
++  // or false otherwise, when it was not previously registered.
++  bool DeRegisterDeviceInfo(DeviceInfoPipeWire* device_info);
++
+   const std::deque<PipeWireNode::PipeWireNodePtr>& nodes() const {
+     return nodes_;
+   }
+@@ -111,6 +127,8 @@ class PipeWireSession : public rtc::RefCountedNonVirtual<PipeWireSession> {
+   void StopPipeWire();
+   void PipeWireSync();
+ 
++  void NotifyDeviceChange();
++
+   static void OnCoreError(void* data,
+                           uint32_t id,
+                           int seq,
+@@ -133,7 +151,13 @@ class PipeWireSession : public rtc::RefCountedNonVirtual<PipeWireSession> {
+   VideoCaptureOptions::Callback* callback_ RTC_GUARDED_BY(&callback_lock_) =
+       nullptr;
+ 
+-  VideoCaptureOptions::Status status_;
++  webrtc::Mutex device_info_lock_;
++  std::vector<DeviceInfoPipeWire*> device_info_list_
++      RTC_GUARDED_BY(device_info_lock_);
++  // Guard with device_info_lock, because currently it's the only place where
++  // we use this status information.
++  VideoCaptureOptions::Status status_
++      RTC_GUARDED_BY(device_info_lock_);
+ 
+   struct pw_thread_loop* pw_main_loop_ = nullptr;
+   struct pw_context* pw_context_ = nullptr;

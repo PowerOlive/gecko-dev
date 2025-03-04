@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
+import React, { Component } from "devtools/client/shared/vendor/react";
 import {
   div,
   form,
@@ -12,18 +12,17 @@ import {
   ul,
   option,
   select,
-} from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../../utils/connect";
-import actions from "../../actions";
+} from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
+import actions from "../../actions/index";
 
-import { CloseButton } from "../shared/Button";
+import { CloseButton } from "../shared/Button/index";
 
-import "./XHRBreakpoints.css";
-import { getXHRBreakpoints, shouldPauseOnAnyXHR } from "../../selectors";
+import { getXHRBreakpoints, shouldPauseOnAnyXHR } from "../../selectors/index";
 import ExceptionOption from "./Breakpoints/ExceptionOption";
 
-const classnames = require("devtools/client/shared/classnames.js");
+const classnames = require("resource://devtools/client/shared/classnames.js");
 
 // At present, the "Pause on any URL" checkbox creates an xhrBreakpoint
 // of "ANY" with no path, so we can remove that before creating the list
@@ -165,7 +164,7 @@ class XHRBreakpoints extends Component {
     this.setState({ focused: true, editing: true });
   };
 
-  onMouseDown = e => {
+  onMouseDown = () => {
     this.setState({ editing: false, clickedOnFormElement: true });
   };
 
@@ -206,12 +205,12 @@ class XHRBreakpoints extends Component {
         className: classnames("xhr-input-container xhr-input-form", {
           focused,
         }),
-        onSubmit: onSubmit,
+        onSubmit,
       },
       input({
         className: "xhr-input-url",
         type: "text",
-        placeholder: placeholder,
+        placeholder,
         onChange: this.handleChange,
         onBlur: this.hideInput,
         onFocus: this.onFocus,
@@ -263,7 +262,7 @@ class XHRBreakpoints extends Component {
         className: "xhr-container",
         key: `${path}-${method}`,
         title: path,
-        onDoubleClick: (items, options) => this.editExpression(index),
+        onDoubleClick: () => this.editExpression(index),
       },
       label(
         null,
@@ -291,7 +290,7 @@ class XHRBreakpoints extends Component {
             className: "xhr-container__close-btn",
           },
           React.createElement(CloseButton, {
-            handleClick: e => removeXHRBreakpoint(index),
+            handleClick: () => removeXHRBreakpoint(index),
           })
         )
       )
@@ -317,7 +316,7 @@ class XHRBreakpoints extends Component {
     const { shouldPauseOnAny, togglePauseOnAny } = this.props;
     return div(
       {
-        className: classnames("breakpoints-exceptions-options", {
+        className: classnames("breakpoints-options", {
           empty: explicitXhrBreakpoints.length === 0,
         }),
       },

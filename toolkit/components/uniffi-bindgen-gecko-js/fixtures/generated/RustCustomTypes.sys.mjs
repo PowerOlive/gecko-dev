@@ -153,6 +153,20 @@ class ArrayBufferDataStream {
       this.pos += size;
       return value;
     }
+
+    readBytes() {
+      const size = this.readInt32();
+      const bytes = new Uint8Array(this.dataView.buffer, this.pos, size);
+      this.pos += size;
+      return bytes
+    }
+
+    writeBytes(value) {
+      this.writeUint32(value.length);
+      value.forEach((elt) => {
+        this.writeUint8(elt);
+      })
+    }
 }
 
 function handleRustResult(result, liftCallback, liftErrCallback) {
@@ -164,9 +178,8 @@ function handleRustResult(result, liftCallback, liftErrCallback) {
             throw liftErrCallback(result.data);
 
         case "internal-error":
-            let message = result.internalErrorMessage;
-            if (message) {
-                throw new UniFFIInternalError(message);
+            if (result.data) {
+                throw new UniFFIInternalError(FfiConverterString.lift(result.data));
             } else {
                 throw new UniFFIInternalError("Unknown error");
             }
@@ -213,6 +226,37 @@ class FfiConverterArrayBuffer extends FfiConverter {
         this.write(dataStream, value);
         return buf;
     }
+
+    /**
+     * Computes the size of the value.
+     *
+     * @param {*} _value
+     * @return {number}
+     */
+    static computeSize(_value) {
+        throw new UniFFIInternalError("computeSize() should be declared in the derived class");
+    }
+
+    /**
+     * Reads the type from a data stream.
+     *
+     * @param {ArrayBufferDataStream} _dataStream
+     * @returns {any}
+     */
+    static read(_dataStream) {
+        throw new UniFFIInternalError("read() should be declared in the derived class");
+    }
+
+    /**
+     * Writes the type to a data stream.
+     *
+     * @param {ArrayBufferDataStream} _dataStream
+     * @param {any} _value
+     */
+    static write(_dataStream, _value) {
+        throw new UniFFIInternalError("write() should be declared in the derived class");
+    }
+
 }
 
 // Symbols that are used to ensure that Object constructors
@@ -229,7 +273,7 @@ export class FfiConverterI64 extends FfiConverter {
             throw new UniFFITypeError(`${value} exceeds the safe integer bounds`);
         }
     }
-    static computeSize() {
+    static computeSize(_value) {
         return 8;
     }
     static lift(value) {
@@ -279,8 +323,11 @@ export class FfiConverterString extends FfiConverter {
     }
 }
 
+/**
+ * CustomTypesDemo
+ */
 export class CustomTypesDemo {
-    constructor(url,handle) {
+    constructor({ url, handle }) {
         try {
             FfiConverterTypeUrl.checkType(url)
         } catch (e) {
@@ -297,9 +344,16 @@ export class CustomTypesDemo {
             }
             throw e;
         }
+        /**
+         * @type {Url}
+         */
         this.url = url;
+        /**
+         * @type {Handle}
+         */
         this.handle = handle;
     }
+
     equals(other) {
         return (
             this.url == other.url &&
@@ -311,10 +365,10 @@ export class CustomTypesDemo {
 // Export the FFIConverter object to make external types work.
 export class FfiConverterTypeCustomTypesDemo extends FfiConverterArrayBuffer {
     static read(dataStream) {
-        return new CustomTypesDemo(
-            FfiConverterTypeUrl.read(dataStream), 
-            FfiConverterTypeHandle.read(dataStream)
-        );
+        return new CustomTypesDemo({
+            url: FfiConverterTypeUrl.read(dataStream),
+            handle: FfiConverterTypeHandle.read(dataStream),
+        });
     }
     static write(dataStream, value) {
         FfiConverterTypeUrl.write(dataStream, value.url);
@@ -330,6 +384,9 @@ export class FfiConverterTypeCustomTypesDemo extends FfiConverterArrayBuffer {
 
     static checkType(value) {
         super.checkType(value);
+        if (!(value instanceof CustomTypesDemo)) {
+            throw new UniFFITypeError(`Expected 'CustomTypesDemo', found '${typeof value}'`);
+        }
         try {
             FfiConverterTypeUrl.checkType(value.url);
         } catch (e) {
@@ -365,7 +422,7 @@ export class FfiConverterOptionalTypeCustomTypesDemo extends FfiConverterArrayBu
             case 1:
                 return FfiConverterTypeCustomTypesDemo.read(dataStream)
             default:
-                throw UniFFIError(`Unexpected code: ${code}`);
+                throw new UniFFIError(`Unexpected code: ${code}`);
         }
     }
 
@@ -438,6 +495,10 @@ export class FfiConverterTypeUrl extends FfiConverter {
 
 
 
+/**
+ * getCustomTypesDemo
+ * @returns {CustomTypesDemo}
+ */
 export function getCustomTypesDemo(demo) {
 
         const liftResult = (result) => FfiConverterTypeCustomTypesDemo.lift(result);
@@ -451,8 +512,8 @@ export function getCustomTypesDemo(demo) {
                 }
                 throw e;
             }
-            return UniFFIScaffolding.callAsync(
-                107, // custom_types:uniffi_custom_types_fn_func_get_custom_types_demo
+            return UniFFIScaffolding.callAsyncWrapper(
+                101, // custom_types:uniffi_uniffi_custom_types_fn_func_get_custom_types_demo
                 FfiConverterOptionalTypeCustomTypesDemo.lower(demo),
             )
         }

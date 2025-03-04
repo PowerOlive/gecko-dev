@@ -1,25 +1,16 @@
 /**
- * Copyright 2018 Google Inc. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * @license
+ * Copyright 2018 Google Inc.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 import assert from 'assert';
 
 import expect from 'expect';
-import {SerializedAXNode} from 'puppeteer-core/internal/common/Accessibility.js';
+import type {SerializedAXNode} from 'puppeteer-core/internal/cdp/Accessibility.js';
 
 import {getTestState, setupTestBrowserHooks} from './mocha-utils.js';
+import {attachFrame} from './utils.js';
 
 describe('Accessibility', function () {
   setupTestBrowserHooks();
@@ -108,13 +99,13 @@ describe('Accessibility', function () {
               value: 'First Option',
               haspopup: 'menu',
               children: [
-                {role: 'menuitem', name: 'First Option', selected: true},
-                {role: 'menuitem', name: 'Second Option'},
+                {role: 'option', name: 'First Option', selected: true},
+                {role: 'option', name: 'Second Option'},
               ],
             },
           ],
         };
-    expect(await page.accessibility.snapshot()).toEqual(golden);
+    expect(await page.accessibility.snapshot()).toMatchObject(golden);
   });
   it('should report uninteresting nodes', async () => {
     const {page, isFirefox} = await getTestState();
@@ -156,9 +147,9 @@ describe('Accessibility', function () {
         };
     expect(
       findFocusedNode(
-        await page.accessibility.snapshot({interestingOnly: false})
-      )
-    ).toEqual(golden);
+        await page.accessibility.snapshot({interestingOnly: false}),
+      ),
+    ).toMatchObject(golden);
   });
   it('get snapshots while the tree is re-calculated', async () => {
     // see https://github.com/puppeteer/puppeteer/issues/9404
@@ -195,12 +186,12 @@ describe('Accessibility', function () {
           })
         </script>
       </body>
-      </html>`
+      </html>`,
     );
     async function getAccessibleName(page: any, element: any) {
       return (await page.accessibility.snapshot({root: element})).name;
     }
-    const button = await page.$('button');
+    using button = await page.$('button');
     expect(await getAccessibleName(page, button)).toEqual('Show');
     await button?.click();
     await page.waitForSelector('aria/Hide');
@@ -209,7 +200,7 @@ describe('Accessibility', function () {
     const {page} = await getTestState();
 
     await page.setContent(
-      '<div tabIndex=-1 aria-roledescription="foo">Hi</div>'
+      '<div tabIndex=-1 aria-roledescription="foo">Hi</div>',
     );
     const snapshot = await page.accessibility.snapshot();
     // See https://chromium-review.googlesource.com/c/chromium/src/+/3088862
@@ -222,7 +213,7 @@ describe('Accessibility', function () {
     const {page} = await getTestState();
 
     await page.setContent(
-      '<a href="" role="slider" aria-orientation="vertical">11</a>'
+      '<a href="" role="slider" aria-orientation="vertical">11</a>',
     );
     const snapshot = await page.accessibility.snapshot();
     assert(snapshot);
@@ -244,7 +235,7 @@ describe('Accessibility', function () {
     const {page} = await getTestState();
 
     await page.setContent(
-      '<div role="grid" tabIndex=-1 aria-multiselectable=true>hey</div>'
+      '<div role="grid" tabIndex=-1 aria-multiselectable=true>hey</div>',
     );
     const snapshot = await page.accessibility.snapshot();
     assert(snapshot);
@@ -252,11 +243,180 @@ describe('Accessibility', function () {
     assert(snapshot.children[0]);
     expect(snapshot.children[0]!.multiselectable).toEqual(true);
   });
+
+  describe('iframes', () => {
+    it('should not include iframe data if not requested', async () => {
+      const {page, server} = await getTestState();
+      await attachFrame(page, 'frame1', server.EMPTY_PAGE);
+      const frame1 = page.frames()[1];
+      await frame1!.evaluate(() => {
+        const button = document.createElement('button');
+        button.innerText = 'value1';
+        document.body.appendChild(button);
+      });
+      const snapshot = await page.accessibility.snapshot({
+        interestingOnly: true,
+      });
+      expect(snapshot).toMatchObject({
+        role: 'RootWebArea',
+        name: '',
+      });
+    });
+
+    it('same-origin iframe (interesting only)', async () => {
+      const {page, server} = await getTestState();
+      await attachFrame(page, 'frame1', server.EMPTY_PAGE);
+      const frame1 = page.frames()[1];
+      await frame1!.evaluate(() => {
+        const button = document.createElement('button');
+        button.innerText = 'value1';
+        document.body.appendChild(button);
+      });
+      const snapshot = await page.accessibility.snapshot({
+        interestingOnly: true,
+        includeIframes: true,
+      });
+      expect(snapshot).toMatchObject({
+        role: 'RootWebArea',
+        name: '',
+        children: [
+          {
+            role: 'Iframe',
+            name: '',
+            children: [
+              {
+                role: 'RootWebArea',
+                name: '',
+                children: [
+                  {
+                    role: 'button',
+                    name: 'value1',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('cross-origin iframe (interesting only)', async () => {
+      const {page, server} = await getTestState();
+      await attachFrame(
+        page,
+        'frame1',
+        server.CROSS_PROCESS_PREFIX + '/empty.html',
+      );
+      const frame1 = page.frames()[1];
+      await frame1!.evaluate(() => {
+        const button = document.createElement('button');
+        button.innerText = 'value1';
+        document.body.appendChild(button);
+      });
+      const snapshot = await page.accessibility.snapshot({
+        interestingOnly: true,
+        includeIframes: true,
+      });
+      expect(snapshot).toMatchObject({
+        role: 'RootWebArea',
+        name: '',
+        children: [
+          {
+            role: 'Iframe',
+            name: '',
+            children: [
+              {
+                role: 'RootWebArea',
+                name: '',
+                children: [
+                  {
+                    role: 'button',
+                    name: 'value1',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('same-origin iframe (all nodes)', async () => {
+      const {page, server} = await getTestState();
+      await attachFrame(page, 'frame1', server.EMPTY_PAGE);
+      const frame1 = page.frames()[1];
+      await frame1!.evaluate(() => {
+        const button = document.createElement('button');
+        button.innerText = 'value1';
+        document.body.appendChild(button);
+      });
+      const snapshot = await page.accessibility.snapshot({
+        interestingOnly: false,
+        includeIframes: true,
+      });
+      expect(snapshot).toMatchObject({
+        role: 'RootWebArea',
+        name: '',
+        children: [
+          {
+            role: 'none',
+            children: [
+              {
+                role: 'generic',
+                name: '',
+                children: [
+                  {
+                    role: 'Iframe',
+                    name: '',
+                    children: [
+                      {
+                        role: 'RootWebArea',
+                        name: '',
+                        children: [
+                          {
+                            role: 'none',
+                            children: [
+                              {
+                                role: 'generic',
+                                name: '',
+                                children: [
+                                  {
+                                    role: 'button',
+                                    name: 'value1',
+                                    children: [
+                                      {
+                                        role: 'StaticText',
+                                        name: 'value1',
+                                        children: [
+                                          {
+                                            role: 'InlineTextBox',
+                                          },
+                                        ],
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+    });
+  });
+
   it('keyshortcuts', async () => {
     const {page} = await getTestState();
 
     await page.setContent(
-      '<div role="grid" tabIndex=-1 aria-keyshortcuts="foo">hey</div>'
+      '<div role="grid" tabIndex=-1 aria-keyshortcuts="foo">hey</div>',
     );
     const snapshot = await page.accessibility.snapshot();
     assert(snapshot);
@@ -304,7 +464,7 @@ describe('Accessibility', function () {
               },
             ],
           };
-      expect(await page.accessibility.snapshot()).toEqual(golden);
+      expect(await page.accessibility.snapshot()).toMatchObject(golden);
     });
     it('rich text editable fields should have children', async () => {
       const {page, isFirefox} = await getTestState();
@@ -338,7 +498,7 @@ describe('Accessibility', function () {
                 name: 'Edit this image: ',
               },
               {
-                role: 'img',
+                role: 'image',
                 name: 'my fake image',
               },
             ],
@@ -346,7 +506,7 @@ describe('Accessibility', function () {
       const snapshot = await page.accessibility.snapshot();
       assert(snapshot);
       assert(snapshot.children);
-      expect(snapshot.children[0]).toEqual(golden);
+      expect(snapshot.children[0]).toMatchObject(golden);
     });
     it('rich text editable fields with role should have children', async () => {
       const {page, isFirefox} = await getTestState();
@@ -383,7 +543,7 @@ describe('Accessibility', function () {
       const snapshot = await page.accessibility.snapshot();
       assert(snapshot);
       assert(snapshot.children);
-      expect(snapshot.children[0]).toEqual(golden);
+      expect(snapshot.children[0]).toMatchObject(golden);
     });
 
     // Firefox does not support contenteditable="plaintext-only".
@@ -396,7 +556,7 @@ describe('Accessibility', function () {
         const snapshot = await page.accessibility.snapshot();
         assert(snapshot);
         assert(snapshot.children);
-        expect(snapshot.children[0]).toEqual({
+        expect(snapshot.children[0]).toMatchObject({
           role: 'textbox',
           name: '',
           value: 'Edit this image:',
@@ -426,7 +586,7 @@ describe('Accessibility', function () {
       const snapshot = await page.accessibility.snapshot();
       assert(snapshot);
       assert(snapshot.children);
-      expect(snapshot.children[0]).toEqual(golden);
+      expect(snapshot.children[0]).toMatchObject(golden);
     });
     it('checkbox with and tabIndex and label should not have children', async () => {
       const {page, isFirefox} = await getTestState();
@@ -450,7 +610,7 @@ describe('Accessibility', function () {
       const snapshot = await page.accessibility.snapshot();
       assert(snapshot);
       assert(snapshot.children);
-      expect(snapshot.children[0]).toEqual(golden);
+      expect(snapshot.children[0]).toMatchObject(golden);
     });
     it('checkbox without label should not have children', async () => {
       const {page, isFirefox} = await getTestState();
@@ -474,7 +634,7 @@ describe('Accessibility', function () {
       const snapshot = await page.accessibility.snapshot();
       assert(snapshot);
       assert(snapshot.children);
-      expect(snapshot.children[0]).toEqual(golden);
+      expect(snapshot.children[0]).toMatchObject(golden);
     });
 
     describe('root option', function () {
@@ -483,19 +643,21 @@ describe('Accessibility', function () {
 
         await page.setContent(`<button>My Button</button>`);
 
-        const button = (await page.$('button'))!;
-        expect(await page.accessibility.snapshot({root: button})).toEqual({
-          role: 'button',
-          name: 'My Button',
-        });
+        using button = (await page.$('button'))!;
+        expect(await page.accessibility.snapshot({root: button})).toMatchObject(
+          {
+            role: 'button',
+            name: 'My Button',
+          },
+        );
       });
       it('should work an input', async () => {
         const {page} = await getTestState();
 
         await page.setContent(`<input title="My Input" value="My Value">`);
 
-        const input = (await page.$('input'))!;
-        expect(await page.accessibility.snapshot({root: input})).toEqual({
+        using input = (await page.$('input'))!;
+        expect(await page.accessibility.snapshot({root: input})).toMatchObject({
           role: 'textbox',
           name: 'My Input',
           value: 'My Value',
@@ -512,8 +674,8 @@ describe('Accessibility', function () {
             </div>
           `);
 
-        const menu = (await page.$('div[role="menu"]'))!;
-        expect(await page.accessibility.snapshot({root: menu})).toEqual({
+        using menu = (await page.$('div[role="menu"]'))!;
+        expect(await page.accessibility.snapshot({root: menu})).toMatchObject({
           role: 'menu',
           name: 'My Menu',
           children: [
@@ -528,7 +690,7 @@ describe('Accessibility', function () {
         const {page} = await getTestState();
 
         await page.setContent(`<button>My Button</button>`);
-        const button = (await page.$('button'))!;
+        using button = (await page.$('button'))!;
         await page.$eval('button', button => {
           return button.remove();
         });
@@ -538,14 +700,14 @@ describe('Accessibility', function () {
         const {page} = await getTestState();
 
         await page.setContent(`<div><button>My Button</button></div>`);
-        const div = (await page.$('div'))!;
+        using div = (await page.$('div'))!;
         expect(await page.accessibility.snapshot({root: div})).toEqual(null);
         expect(
           await page.accessibility.snapshot({
             root: div,
             interestingOnly: false,
-          })
-        ).toEqual({
+          }),
+        ).toMatchObject({
           role: 'generic',
           name: '',
           children: [
@@ -558,10 +720,32 @@ describe('Accessibility', function () {
         });
       });
     });
+
+    describe('elementHandle()', () => {
+      it('should get an ElementHandle from a snapshot item', async () => {
+        const {page} = await getTestState();
+
+        await page.setContent(`<button>My Button</button>`);
+
+        using button = (await page.$('button'))!;
+        const snapshot = await page.accessibility.snapshot({root: button});
+        expect(snapshot).toMatchObject({
+          role: 'button',
+          name: 'My Button',
+        });
+
+        using buttonHandle = await snapshot!.elementHandle();
+        expect(
+          await buttonHandle?.evaluate(button => {
+            return button.innerHTML;
+          }),
+        ).toEqual('My Button');
+      });
+    });
   });
 
   function findFocusedNode(
-    node: SerializedAXNode | null
+    node: SerializedAXNode | null,
   ): SerializedAXNode | null {
     if (node?.focused) {
       return node;

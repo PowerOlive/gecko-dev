@@ -101,8 +101,8 @@ bool RangeUtils::IsValidPoints(
   // Instead, check one by one since it is easier to catch the error reason
   // with debugger.
 
-  if (ComputeRootNode(aStartBoundary.Container()) !=
-      ComputeRootNode(aEndBoundary.Container())) {
+  if (ComputeRootNode(aStartBoundary.GetContainer()) !=
+      ComputeRootNode(aEndBoundary.GetContainer())) {
     return false;
   }
 
@@ -147,9 +147,10 @@ nsresult RangeUtils::CompareNodeToRange(nsINode* aNode,
       NS_WARN_IF(!aAbstractRange->IsPositioned())) {
     return NS_ERROR_INVALID_ARG;
   }
-  return CompareNodeToRangeBoundaries(aNode, aAbstractRange->StartRef(),
-                                      aAbstractRange->EndRef(),
-                                      aNodeIsBeforeRange, aNodeIsAfterRange);
+  return CompareNodeToRangeBoundaries(
+      aNode, aAbstractRange->MayCrossShadowBoundaryStartRef(),
+      aAbstractRange->MayCrossShadowBoundaryEndRef(), aNodeIsBeforeRange,
+      aNodeIsAfterRange);
 }
 template <typename SPT, typename SRT, typename EPT, typename ERT>
 nsresult RangeUtils::CompareNodeToRangeBoundaries(
@@ -207,7 +208,7 @@ nsresult RangeUtils::CompareNodeToRangeBoundaries(
 
   // is RANGE(start) <= NODE(start) ?
   Maybe<int32_t> order = nsContentUtils::ComparePoints_AllowNegativeOffsets(
-      aStartBoundary.Container(),
+      aStartBoundary.GetContainer(),
       *aStartBoundary.Offset(
           RangeBoundaryBase<SPT, SRT>::OffsetFilter::kValidOrInvalidOffsets),
       parent, nodeStart);
@@ -216,8 +217,8 @@ nsresult RangeUtils::CompareNodeToRangeBoundaries(
   }
   *aNodeIsBeforeRange = *order > 0;
   // is RANGE(end) >= NODE(end) ?
-  order = nsContentUtils::ComparePoints(
-      aEndBoundary.Container(),
+  order = nsContentUtils::ComparePointsWithIndices(
+      aEndBoundary.GetContainer(),
       *aEndBoundary.Offset(
           RangeBoundaryBase<EPT, ERT>::OffsetFilter::kValidOrInvalidOffsets),
       parent, nodeEnd);
@@ -229,5 +230,64 @@ nsresult RangeUtils::CompareNodeToRangeBoundaries(
 
   return NS_OK;
 }
+
+// static
+nsINode* ShadowDOMSelectionHelpers::GetStartContainer(
+    const AbstractRange* aRange, bool aAllowCrossShadowBoundary) {
+  MOZ_ASSERT(aRange);
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aRange->GetMayCrossShadowBoundaryStartContainer()
+             : aRange->GetStartContainer();
+}
+
+// static
+uint32_t ShadowDOMSelectionHelpers::StartOffset(
+    const AbstractRange* aRange, bool aAllowCrossShadowBoundary) {
+  MOZ_ASSERT(aRange);
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aRange->MayCrossShadowBoundaryStartOffset()
+             : aRange->StartOffset();
+}
+
+// static
+nsINode* ShadowDOMSelectionHelpers::GetEndContainer(
+    const AbstractRange* aRange, bool aAllowCrossShadowBoundary) {
+  MOZ_ASSERT(aRange);
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aRange->GetMayCrossShadowBoundaryEndContainer()
+             : aRange->GetEndContainer();
+}
+
+// static
+uint32_t ShadowDOMSelectionHelpers::EndOffset(const AbstractRange* aRange,
+                                              bool aAllowCrossShadowBoundary) {
+  MOZ_ASSERT(aRange);
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aRange->MayCrossShadowBoundaryEndOffset()
+             : aRange->EndOffset();
+}
+
+// static
+nsINode* ShadowDOMSelectionHelpers::GetParentNode(
+    nsINode& aNode, bool aAllowCrossShadowBoundary) {
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aNode.GetParentOrShadowHostNode()
+             : aNode.GetParentNode();
+}
+
+// static
+ShadowRoot* ShadowDOMSelectionHelpers::GetShadowRoot(
+    const nsINode* aNode, bool aAllowCrossShadowBoundary) {
+  MOZ_ASSERT(aNode);
+  return (StaticPrefs::dom_shadowdom_selection_across_boundary_enabled() &&
+          aAllowCrossShadowBoundary)
+             ? aNode->GetShadowRootForSelection()
+             : nullptr;
+}  // namespace dom
 
 }  // namespace mozilla

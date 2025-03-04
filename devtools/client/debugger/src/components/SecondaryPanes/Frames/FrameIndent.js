@@ -2,11 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React from "react";
+import React from "devtools/client/shared/vendor/react";
 
-export default function FrameIndent() {
+export default function FrameIndent({ indentLevel = 1 } = {}) {
   // \xA0 represents the non breakable space &nbsp;
-  const nonBreakableSpaces = "\xA0\xA0\xA0\xA0";
+  const indentWidth = 4 * indentLevel;
+  const nonBreakableSpaces = "\xA0".repeat(indentWidth);
   return React.createElement(
     "span",
     {

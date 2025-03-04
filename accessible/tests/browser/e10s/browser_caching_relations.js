@@ -18,6 +18,8 @@ const attrRelationsSpec = [
   ["aria-describedby", RELATION_DESCRIBED_BY, RELATION_DESCRIPTION_FOR],
   ["aria-controls", RELATION_CONTROLLER_FOR, RELATION_CONTROLLED_BY],
   ["aria-flowto", RELATION_FLOWS_TO, RELATION_FLOWS_FROM],
+  ["aria-details", RELATION_DETAILS, RELATION_DETAILS_FOR],
+  ["aria-errormessage", RELATION_ERRORMSG, RELATION_ERRORMSG_FOR],
 ];
 
 /**
@@ -286,4 +288,23 @@ addAccessibleTask(
     await testCachedRelation(accDoc, RELATION_NODE_CHILD_OF, accDoc.parent);
   },
   { topLevel: true, chrome: true }
+);
+
+/*
+ * Test relation caching for LABELLED_BY and LABEL_FOR with legend/fieldset.
+ */
+addAccessibleTask(
+  `
+  <fieldset id="fs">
+    <legend id="leg">legend</legend>
+    inner content
+  </fieldset>`,
+  async function testFieldsetLegendLabels(browser, accDoc) {
+    const fs = findAccessibleChildByID(accDoc, "fs");
+    const leg = findAccessibleChildByID(accDoc, "leg");
+
+    await testCachedRelation(fs, RELATION_LABELLED_BY, leg);
+    await testCachedRelation(leg, RELATION_LABEL_FOR, fs);
+  },
+  { chrome: true, iframe: true, remoteIframe: true }
 );

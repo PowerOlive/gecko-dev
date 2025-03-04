@@ -9,8 +9,8 @@
 #include "nsUnicharUtils.h"
 
 template <typename char_type>
-/* static */ mozilla::UniquePtr<TMimeType<char_type>>
-TMimeType<char_type>::Parse(const nsTSubstring<char_type>& aMimeType) {
+/* static */ RefPtr<TMimeType<char_type>> TMimeType<char_type>::Parse(
+    const nsTSubstring<char_type>& aMimeType) {
   // See https://mimesniff.spec.whatwg.org/#parsing-a-mime-type
 
   // Steps 1-2
@@ -85,8 +85,8 @@ TMimeType<char_type>::Parse(const nsTSubstring<char_type>& aMimeType) {
   for (const char_type* c = subtypeStart; c < subtypeEnd; ++c) {
     subtype.Append(ToLowerCaseASCII(*c));
   }
-  mozilla::UniquePtr<TMimeType<char_type>> mimeType(
-      mozilla::MakeUnique<TMimeType<char_type>>(type, subtype));
+  RefPtr<TMimeType<char_type>> mimeType =
+      new TMimeType<char_type>(type, subtype);
 
   // Step 11
   while (pos < end) {
@@ -244,23 +244,105 @@ TMimeType<char_type>::Parse(const nsTSubstring<char_type>& aMimeType) {
 }
 
 template <typename char_type>
+/* static */ nsTArray<nsTDependentSubstring<char_type>>
+TMimeType<char_type>::SplitMimetype(const nsTSubstring<char_type>& aMimeType) {
+  nsTArray<nsTDependentSubstring<char_type>> mimeTypeParts;
+  bool inQuotes = false;
+  size_t start = 0;
+
+  for (size_t i = 0; i < aMimeType.Length(); i++) {
+    char_type c = aMimeType[i];
+
+    if (c == '\"' && (i == 0 || aMimeType[i - 1] != '\\')) {
+      inQuotes = !inQuotes;
+    } else if (c == ',' && !inQuotes) {
+      mimeTypeParts.AppendElement(Substring(aMimeType, start, i - start));
+      start = i + 1;
+    }
+  }
+  if (start < aMimeType.Length()) {
+    mimeTypeParts.AppendElement(Substring(aMimeType, start));
+  }
+  return mimeTypeParts;
+}
+
+template <typename char_type>
+/* static */ bool TMimeType<char_type>::Parse(
+    const nsTSubstring<char_type>& aMimeType,
+    nsTSubstring<char_type>& aOutEssence,
+    nsTSubstring<char_type>& aOutCharset) {
+  static char_type kCHARSET[] = {'c', 'h', 'a', 'r', 's', 'e', 't'};
+  static nsTDependentSubstring<char_type> kCharset(kCHARSET, 7);
+
+  RefPtr<TMimeType<char_type>> parsed;
+  nsTAutoString<char_type> prevContentType;
+  nsTAutoString<char_type> prevCharset;
+
+  prevContentType.Assign(aOutEssence);
+  prevCharset.Assign(aOutCharset);
+
+  nsTArray<nsTDependentSubstring<char_type>> mimeTypeParts =
+      SplitMimetype(aMimeType);
+
+  for (auto& mimeTypeString : mimeTypeParts) {
+    if (mimeTypeString.EqualsLiteral("error")) {
+      continue;
+    }
+
+    parsed = Parse(mimeTypeString);
+
+    if (!parsed) {
+      aOutEssence.Truncate();
+      aOutCharset.Truncate();
+      return false;
+    }
+
+    parsed->GetEssence(aOutEssence);
+
+    if (aOutEssence.EqualsLiteral("*/*")) {
+      aOutEssence.Assign(prevContentType);
+      continue;
+    }
+
+    bool eq = !prevContentType.IsEmpty() && aOutEssence.Equals(prevContentType);
+
+    if (!eq) {
+      prevContentType.Assign(aOutEssence);
+    }
+
+    bool typeHasCharset = false;
+    if (parsed->GetParameterValue(kCharset, aOutCharset, false, false)) {
+      typeHasCharset = true;
+    } else if (eq) {
+      aOutCharset.Assign(prevCharset);
+    }
+
+    if ((!eq && !prevCharset.IsEmpty()) || typeHasCharset) {
+      prevCharset.Assign(aOutCharset);
+    }
+  }
+
+  return true;
+}
+
+template <typename char_type>
 void TMimeType<char_type>::Serialize(nsTSubstring<char_type>& aOutput) const {
   aOutput.Assign(mType);
-  aOutput.AppendLiteral("/");
+  aOutput.Append('/');
   aOutput.Append(mSubtype);
   for (uint32_t i = 0; i < mParameterNames.Length(); i++) {
     auto name = mParameterNames[i];
-    aOutput.AppendLiteral(";");
+    aOutput.Append(';');
     aOutput.Append(name);
-    aOutput.AppendLiteral("=");
+    aOutput.Append('=');
     GetParameterValue(name, aOutput, true);
   }
 }
 
 template <typename char_type>
-void TMimeType<char_type>::GetFullType(nsTSubstring<char_type>& aOutput) const {
+void TMimeType<char_type>::GetEssence(nsTSubstring<char_type>& aOutput) const {
   aOutput.Assign(mType);
-  aOutput.AppendLiteral("/");
+  aOutput.Append('/');
   aOutput.Append(mSubtype);
 }
 
@@ -273,7 +355,7 @@ bool TMimeType<char_type>::HasParameter(
 template <typename char_type>
 bool TMimeType<char_type>::GetParameterValue(
     const nsTSubstring<char_type>& aName, nsTSubstring<char_type>& aOutput,
-    bool aAppend) const {
+    bool aAppend, bool aWithQuotes) const {
   if (!aAppend) {
     aOutput.Truncate();
   }
@@ -283,18 +365,18 @@ bool TMimeType<char_type>::GetParameterValue(
     return false;
   }
 
-  if (value.mRequiresQuoting || value.IsEmpty()) {
-    aOutput.AppendLiteral("\"");
+  if (aWithQuotes && (value.mRequiresQuoting || value.IsEmpty())) {
+    aOutput.Append('"');
     const char_type* vcur = value.BeginReading();
     const char_type* vend = value.EndReading();
     while (vcur < vend) {
       if (*vcur == '"' || *vcur == '\\') {
-        aOutput.AppendLiteral("\\");
+        aOutput.Append('\\');
       }
       aOutput.Append(*vcur);
       vcur++;
     }
-    aOutput.AppendLiteral("\"");
+    aOutput.Append('"');
   } else {
     aOutput.Append(value);
   }
@@ -316,26 +398,34 @@ void TMimeType<char_type>::SetParameterValue(
   });
 }
 
-template mozilla::UniquePtr<TMimeType<char16_t>> TMimeType<char16_t>::Parse(
+template RefPtr<TMimeType<char16_t>> TMimeType<char16_t>::Parse(
     const nsTSubstring<char16_t>& aMimeType);
-template mozilla::UniquePtr<TMimeType<char>> TMimeType<char>::Parse(
+template RefPtr<TMimeType<char>> TMimeType<char>::Parse(
+    const nsTSubstring<char>& aMimeType);
+template bool TMimeType<char16_t>::Parse(
+    const nsTSubstring<char16_t>& aMimeType,
+    nsTSubstring<char16_t>& aOutEssence, nsTSubstring<char16_t>& aOutCharset);
+template bool TMimeType<char>::Parse(const nsTSubstring<char>& aMimeType,
+                                     nsTSubstring<char>& aOutEssence,
+                                     nsTSubstring<char>& aOutCharset);
+template nsTArray<nsTDependentSubstring<char>> TMimeType<char>::SplitMimetype(
     const nsTSubstring<char>& aMimeType);
 template void TMimeType<char16_t>::Serialize(
     nsTSubstring<char16_t>& aOutput) const;
 template void TMimeType<char>::Serialize(nsTSubstring<char>& aOutput) const;
-template void TMimeType<char16_t>::GetFullType(
+template void TMimeType<char16_t>::GetEssence(
     nsTSubstring<char16_t>& aOutput) const;
-template void TMimeType<char>::GetFullType(nsTSubstring<char>& aOutput) const;
+template void TMimeType<char>::GetEssence(nsTSubstring<char>& aOutput) const;
 template bool TMimeType<char16_t>::HasParameter(
     const nsTSubstring<char16_t>& aName) const;
 template bool TMimeType<char>::HasParameter(
     const nsTSubstring<char>& aName) const;
 template bool TMimeType<char16_t>::GetParameterValue(
     const nsTSubstring<char16_t>& aName, nsTSubstring<char16_t>& aOutput,
-    bool aAppend) const;
+    bool aAppend, bool aWithQuotes) const;
 template bool TMimeType<char>::GetParameterValue(
-    const nsTSubstring<char>& aName, nsTSubstring<char>& aOutput,
-    bool aAppend) const;
+    const nsTSubstring<char>& aName, nsTSubstring<char>& aOutput, bool aAppend,
+    bool aWithQuotes) const;
 template void TMimeType<char16_t>::SetParameterValue(
     const nsTSubstring<char16_t>& aName, const nsTSubstring<char16_t>& aValue);
 template void TMimeType<char>::SetParameterValue(

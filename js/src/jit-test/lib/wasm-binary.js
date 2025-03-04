@@ -44,13 +44,18 @@ const F64Code          = 0x7c;
 const V128Code         = 0x7b;
 const AnyFuncCode      = 0x70;
 const ExternRefCode    = 0x6f;
+const AnyRefCode       = 0x6e;
 const EqRefCode        = 0x6d;
-const OptRefCode       = 0x6c; // (ref null $t), needs heap type immediate
-const RefCode          = 0x6b; // (ref $t), needs heap type immediate
+const OptRefCode       = 0x63; // (ref null $t), needs heap type immediate
+const RefCode          = 0x64; // (ref $t), needs heap type immediate
 const FuncCode         = 0x60;
 const StructCode       = 0x5f;
 const ArrayCode        = 0x5e;
 const VoidCode         = 0x40;
+const BadType          = 0x79; // reserved for testing
+const RecGroupCode     = 0x4e;
+const SubFinalTypeCode = 0x4f;
+const SubNoFinalTypeCode = 0x50;
 
 // Opcodes
 const UnreachableCode  = 0x00
@@ -65,6 +70,7 @@ const CallCode         = 0x10;
 const CallIndirectCode = 0x11;
 const ReturnCallCode   = 0x12;
 const ReturnCallIndirectCode = 0x13;
+const ReturnCallRefCode      = 0x15;
 const DelegateCode     = 0x18;
 const DropCode         = 0x1a;
 const SelectCode       = 0x1b;
@@ -141,8 +147,8 @@ const F32x4RelaxedMaxCode = 0x10e;
 const F64x2RelaxedMinCode = 0x10f;
 const F64x2RelaxedMaxCode = 0x110;
 const I16x8RelaxedQ15MulrSCode = 0x111;
-const I16x8DotI8x16I7x16SCode = 0x112;
-const I32x4DotI8x16I7x16AddSCode = 0x113;
+const I16x8RelaxedDotI8x16I7x16SCode = 0x112;
+const I32x4RelaxedDotI8x16I7x16AddSCode = 0x113;
 
 const FirstInvalidOpcode = 0xc5;
 const LastInvalidOpcode = 0xfa;
@@ -157,13 +163,16 @@ const MozPrefix = 0xff;
 
 const definedOpcodes =
     [0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-     ...(wasmExceptionsEnabled() ? [0x06, 0x07, 0x08, 0x09] : []),
+     0x06, 0x07, 0x08, 0x09,
+     ...(wasmExnRefEnabled() ? [0x0a] : []),
      0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
      0x10, 0x11,
-     ...(wasmTailCallsEnabled() ? [0x12, 0x13] : []),
-     ...(wasmFunctionReferencesEnabled() ? [0x14] : []),
-     ...(wasmExceptionsEnabled() ? [0x18, 0x19] : []),
+     0x12, 0x13,
+     0x14,
+     0x15,
+     0x18, 0x19,
      0x1a, 0x1b, 0x1c,
+     ...(wasmExnRefEnabled() ? [0x1f] : []),
      0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
      0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
      0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
@@ -214,6 +223,7 @@ const ElemDropCode = 0x0d;      // Pending
 const TableCopyCode = 0x0e;     // Pending
 
 const StructNew = 0x00;         // UNOFFICIAL
+const StructNewDefault = 0x01;  // UNOFFICIAL
 const StructGet = 0x03;         // UNOFFICIAL
 const StructSet = 0x06;         // UNOFFICIAL
 
@@ -228,8 +238,9 @@ const TagCode          = 0x04;
 const HasMaximumFlag   = 0x1;
 
 function toU8(array) {
-    for (let b of array)
-        assertEq(b < 256, true);
+    for (const [i, b] of array.entries()) {
+        assertEq(b < 256, true, `expected byte at index ${i} but got ${b}`);
+    }
     return Uint8Array.from(array);
 }
 
@@ -280,12 +291,14 @@ function encodedString(name, len) {
     return varU32(len === undefined ? nameBytes.length : len).concat(nameBytes);
 }
 
-function moduleWithSections(sectionArray) {
-    var bytes = moduleHeaderThen();
-    for (let section of sectionArray) {
+function moduleWithSections(sections) {
+    const bytes = moduleHeaderThen();
+    for (const section of sections) {
         bytes.push(section.name);
         bytes.push(...varU32(section.body.length));
-        bytes.push(...section.body);
+        for (let byte of section.body) {
+            bytes.push(byte);
+        }
     }
     return toU8(bytes);
 }
@@ -381,13 +394,17 @@ function typeSection(types) {
     body.push(...varU32(types.length)); // technically a count of recursion groups
     for (const type of types) {
         if (type.isRecursionGroup) {
-            body.push(0x4f);
+            body.push(RecGroupCode);
             body.push(...varU32(type.types.length));
             for (const t of type.types) {
-                body.push(..._encodeType(t));
+                for (const byte of _encodeType(t)) {
+                    body.push(byte);
+                }
             }
         } else {
-            body.push(..._encodeType(type));
+            for (const byte of _encodeType(type)) {
+                body.push(byte);
+            }
         }
     }
     return { name: typeId, body };
@@ -435,12 +452,12 @@ function _encodeType(typeObj) {
     // Types are now final by default.
     const final = typeObj.final ?? true;
     if (typeObj.sub !== undefined) {
-        typeBytes.push(final ? 0x4e : 0x50);
+        typeBytes.push(final ? SubFinalTypeCode : SubNoFinalTypeCode);
         typeBytes.push(...varU32(1), ...varU32(typeObj.sub));
     }
     else if (final == false) {
         // This type is extensible even if no supertype is defined.
-        typeBytes.push(0x50);
+        typeBytes.push(SubNoFinalTypeCode);
         typeBytes.push(0x00);
     }
     typeBytes.push(typeObj.kind);
@@ -510,7 +527,9 @@ function funcBody(func, withEndCode=true) {
     var body = varU32(func.locals.length);
     for (let local of func.locals)
         body.push(...varU32(local));
-    body = body.concat(...func.body);
+    for (let byte of func.body) {
+        body.push(byte);
+    }
     if (withEndCode)
         body.push(EndCode);
     body.splice(0, 0, ...varU32(body.length));

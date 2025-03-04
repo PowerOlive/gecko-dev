@@ -36,14 +36,11 @@ class nsHttpTransaction;
 class nsHttpConnection;
 
 enum Http2StreamBaseType { Normal, WebSocket, Tunnel, ServerPush };
+enum class ExtendedCONNECTType : uint8_t { Proxy, WebSocket, WebTransport };
 
 // b23b147c-c4f8-4d6e-841a-09f29a010de7
-#define NS_HTTP2SESSION_IID                          \
-  {                                                  \
-    0xb23b147c, 0xc4f8, 0x4d6e, {                    \
-      0x84, 0x1a, 0x09, 0xf2, 0x9a, 0x01, 0x0d, 0xe7 \
-    }                                                \
-  }
+#define NS_HTTP2SESSION_IID \
+  {0xb23b147c, 0xc4f8, 0x4d6e, {0x84, 0x1a, 0x09, 0xf2, 0x9a, 0x01, 0x0d, 0xe7}}
 
 class Http2Session final : public ASpdySession,
                            public nsAHttpConnection,
@@ -112,7 +109,7 @@ class Http2Session final : public ASpdySession,
     FRAME_TYPE_ALTSVC = 0xA,
     FRAME_TYPE_UNUSED = 0xB,
     FRAME_TYPE_ORIGIN = 0xC,
-    FRAME_TYPE_LAST = 0xD
+    FRAME_TYPE_PRIORITY_UPDATE = 0x10,
   };
 
   // NO_ERROR is a macro defined on windows, so we'll name the HTTP2 goaway
@@ -146,16 +143,22 @@ class Http2Session final : public ASpdySession,
   const static uint8_t kFlag_PRIORITY = 0x20;  // headers
 
   enum {
-    SETTINGS_TYPE_HEADER_TABLE_SIZE = 1,  // compression table size
-    SETTINGS_TYPE_ENABLE_PUSH = 2,        // can be used to disable push
-    SETTINGS_TYPE_MAX_CONCURRENT = 3,     // streams recvr allowed to initiate
-    SETTINGS_TYPE_INITIAL_WINDOW = 4,     // bytes for flow control default
-    SETTINGS_TYPE_MAX_FRAME_SIZE =
-        5,  // max frame size settings sender allows receipt of
+    // compression table size
+    SETTINGS_TYPE_HEADER_TABLE_SIZE = 1,
+    // can be used to disable push
+    SETTINGS_TYPE_ENABLE_PUSH = 2,
+    // streams recvr allowed to initiate
+    SETTINGS_TYPE_MAX_CONCURRENT = 3,
+    // bytes for flow control default
+    SETTINGS_TYPE_INITIAL_WINDOW = 4,
+    // max frame size settings sender allows receipt of
+    SETTINGS_TYPE_MAX_FRAME_SIZE = 5,
     // 6 is SETTINGS_TYPE_MAX_HEADER_LIST - advisory, we ignore it
     // 7 is unassigned
-    SETTINGS_TYPE_ENABLE_CONNECT_PROTOCOL =
-        8  // if sender implements extended CONNECT for websockets
+    // if sender implements extended CONNECT
+    SETTINGS_TYPE_ENABLE_CONNECT_PROTOCOL = 8,
+    // see rfc9218. used to disable HTTP/2 priority signals
+    SETTINGS_NO_RFC7540_PRIORITIES = 9,
   };
 
   // This should be big enough to hold all of your control packets,
@@ -220,6 +223,7 @@ class Http2Session final : public ASpdySession,
   static nsresult RecvAltSvc(Http2Session*);
   static nsresult RecvUnused(Http2Session*);
   static nsresult RecvOrigin(Http2Session*);
+  static nsresult RecvPriorityUpdate(Http2Session*);
 
   char* EnsureOutputBuffer(uint32_t needed);
 
@@ -290,11 +294,14 @@ class Http2Session final : public ASpdySession,
   void SendPriorityFrame(uint32_t streamID, uint32_t dependsOn, uint8_t weight);
   void IncrementTrrCounter() { mTrrStreams++; }
 
-  WebSocketSupport GetWebSocketSupport() override;
+  void SendPriorityUpdateFrame(uint32_t streamID, uint8_t urgency,
+                               bool incremental);
+
+  ExtendedCONNECTSupport GetExtendedCONNECTSupport() override;
 
   already_AddRefed<nsHttpConnection> CreateTunnelStream(
       nsAHttpTransaction* aHttpTransaction, nsIInterfaceRequestor* aCallbacks,
-      PRIntervalTime aRtt, bool aIsWebSocket = false) override;
+      PRIntervalTime aRtt, bool aIsExtendedCONNECT = false) override;
 
   void CleanupStream(Http2StreamBase*, nsresult, errorType);
 
@@ -304,7 +311,7 @@ class Http2Session final : public ASpdySession,
 
   static Http2StreamTunnel* CreateTunnelStreamFromConnInfo(
       Http2Session* session, uint64_t bcId, nsHttpConnectionInfo* connInfo,
-      bool isWebSocket);
+      ExtendedCONNECTType aType);
 
   // These internal states do not correspond to the states of the HTTP/2
   // specification
@@ -334,7 +341,6 @@ class Http2Session final : public ASpdySession,
   [[nodiscard]] nsresult UncompressAndDiscard(bool);
   void GeneratePing(bool);
   void GenerateSettingsAck();
-  void GeneratePriority(uint32_t, uint8_t);
   void GenerateRstStream(uint32_t, uint32_t);
   void GenerateGoAway(uint32_t);
   void CleanupStream(uint32_t, nsresult, errorType);
@@ -360,6 +366,9 @@ class Http2Session final : public ASpdySession,
   char* CreatePriorityFrame(uint32_t, uint32_t, uint8_t);
   bool VerifyStream(Http2StreamBase*, uint32_t);
   void SetNeedsCleanup();
+
+  char* CreatePriorityUpdateFrame(uint32_t streamID, uint8_t urgency,
+                                  bool incremental);
 
   void UpdateLocalRwin(Http2StreamBase* stream, uint32_t bytes);
   void UpdateLocalStreamWindow(Http2StreamBase* stream, uint32_t bytes);
@@ -606,16 +615,15 @@ class Http2Session final : public ASpdySession,
  private:
   uint32_t mTrrStreams;
 
-  // websockets
-  bool mEnableWebsockets;      // Whether we allow websockets, based on a pref
-  bool mPeerAllowsWebsockets;  // Whether our peer allows websockets, based on
-                               // SETTINGS
-  bool mProcessedWaitingWebsockets;  // True once we've received at least one
-                                     // SETTINGS
+  // Whether we allow websockets, based on a pref
+  bool mEnableWebsockets = false;
+  // Whether our peer allows extended CONNECT, based on SETTINGS
+  bool mPeerAllowsExtendedCONNECT = false;
+
   // Setting this to true means there is a transaction waiting for the result of
-  // WebSocket support. We'll need to process the pending queue once we've
-  // received the settings.
-  bool mHasTransactionWaitingForWebsockets = false;
+  // extended CONNECT support. We'll need to process the pending queue once
+  // we've received the settings.
+  bool mHasTransactionWaitingForExtendedCONNECT = false;
 };
 
 NS_DEFINE_STATIC_IID_ACCESSOR(Http2Session, NS_HTTP2SESSION_IID);

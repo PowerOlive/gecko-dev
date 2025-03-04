@@ -4,6 +4,9 @@ ESLint
 `ESLint`__ is a popular linter for JavaScript. The ESLint integration also uses
 `Prettier`_ to enforce code formatting.
 
+.. contents::
+    :local:
+
 Run Locally
 -----------
 
@@ -53,6 +56,11 @@ Understanding Rules and Errors
   * `eslint-plugin-spidermonkey-js`_
 
 .. _eslint_common_issues:
+
+Enabling new rules and adding plugins
+-------------------------------------
+
+Please see `this page for enabling new rules <eslint/enabling-rules.html>`_.
 
 Common Issues and How To Solve Them
 -----------------------------------
@@ -108,7 +116,7 @@ This code should neither be linted nor formatted
 
 * If it is a third-party piece of code, please add it to :searchfox:`ThirdPartyPaths.txt <tools/rewriting/ThirdPartyPaths.txt>`.
 * If it is a generated file, please add it to :searchfox:`Generated.txt <tools/rewriting/Generated.txt>`.
-* If intentionally invalid, please add it to :searchfox:`.eslintignore <.eslintignore>`.
+* If intentionally invalid, please add it to :searchfox:`.eslintrc-ignores.js <.eslintrc-ignores.js>`.
 
 This code shouldn't be formatted
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -126,7 +134,7 @@ See the `prettier ignore docs`_ for more information.
 I have valid code that is failing the ``no-undef`` rule or can't be parsed
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* Please do not add this to :searchfox:`.eslintignore <.eslintignore>`. Generally
+* Please do not add this to :searchfox:`.eslintrc-ignores.js <.eslintrc-ignores.js>`. Generally
   this can be fixed, if the following tips don't help, please `seek help`_.
 * If you are adding a new test directory, see the :ref:`section above <adding-tests>`
 

@@ -73,6 +73,9 @@ DxgiOutputDuplicator::DxgiOutputDuplicator(const D3dDevice& device,
   RTC_DCHECK(!desktop_rect_.is_empty());
   RTC_DCHECK_GT(desktop_rect_.width(), 0);
   RTC_DCHECK_GT(desktop_rect_.height(), 0);
+  HRESULT hr = GetScaleFactorForMonitor(desc.Monitor, &device_scale_factor_);
+  RTC_LOG_IF(LS_ERROR, FAILED(hr))
+      << "Failed to get scale factor for monitor: " << hr;
 }
 
 DxgiOutputDuplicator::DxgiOutputDuplicator(DxgiOutputDuplicator&& other) =
@@ -112,9 +115,13 @@ bool DxgiOutputDuplicator::DuplicateOutput() {
 
   memset(&desc_, 0, sizeof(desc_));
   duplication_->GetDesc(&desc_);
-  if (desc_.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
-    RTC_LOG(LS_ERROR) << "IDXGIDuplicateOutput does not use RGBA (8 bit) "
-                      << "format, which is required by downstream components, "
+
+  // DXGI_FORMAT_R16G16B16A16_FLOAT is returned for HDR monitor,
+  // DXGI_FORMAT_B8G8R8A8_UNORM for others.
+  if ((desc_.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) &&
+      (desc_.ModeDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+    RTC_LOG(LS_ERROR) << "IDXGIDuplicateOutput does not use RGBA (8, 16 bit)"
+                      << "which is required by downstream components"
                       << "format is " << desc_.ModeDesc.Format;
     return false;
   }
@@ -412,6 +419,13 @@ int64_t DxgiOutputDuplicator::num_frames_captured() const {
   RTC_DCHECK_EQ(!!last_frame_, num_frames_captured_ > 0);
 #endif
   return num_frames_captured_;
+}
+
+std::optional<DEVICE_SCALE_FACTOR> DxgiOutputDuplicator::device_scale_factor()
+    const {
+  return (device_scale_factor_ != DEVICE_SCALE_FACTOR_INVALID
+              ? std::make_optional(device_scale_factor_)
+              : std::nullopt);
 }
 
 void DxgiOutputDuplicator::TranslateRect(const DesktopVector& position) {

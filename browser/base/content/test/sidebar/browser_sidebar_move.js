@@ -1,18 +1,32 @@
 registerCleanupFunction(() => {
   Services.prefs.clearUserPref("sidebar.position_start");
-  SidebarUI.hide();
+  SidebarController.hide();
 });
 
 const EXPECTED_START_ORDINALS = [
-  ["sidebar-box", 1],
-  ["sidebar-splitter", 2],
-  ["appcontent", 3],
+  ["sidebar-wrapper", ""],
+  ["tabbrowser-tabbox", 6],
+];
+
+const EXPECTED_WRAPPER_START_ORDINALS = [
+  ["sidebar-main", 1],
+  ["sidebar-launcher-splitter", 2],
+  ["sidebar-box", 3],
+  ["sidebar-splitter", 4],
+  ["after-splitter", 5],
 ];
 
 const EXPECTED_END_ORDINALS = [
-  ["sidebar-box", 3],
-  ["sidebar-splitter", 2],
-  ["appcontent", 1],
+  ["sidebar-wrapper", ""],
+  ["tabbrowser-tabbox", 1],
+];
+
+const EXPECTED_WRAPPER_END_ORDINALS = [
+  ["sidebar-main", 6],
+  ["sidebar-launcher-splitter", 5],
+  ["sidebar-box", 4],
+  ["sidebar-splitter", 3],
+  ["after-splitter", 2],
 ];
 
 function getBrowserChildrenWithOrdinals() {
@@ -22,9 +36,16 @@ function getBrowserChildrenWithOrdinals() {
   });
 }
 
+function getSidebarWrapperChildrenWithOrdinals() {
+  let wrapper = SidebarController.sidebarWrapper;
+  return [...wrapper.children].map(node => {
+    return [node.id, node.style.order];
+  });
+}
+
 add_task(async function () {
-  await SidebarUI.show("viewBookmarksSidebar");
-  SidebarUI.showSwitcherPanel();
+  await SidebarController.show("viewBookmarksSidebar");
+  SidebarController.showSwitcherPanel();
 
   let reversePositionButton = document.getElementById(
     "sidebar-reverse-position"
@@ -36,17 +57,27 @@ add_task(async function () {
   Assert.deepEqual(
     getBrowserChildrenWithOrdinals(),
     EXPECTED_START_ORDINALS,
-    "Correct ordinal (start)"
+    "Correct browser ordinal (start)"
+  );
+  Assert.deepEqual(
+    getSidebarWrapperChildrenWithOrdinals(),
+    EXPECTED_WRAPPER_START_ORDINALS,
+    "Correct wrapper ordinal (start)"
   );
   ok(!box.hasAttribute("positionend"), "Positioned start");
 
   // Moved to right
-  SidebarUI.reversePosition();
-  SidebarUI.showSwitcherPanel();
+  SidebarController.reversePosition();
+  SidebarController.showSwitcherPanel();
   Assert.deepEqual(
     getBrowserChildrenWithOrdinals(),
     EXPECTED_END_ORDINALS,
-    "Correct ordinal (end)"
+    "Correct browser ordinal (end)"
+  );
+  Assert.deepEqual(
+    getSidebarWrapperChildrenWithOrdinals(),
+    EXPECTED_WRAPPER_END_ORDINALS,
+    "Correct wrapper ordinal (end)"
   );
   isnot(
     reversePositionButton.getAttribute("label"),
@@ -56,12 +87,17 @@ add_task(async function () {
   ok(box.hasAttribute("positionend"), "Positioned end");
 
   // Moved to back to left
-  SidebarUI.reversePosition();
-  SidebarUI.showSwitcherPanel();
+  SidebarController.reversePosition();
+  SidebarController.showSwitcherPanel();
   Assert.deepEqual(
     getBrowserChildrenWithOrdinals(),
     EXPECTED_START_ORDINALS,
-    "Correct ordinal (start)"
+    "Correct browser ordinal (start)"
+  );
+  Assert.deepEqual(
+    getSidebarWrapperChildrenWithOrdinals(),
+    EXPECTED_WRAPPER_START_ORDINALS,
+    "Correct wrapper ordinal (start)"
   );
   ok(!box.hasAttribute("positionend"), "Positioned start");
   is(

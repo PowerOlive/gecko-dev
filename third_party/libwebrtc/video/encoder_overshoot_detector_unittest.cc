@@ -35,10 +35,10 @@ static std::string CodecTypeToHistogramSuffix(VideoCodecType codec) {
       return "Av1";
     case kVideoCodecH264:
       return "H264";
+    case kVideoCodecH265:
+      return "H265";
     case kVideoCodecGeneric:
       return "Generic";
-    case kVideoCodecMultiplex:
-      return "Multiplex";
   }
 }
 
@@ -87,12 +87,12 @@ class EncoderOvershootDetectorTest : public TestWithParam<TestParams> {
 
     // At constant utilization, both network and media utilization should be
     // close to expected.
-    const absl::optional<double> network_utilization_factor =
+    const std::optional<double> network_utilization_factor =
         detector_.GetNetworkRateUtilizationFactor(rtc::TimeMillis());
     EXPECT_NEAR(network_utilization_factor.value_or(-1),
                 expected_utilization_factor, allowed_error);
 
-    const absl::optional<double> media_utilization_factor =
+    const std::optional<double> media_utilization_factor =
         detector_.GetMediaRateUtilizationFactor(rtc::TimeMillis());
     EXPECT_NEAR(media_utilization_factor.value_or(-1),
                 expected_utilization_factor, allowed_error);
@@ -189,12 +189,12 @@ TEST_P(EncoderOvershootDetectorTest, PartialOvershoot) {
   }
 
   // Expect 5% overshoot for network rate, see above.
-  const absl::optional<double> network_utilization_factor =
+  const std::optional<double> network_utilization_factor =
       detector_.GetNetworkRateUtilizationFactor(rtc::TimeMillis());
   EXPECT_NEAR(network_utilization_factor.value_or(-1), 1.05, 0.01);
 
   // Expect media rate to be on average correct.
-  const absl::optional<double> media_utilization_factor =
+  const std::optional<double> media_utilization_factor =
       detector_.GetMediaRateUtilizationFactor(rtc::TimeMillis());
   EXPECT_NEAR(media_utilization_factor.value_or(-1), 1.00, 0.01);
 }
@@ -275,6 +275,8 @@ INSTANTIATE_TEST_SUITE_P(
                           {VideoCodecType::kVideoCodecAV1, false},
                           {VideoCodecType::kVideoCodecAV1, true},
                           {VideoCodecType::kVideoCodecH264, false},
-                          {VideoCodecType::kVideoCodecH264, true}}));
+                          {VideoCodecType::kVideoCodecH264, true},
+                          {VideoCodecType::kVideoCodecH265, false},
+                          {VideoCodecType::kVideoCodecH265, true}}));
 
 }  // namespace webrtc

@@ -32,6 +32,16 @@ let version;
 let generate_response = ver => `response version=${ver}`;
 
 function test_handler(metadata, response) {
+  // ensures initial network request and background revalidation request sends custom headers
+  // See Bug 1893842
+  if (
+    !metadata.hasHeader("X-Custom-header") ||
+    metadata.getHeader("X-Custom-header") != "custom-value"
+  ) {
+    response.setStatusLine(metadata.httpVersion, 400, "OK");
+    return;
+  }
+
   const originalBody = generate_response(version);
   response.setHeader("Content-Type", "text/html", false);
   response.setHeader(
@@ -39,22 +49,29 @@ function test_handler(metadata, response) {
     `max-age=${max_age}, stale-while-revalidate=9999`,
     false
   );
+
   response.setStatusLine(metadata.httpVersion, 200, "OK");
   response.bodyOutputStream.write(originalBody, originalBody.length);
 }
 
 function make_channel(url) {
-  return NetUtil.newChannel({
+  var chan = NetUtil.newChannel({
     uri: url,
     loadUsingSystemPrincipal: true,
   }).QueryInterface(Ci.nsIHttpChannel);
+  chan.setRequestHeader("X-Custom-header", "custom-value", false);
+  return chan;
 }
 
 async function get_response(channel, fromCache) {
   return new Promise(resolve => {
     channel.asyncOpen(
       new ChannelListener((request, buffer, ctx, isFromCache) => {
-        ok(fromCache == isFromCache, `got response from cache = ${fromCache}`);
+        Assert.equal(
+          fromCache,
+          isFromCache,
+          `got response from cache = ${fromCache}`
+        );
         resolve(buffer);
       })
     );
@@ -91,7 +108,7 @@ add_task(async function () {
   version = 1;
   max_age = 1;
   response = await get_response(make_channel(URI), false);
-  ok(response == generate_response(1), "got response ver 1");
+  Assert.equal(response, generate_response(1), "got response ver 1");
 
   await sleep(max_age + 1);
 
@@ -102,12 +119,12 @@ add_task(async function () {
   version = 2;
   max_age = 100;
   response = await get_response(make_channel(URI), true);
-  ok(response == generate_response(1), "got response ver 1");
+  Assert.equal(response, generate_response(1), "got response ver 1");
 
   await reval_done;
 
   response = await get_response(make_channel(URI), true);
-  ok(response == generate_response(2), "got response ver 2");
+  Assert.equal(response, generate_response(2), "got response ver 2");
 
   await stop_server(httpserver);
 });

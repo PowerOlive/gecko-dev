@@ -10,6 +10,7 @@ const { executeSoon } = require("resource://devtools/shared/DevToolsUtils.js");
 const { Toolbox } = require("resource://devtools/client/framework/toolbox.js");
 const createStore = require("resource://devtools/client/inspector/store.js");
 const InspectorStyleChangeTracker = require("resource://devtools/client/inspector/shared/style-change-tracker.js");
+const { PrefObserver } = require("resource://devtools/client/shared/prefs.js");
 
 // Use privileged promise in panel documents to prevent having them to freeze
 // during toolbox destruction. See bug 1402779.
@@ -97,12 +98,9 @@ const PORTRAIT_MODE_WIDTH_THRESHOLD = 700;
 const SIDE_PORTAIT_MODE_WIDTH_THRESHOLD = 1000;
 
 const THREE_PANE_ENABLED_PREF = "devtools.inspector.three-pane-enabled";
-const THREE_PANE_ENABLED_SCALAR = "devtools.inspector.three_pane_enabled";
 const THREE_PANE_CHROME_ENABLED_PREF =
   "devtools.inspector.chrome.three-pane-enabled";
-const TELEMETRY_EYEDROPPER_OPENED = "devtools.toolbar.eyedropper.opened";
-const TELEMETRY_SCALAR_NODE_SELECTION_COUNT =
-  "devtools.inspector.node_selection_count";
+const DEFAULT_COLOR_UNIT_PREF = "devtools.defaultColorUnit";
 
 /**
  * Represents an open instance of the Inspector for a tab.
@@ -156,6 +154,8 @@ function Inspector(toolbox, commands) {
   this._panels = new Map();
 
   this._clearSearchResultsLabel = this._clearSearchResultsLabel.bind(this);
+  this._handleDefaultColorUnitPrefChange =
+    this._handleDefaultColorUnitPrefChange.bind(this);
   this._handleRejectionIfNotDestroyed =
     this._handleRejectionIfNotDestroyed.bind(this);
   this._onTargetAvailable = this._onTargetAvailable.bind(this);
@@ -163,6 +163,7 @@ function Inspector(toolbox, commands) {
   this._onTargetSelected = this._onTargetSelected.bind(this);
   this._onWillNavigate = this._onWillNavigate.bind(this);
   this._updateSearchResultsLabel = this._updateSearchResultsLabel.bind(this);
+  this._onSearchLabelClick = this._onSearchLabelClick.bind(this);
 
   this.onDetached = this.onDetached.bind(this);
   this.onHostChanged = this.onHostChanged.bind(this);
@@ -185,6 +186,13 @@ function Inspector(toolbox, commands) {
   this.onSidebarToggle = this.onSidebarToggle.bind(this);
   this.onReflowInSelection = this.onReflowInSelection.bind(this);
   this.listenForSearchEvents = this.listenForSearchEvents.bind(this);
+
+  this.prefObserver = new PrefObserver("devtools.");
+  this.prefObserver.on(
+    DEFAULT_COLOR_UNIT_PREF,
+    this._handleDefaultColorUnitPrefChange
+  );
+  this.defaultColorUnit = Services.prefs.getStringPref(DEFAULT_COLOR_UNIT_PREF);
 }
 
 Inspector.prototype = {
@@ -219,15 +227,26 @@ Inspector.prototype = {
       onDestroyed: this._onTargetDestroyed,
     });
 
-    await this.toolbox.resourceCommand.watchResources(
-      [
-        this.toolbox.resourceCommand.TYPES.ROOT_NODE,
-        // To observe CSS change before opening changes view.
-        this.toolbox.resourceCommand.TYPES.CSS_CHANGE,
-        this.toolbox.resourceCommand.TYPES.DOCUMENT_EVENT,
-      ],
-      { onAvailable: this.onResourceAvailable }
-    );
+    const { TYPES } = this.toolbox.resourceCommand;
+    this._watchedResources = [
+      // To observe CSS change before opening changes view.
+      TYPES.CSS_CHANGE,
+      TYPES.DOCUMENT_EVENT,
+    ];
+    // The root node is retrieved from onTargetSelected which is now called
+    // on startup as well as on any navigation (= new top level target).
+    //
+    // We only listen to new root node in the browser toolbox, which is the last
+    // configuration to use one target for multiple window global.
+    const isBrowserToolbox =
+      this.commands.descriptorFront.isBrowserProcessDescriptor;
+    if (isBrowserToolbox) {
+      this._watchedResources.push(TYPES.ROOT_NODE);
+    }
+
+    await this.toolbox.resourceCommand.watchResources(this._watchedResources, {
+      onAvailable: this.onResourceAvailable,
+    });
 
     // Store the URL of the target page prior to navigation in order to ensure
     // telemetry counts in the Grid Inspector are not double counted on reload.
@@ -254,29 +273,21 @@ Inspector.prototype = {
     // Log the 3 pane inspector setting on inspector open. The question we want to answer
     // is:
     // "What proportion of users use the 3 pane vs 2 pane inspector on inspector open?"
-    this.telemetry.keyedScalarAdd(
-      THREE_PANE_ENABLED_SCALAR,
-      this.is3PaneModeEnabled,
-      1
-    );
+    Glean.devtoolsInspector.threePaneEnabled[this.is3PaneModeEnabled].add(1);
 
     return this;
   },
 
+  // The onTargetAvailable argument is mandatory for TargetCommand.watchTargets.
+  // The inspector ignore all targets but the currently selected one,
+  // so all the target work is done from onTargetSelected.
   async _onTargetAvailable({ targetFront }) {
-    // Ignore all targets but the top level one
     if (!targetFront.isTopLevel) {
       return;
     }
 
-    await this.initInspectorFront(targetFront);
-
-    // the target might have been destroyed when reloading quickly,
-    // while waiting for inspector front initialization
-    if (targetFront.isDestroyed()) {
-      return;
-    }
-
+    // Fetch data and fronts which aren't WindowGlobal specific
+    // and can be fetched once from the top level target.
     await Promise.all([
       this._getCssProperties(targetFront),
       this._getAccessibilityFront(targetFront),
@@ -303,9 +314,6 @@ Inspector.prototype = {
 
     const { walker } = await targetFront.getFront("inspector");
     const rootNodeFront = await walker.getRootNode();
-    // When a given target is focused, don't try to reset the selection
-    this.selectionCssSelectors = [];
-    this._defaultNode = null;
 
     // onRootNodeAvailable will take care of populating the markup view
     await this.onRootNodeAvailable(rootNodeFront);
@@ -328,6 +336,7 @@ Inspector.prototype = {
     for (const resource of resources) {
       const isTopLevelTarget = !!resource.targetFront?.isTopLevel;
       const isTopLevelDocument = !!resource.isTopLevelDocument;
+
       if (
         resource.resourceType ===
           this.toolbox.resourceCommand.TYPES.ROOT_NODE &&
@@ -441,9 +450,9 @@ Inspector.prototype = {
       // Only log the timing when inspector is not destroyed and is in foreground.
       if (this.toolbox && this.toolbox.currentToolId == "inspector") {
         const delay = this.panelWin.performance.now() - this._newRootStart;
-        const telemetryKey = "DEVTOOLS_INSPECTOR_NEW_ROOT_TO_RELOAD_DELAY_MS";
-        const histogram = this.telemetry.getHistogramById(telemetryKey);
-        histogram.add(delay);
+        Glean.devtoolsInspector.newRootToReloadDelay.accumulateSingleSample(
+          delay
+        );
       }
       delete this._newRootStart;
     }
@@ -511,7 +520,9 @@ Inspector.prototype = {
       this._search = new InspectorSearch(
         this,
         this.searchBox,
-        this.searchClearButton
+        this.searchClearButton,
+        this.searchPrevButton,
+        this.searchNextButton
       );
     }
 
@@ -536,6 +547,12 @@ Inspector.prototype = {
   // find itself midway through without a highlighter to test.
   // This value is exposed on Inspector so individual tests can restore it when needed.
   HIGHLIGHTER_AUTOHIDE_TIMER: flags.testing ? 0 : 1000,
+
+  _handleDefaultColorUnitPrefChange() {
+    this.defaultColorUnit = Services.prefs.getStringPref(
+      DEFAULT_COLOR_UNIT_PREF
+    );
+  },
 
   /**
    * Handle promise rejections for various asynchronous actions, and only log errors if
@@ -626,7 +643,7 @@ Inspector.prototype = {
    * Top level target front getter.
    */
   get currentTarget() {
-    return this.commands.targetCommand.targetFront;
+    return this.commands.targetCommand.selectedTargetFront;
   },
 
   /**
@@ -640,15 +657,32 @@ Inspector.prototype = {
     this.searchResultsContainer = this.panelDoc.getElementById(
       "inspector-searchlabel-container"
     );
+    this.searchNavigationContainer = this.panelDoc.getElementById(
+      "inspector-searchnavigation-container"
+    );
+    this.searchPrevButton = this.panelDoc.getElementById(
+      "inspector-searchnavigation-button-prev"
+    );
+    this.searchNextButton = this.panelDoc.getElementById(
+      "inspector-searchnavigation-button-next"
+    );
     this.searchResultsLabel = this.panelDoc.getElementById(
       "inspector-searchlabel"
     );
+
+    this.searchResultsLabel.addEventListener("click", this._onSearchLabelClick);
 
     this.searchBox.addEventListener("focus", this.listenForSearchEvents, {
       once: true,
     });
 
     this.createSearchBoxShortcuts();
+  },
+
+  _onSearchLabelClick() {
+    // Focus on the search box as the search label
+    // appears to be "inside" input
+    this.searchBox.focus();
   },
 
   listenForSearchEvents() {
@@ -702,8 +736,10 @@ Inspector.prototype = {
           result.resultsIndex + 1,
           result.resultsLength
         );
+        this.searchNavigationContainer.hidden = false;
       } else {
         str = INSPECTOR_L10N.getStr("inspector.searchResultsNone");
+        this.searchNavigationContainer.hidden = true;
       }
 
       this.searchResultsContainer.hidden = false;
@@ -1202,16 +1238,10 @@ Inspector.prototype = {
       title: INSPECTOR_L10N.getStr("inspector.sidebar.changesViewTitle"),
     });
 
-    if (
-      Services.prefs.getBoolPref("devtools.inspector.compatibility.enabled")
-    ) {
-      sidebarPanels.push({
-        id: "compatibilityview",
-        title: INSPECTOR_L10N.getStr(
-          "inspector.sidebar.compatibilityViewTitle"
-        ),
-      });
-    }
+    sidebarPanels.push({
+      id: "compatibilityview",
+      title: INSPECTOR_L10N.getStr("inspector.sidebar.compatibilityViewTitle"),
+    });
 
     sidebarPanels.push({
       id: "fontinspector",
@@ -1546,7 +1576,7 @@ Inspector.prototype = {
     executeSoon(() => {
       try {
         selfUpdate(this.selection.nodeFront);
-        this.telemetry.scalarAdd(TELEMETRY_SCALAR_NODE_SELECTION_COUNT, 1);
+        Glean.devtoolsInspector.nodeSelectionCount.add(1);
       } catch (ex) {
         console.error(ex);
       }
@@ -1719,6 +1749,12 @@ Inspector.prototype = {
 
     this.teardownToolbar();
 
+    this.prefObserver.on(
+      DEFAULT_COLOR_UNIT_PREF,
+      this._handleDefaultColorUnitPrefChange
+    );
+    this.prefObserver.destroy();
+
     this.breadcrumbs.destroy();
     this.styleChangeTracker.destroy();
     this.searchboxShortcuts.destroy();
@@ -1731,14 +1767,9 @@ Inspector.prototype = {
       onDestroyed: this._onTargetDestroyed,
     });
     const { resourceCommand } = this.toolbox;
-    resourceCommand.unwatchResources(
-      [
-        resourceCommand.TYPES.ROOT_NODE,
-        resourceCommand.TYPES.CSS_CHANGE,
-        resourceCommand.TYPES.DOCUMENT_EVENT,
-      ],
-      { onAvailable: this.onResourceAvailable }
-    );
+    resourceCommand.unwatchResources(this._watchedResources, {
+      onAvailable: this.onResourceAvailable,
+    });
     this.untrackReflowsInSelection();
 
     this._InspectorTabPanel = null;
@@ -1772,6 +1803,11 @@ Inspector.prototype = {
     this.sidebar = null;
     this.store = null;
     this.telemetry = null;
+    this.searchResultsLabel.removeEventListener(
+      "click",
+      this._onSearchLabelClick
+    );
+    this.searchResultsLabel = null;
   },
 
   _destroyMarkup() {
@@ -1822,7 +1858,6 @@ Inspector.prototype = {
     }
     // turn off node picker when color picker is starting
     this.toolbox.nodePicker.stop({ canceled: true }).catch(console.error);
-    this.telemetry.scalarSet(TELEMETRY_EYEDROPPER_OPENED, 1);
     this.eyeDropperButton.classList.add("checked");
     this.startEyeDropperListeners();
     return this.inspectorFront
@@ -1972,9 +2007,8 @@ Inspector.prototype = {
   },
 
   async inspectNodeActor(nodeGrip, reason) {
-    const nodeFront = await this.inspectorFront.getNodeFrontFromNodeGrip(
-      nodeGrip
-    );
+    const nodeFront =
+      await this.inspectorFront.getNodeFrontFromNodeGrip(nodeGrip);
     if (!nodeFront) {
       console.error(
         "The object cannot be linked to the inspector, the " +
@@ -1991,6 +2025,23 @@ Inspector.prototype = {
 
     await this.selection.setNodeFront(nodeFront, { reason });
     return true;
+  },
+
+  /**
+   * Called by toolbox.js on `Esc` keydown.
+   *
+   * @param {AbortController} abortController
+   */
+  onToolboxChromeEventHandlerEscapeKeyDown(abortController) {
+    // If the event tooltip is displayed, hide it and prevent the Esc event listener
+    // of the toolbox to occur (e.g. don't toggle split console)
+    if (
+      this.markup.hasEventDetailsTooltip() &&
+      this.markup.eventDetailsTooltip.isVisible()
+    ) {
+      this.markup.eventDetailsTooltip.hide();
+      abortController.abort();
+    }
   },
 };
 

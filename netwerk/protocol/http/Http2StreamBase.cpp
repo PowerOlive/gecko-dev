@@ -22,8 +22,7 @@
 
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/StaticPrefs_network.h"
-#include "mozilla/Telemetry.h"
-#include "nsAlgorithm.h"
+#include "mozilla/glean/NetwerkProtocolHttpMetrics.h"
 #include "nsHttp.h"
 #include "nsHttpHandler.h"
 #include "nsHttpRequestHead.h"
@@ -487,7 +486,7 @@ nsresult Http2StreamBase::GenerateOpen() {
     outputOffset += frameLen;
   }
 
-  Telemetry::Accumulate(Telemetry::SPDY_SYN_SIZE, compressedData.Length());
+  glean::spdy::syn_size.Accumulate(compressedData.Length());
 
   mFlatHttpRequestHeaders.Truncate();
 
@@ -797,9 +796,9 @@ nsresult Http2StreamBase::ConvertResponseHeaders(
   }
 
   if (aHeadersIn.Length() && aHeadersOut.Length()) {
-    Telemetry::Accumulate(Telemetry::SPDY_SYN_REPLY_SIZE, aHeadersIn.Length());
+    glean::spdy::syn_reply_size.Accumulate(aHeadersIn.Length());
     uint32_t ratio = aHeadersIn.Length() * 100 / aHeadersOut.Length();
-    Telemetry::Accumulate(Telemetry::SPDY_SYN_REPLY_RATIO, ratio);
+    glean::spdy::syn_reply_ratio.AccumulateSingleSample(ratio);
   }
 
   // The decoding went ok. Now we can customize and clean up.
@@ -886,7 +885,7 @@ void Http2StreamBase::SetPriority(uint32_t newPriority) {
   } else if (httpPriority < kBestPriority) {
     httpPriority = kBestPriority;
   }
-  mPriority = static_cast<uint32_t>(httpPriority);
+  mRFC7540Priority = static_cast<uint32_t>(httpPriority);
   mPriorityWeight = (nsISupportsPriority::PRIORITY_LOWEST + 1) -
                     (httpPriority - kNormalPriority);
 
@@ -999,16 +998,60 @@ void Http2StreamBase::CurrentBrowserIdChangedInternal(uint64_t id) {
 
   mCurrentBrowserId = id;
 
-  if (!session->UseH2Deps()) {
-    return;
-  }
-
   // Urgent start takes an absolute precedence, so don't
   // change mPriorityDependency here.
   if (mPriorityDependency == Http2Session::kUrgentStartGroupID) {
     return;
   }
 
+  if (session->UseH2Deps()) {
+    UpdatePriorityRFC7540(session);
+  } else {
+    UpdatePriority(session);
+  }
+}
+
+void Http2StreamBase::UpdatePriority(Http2Session* session) {
+  MOZ_ASSERT(!session->UseH2Deps());
+  bool isInBackground = mTransactionBrowserId != mCurrentBrowserId;
+
+  if (isInBackground) {
+    LOG3(
+        ("Http2StreamBase::CurrentBrowserIdChangedInternal %p "
+         "move into background group.\n",
+         this));
+
+    nsHttp::NotifyActiveTabLoadOptimization();
+  }
+
+  if (!StaticPrefs::network_http_http2_priority_updates()) {
+    return;
+  }
+
+  nsHttpTransaction* trans = HttpTransaction();
+  if (!trans) {
+    return;
+  }
+
+  uint8_t urgency = nsHttpHandler::UrgencyFromCoSFlags(
+      trans->GetClassOfService().Flags(), trans->Priority());
+  bool incremental = trans->GetClassOfService().Incremental();
+  uint32_t streamID = GetWireStreamId();
+
+  // If the tab is in the background
+  // we can probably lower the priority of this request by 1.
+  // (to get lower priority we increase urgency).
+  if (isInBackground && urgency < 6) {
+    urgency++;
+  }
+
+  if (streamID) {
+    session->SendPriorityUpdateFrame(streamID, urgency, incremental);
+  }
+}
+
+void Http2StreamBase::UpdatePriorityRFC7540(Http2Session* session) {
+  MOZ_ASSERT(session->UseH2Deps());
   if (mTransactionBrowserId != mCurrentBrowserId) {
     mPriorityDependency = Http2Session::kBackgroundGroupID;
     LOG3(

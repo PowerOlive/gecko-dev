@@ -11,7 +11,7 @@
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/reject-addtask-only.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/reject-addtask-only.html",
     },
     hasSuggestions: true,
     messages: {
@@ -32,8 +32,12 @@ module.exports = {
           ) &&
           node.callee.property?.name == "only"
         ) {
+          let sourceCode = context.sourceCode;
           context.report({
-            node,
+            loc: {
+              start: sourceCode.getLocFromIndex(node.callee.object.range[1]),
+              end: sourceCode.getLocFromIndex(node.range[1]),
+            },
             messageId: "addTaskNotAllowed",
             suggest: [
               {

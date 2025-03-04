@@ -15,7 +15,7 @@ loader.lazyRequireGetter(
 const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
 const {
   connect,
-} = require("resource://devtools/client/shared/redux/visibility-handler-connect.js");
+} = require("resource://devtools/client/shared/vendor/react-redux.js");
 
 const actions = require("resource://devtools/client/webconsole/actions/index.js");
 const {
@@ -40,6 +40,9 @@ const ConfirmDialog = createFactory(
 );
 const EagerEvaluation = createFactory(
   require("resource://devtools/client/webconsole/components/Input/EagerEvaluation.js")
+);
+const EvaluationNotification = createFactory(
+  require("resource://devtools/client/webconsole/components/Input/EvaluationNotification.js")
 );
 
 // And lazy load the ones that may not be used.
@@ -456,6 +459,7 @@ class App extends Component {
     const notificationBox = this.renderNotificationBox();
     const jsterm = this.renderJsTerm();
     const eager = this.renderEagerEvaluation();
+    const evaluationNotification = EvaluationNotification();
     const reverseSearch = this.renderReverseSearch();
     const sidebar = this.renderSideBar();
     const confirmDialog = this.renderConfirmDialog();
@@ -469,7 +473,8 @@ class App extends Component {
         consoleOutput,
         notificationBox,
         jsterm,
-        eager
+        eager,
+        evaluationNotification
       ),
       editorMode && inputEnabled
         ? GridElementWidthResizer({

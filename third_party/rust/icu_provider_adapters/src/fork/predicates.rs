@@ -10,6 +10,9 @@ use icu_provider::prelude::*;
 ///
 /// [`ForkByErrorProvider`]: super::ForkByErrorProvider
 pub trait ForkByErrorPredicate {
+    /// The error to return if there are zero providers.
+    const UNIT_ERROR: DataErrorKind = DataErrorKind::MissingDataKey;
+
     /// This function is called when a data request fails and there are additional providers
     /// that could possibly fulfill the request.
     ///
@@ -43,6 +46,8 @@ pub trait ForkByErrorPredicate {
 pub struct MissingDataKeyPredicate;
 
 impl ForkByErrorPredicate for MissingDataKeyPredicate {
+    const UNIT_ERROR: DataErrorKind = DataErrorKind::MissingDataKey;
+
     #[inline]
     fn test(&self, _: DataKey, _: Option<DataRequest>, err: DataError) -> bool {
         matches!(
@@ -68,13 +73,11 @@ impl ForkByErrorPredicate for MissingDataKeyPredicate {
 /// use icu_provider_fs::FsDataProvider;
 /// use icu_provider::prelude::*;
 /// use icu_provider::hello_world::HelloWorldV1Marker;
-/// use icu_locid::locale;
+/// use icu_locid::langid;
 ///
 /// // The `tests` directory contains two separate "language packs" for Hello World data.
-/// let base_dir = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"))
-///     .join("tests/data/langtest");
-/// let provider_de = FsDataProvider::try_new(base_dir.join("de")).unwrap();
-/// let provider_ro = FsDataProvider::try_new(base_dir.join("ro")).unwrap();
+/// let provider_de = FsDataProvider::try_new("tests/data/langtest/de").unwrap();
+/// let provider_ro = FsDataProvider::try_new("tests/data/langtest/ro").unwrap();
 ///
 /// // Create the forking provider:
 /// let provider = ForkByErrorProvider::new_with_predicate(
@@ -88,7 +91,7 @@ impl ForkByErrorPredicate for MissingDataKeyPredicate {
 /// let german_hello_world: DataPayload<HelloWorldV1Marker> = provider
 ///     .as_deserializing()
 ///     .load(DataRequest {
-///         locale: &locale!("de").into(),
+///         locale: &langid!("de").into(),
 ///         metadata: Default::default(),
 ///     })
 ///     .expect("Loading should succeed")
@@ -100,7 +103,7 @@ impl ForkByErrorPredicate for MissingDataKeyPredicate {
 /// let romanian_hello_world: DataPayload<HelloWorldV1Marker> = provider
 ///     .as_deserializing()
 ///     .load(DataRequest {
-///         locale: &locale!("ro").into(),
+///         locale: &langid!("ro").into(),
 ///         metadata: Default::default(),
 ///     })
 ///     .expect("Loading should succeed")
@@ -114,7 +117,7 @@ impl ForkByErrorPredicate for MissingDataKeyPredicate {
 /// DataProvider::<HelloWorldV1Marker>::load(
 ///     &provider.as_deserializing(),
 ///     DataRequest {
-///         locale: &locale!("en").into(),
+///         locale: &langid!("en").into(),
 ///         metadata: Default::default(),
 ///     }
 /// )
@@ -125,6 +128,8 @@ impl ForkByErrorPredicate for MissingDataKeyPredicate {
 pub struct MissingLocalePredicate;
 
 impl ForkByErrorPredicate for MissingLocalePredicate {
+    const UNIT_ERROR: DataErrorKind = DataErrorKind::MissingLocale;
+
     #[inline]
     fn test(&self, _: DataKey, _: Option<DataRequest>, err: DataError) -> bool {
         matches!(

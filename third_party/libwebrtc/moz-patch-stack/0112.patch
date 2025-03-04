@@ -1,42 +1,28 @@
-From: Byron Campen <docfaraday@gmail.com>
-Date: Thu, 20 Jul 2023 14:24:00 +0000
-Subject: Bug 1838080: Work around a race in
- ChannelSendFrameTransformerDelegate. r=pehrsons,webrtc-reviewers
+From: Andreas Pehrson <apehrson@mozilla.com>
+Date: Wed, 28 Aug 2024 07:50:00 +0000
+Subject: Bug 1915082 - From ScreenCapturerSck request frames in sRGB
+ colorspace. r=webrtc-reviewers,ng
 
-This variable can be null when a ChannelSendFrameTransformerDelegate is in use,
-because that does an async dispatch to the encoder queue in the handling for
-transformed frames. If this is unset while that dispatch is in flight, we
-nullptr crash.
+The desktop capture path has no colorspace handling for RGB, and libyuv assumes
+sRGB by default. ScreenCaptureKit returns frames in the display's colorspace
+unless told otherwise. On modern macs this is 'Display P3' and will render
+inaccurately when interpreted as sRGB.
 
-Differential Revision: https://phabricator.services.mozilla.com/D180735
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/56555ecee7f36ae73abff1cbbd06807c2b65fc19
+Differential Revision: https://phabricator.services.mozilla.com/D220219
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/6f6acc479b373662d4ed3ef3be84c3581622297f
 ---
- audio/channel_send.cc | 8 ++++++--
- 1 file changed, 6 insertions(+), 2 deletions(-)
+ modules/desktop_capture/mac/screen_capturer_sck.mm | 1 +
+ 1 file changed, 1 insertion(+)
 
-diff --git a/audio/channel_send.cc b/audio/channel_send.cc
-index f9283c3a00..8a402ca467 100644
---- a/audio/channel_send.cc
-+++ b/audio/channel_send.cc
-@@ -285,12 +285,16 @@ class RtpPacketSenderProxy : public RtpPacketSender {
-   void EnqueuePackets(
-       std::vector<std::unique_ptr<RtpPacketToSend>> packets) override {
-     MutexLock lock(&mutex_);
--    rtp_packet_pacer_->EnqueuePackets(std::move(packets));
-+    if (rtp_packet_pacer_) {
-+      rtp_packet_pacer_->EnqueuePackets(std::move(packets));
-+    }
-   }
- 
-   void RemovePacketsForSsrc(uint32_t ssrc) override {
-     MutexLock lock(&mutex_);
--    rtp_packet_pacer_->RemovePacketsForSsrc(ssrc);
-+    if (rtp_packet_pacer_) {
-+      rtp_packet_pacer_->RemovePacketsForSsrc(ssrc);
-+    }
-   }
- 
-  private:
--- 
-2.34.1
-
+diff --git a/modules/desktop_capture/mac/screen_capturer_sck.mm b/modules/desktop_capture/mac/screen_capturer_sck.mm
+index 707199cd9e..14c7ea24ec 100644
+--- a/modules/desktop_capture/mac/screen_capturer_sck.mm
++++ b/modules/desktop_capture/mac/screen_capturer_sck.mm
+@@ -258,6 +258,7 @@ class API_AVAILABLE(macos(14.0)) ScreenCapturerSck final
+                               excludingWindows:@[]];
+   SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
+   config.pixelFormat = kCVPixelFormatType_32BGRA;
++  config.colorSpaceName = kCGColorSpaceSRGB;
+   config.showsCursor = capture_options_.prefer_cursor_embedded();
+   config.width = filter.contentRect.size.width * filter.pointPixelScale;
+   config.height = filter.contentRect.size.height * filter.pointPixelScale;

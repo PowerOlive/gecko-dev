@@ -10,7 +10,6 @@
 #include "HttpTransactionChild.h"
 
 #include "mozilla/ipc/IPCStreamUtils.h"
-#include "mozilla/ipc/BackgroundParent.h"
 #include "mozilla/net/BackgroundDataBridgeParent.h"
 #include "mozilla/net/ChannelEventQueue.h"
 #include "mozilla/net/InputChannelThrottleQueueChild.h"
@@ -26,8 +25,6 @@
 #include "nsQueryObject.h"
 #include "nsSerializationHelper.h"
 #include "OpaqueResponseUtils.h"
-
-using mozilla::ipc::BackgroundParent;
 
 namespace mozilla::net {
 
@@ -278,7 +275,8 @@ HttpTransactionChild::OnDataAvailable(nsIRequest* aRequest,
     nsHttp::SendFunc<nsCString> sendFunc =
         [self = UnsafePtr<HttpTransactionChild>(this)](
             const nsCString& aData, uint64_t aOffset, uint32_t aCount) {
-          return self->SendOnDataAvailable(aData, aOffset, aCount);
+          return self->SendOnDataAvailable(aData, aOffset, aCount,
+                                           TimeStamp::Now());
         };
 
     LOG(("  ODA to parent process"));
@@ -288,7 +286,6 @@ HttpTransactionChild::OnDataAvailable(nsIRequest* aRequest,
     return NS_OK;
   }
 
-  ipc::AssertIsOnBackgroundThread();
   MOZ_ASSERT(mDataBridgeParent);
 
   if (!mDataBridgeParent->CanSend()) {
@@ -299,8 +296,8 @@ HttpTransactionChild::OnDataAvailable(nsIRequest* aRequest,
       [self = UnsafePtr<HttpTransactionChild>(this)](
           const nsDependentCSubstring& aData, uint64_t aOffset,
           uint32_t aCount) {
-        return self->mDataBridgeParent->SendOnTransportAndData(aOffset, aCount,
-                                                               aData);
+        return self->mDataBridgeParent->SendOnTransportAndData(
+            aOffset, aCount, aData, TimeStamp::Now());
       };
 
   LOG(("  ODA to content process"));
@@ -310,7 +307,7 @@ HttpTransactionChild::OnDataAvailable(nsIRequest* aRequest,
   }
 
   // We still need to send ODA to parent process, because the data needs to be
-  // saved in cache. Note that we set dataSentToChildProcess to true, to this
+  // saved in cache. Note that we set dataSentToChildProcess to true, so this
   // ODA will not be sent to child process.
   RefPtr<HttpTransactionChild> self = this;
   rv = NS_DispatchToMainThread(
@@ -320,7 +317,8 @@ HttpTransactionChild::OnDataAvailable(nsIRequest* aRequest,
             nsHttp::SendFunc<nsCString> sendFunc =
                 [self](const nsCString& aData, uint64_t aOffset,
                        uint32_t aCount) {
-                  return self->SendOnDataAvailable(aData, aOffset, aCount);
+                  return self->SendOnDataAvailable(aData, aOffset, aCount,
+                                                   TimeStamp::Now());
                 };
 
             if (!nsHttp::SendDataInChunks(data, offset, count, sendFunc)) {
@@ -450,7 +448,7 @@ HttpTransactionChild::OnStartRequest(nsIRequest* aRequest) {
     if (dataBridgeParent) {
       mDataBridgeParent = std::move(dataBridgeParent.ref());
 
-      nsCOMPtr<nsIThread> backgroundThread =
+      nsCOMPtr<nsISerialEventTarget> backgroundThread =
           mDataBridgeParent->GetBackgroundThread();
       nsCOMPtr<nsIThreadRetargetableRequest> retargetableTransactionPump;
       retargetableTransactionPump = do_QueryObject(mTransactionPump);
@@ -484,12 +482,18 @@ HttpTransactionChild::OnStartRequest(nsIRequest* aRequest) {
     }
   }
 
+  RefPtr<nsHttpConnectionInfo> connInfo = mTransaction->GetConnInfo();
+  HttpConnectionInfoCloneArgs infoArgs;
+  nsHttpConnectionInfo::SerializeHttpConnectionInfo(connInfo, infoArgs);
+
   Unused << SendOnStartRequest(
-      status, optionalHead, securityInfo, mTransaction->ProxyConnectFailed(),
+      status, std::move(optionalHead), securityInfo,
+      mTransaction->ProxyConnectFailed(),
       ToTimingStructArgs(mTransaction->Timings()), proxyConnectResponseCode,
       dataForSniffer, optionalAltSvcUsed, !!mDataBridgeParent,
       mTransaction->TakeRestartedState(), mTransaction->HTTPSSVCReceivedStage(),
-      mTransaction->GetSupportsHTTP3(), mode, reason);
+      mTransaction->GetSupportsHTTP3(), mode, reason, mTransaction->Caps(),
+      TimeStamp::Now(), infoArgs);
   return NS_OK;
 }
 
@@ -527,7 +531,8 @@ HttpTransactionChild::OnStopRequest(nsIRequest* aRequest, nsresult aStatus) {
     MOZ_ASSERT(NS_FAILED(mStatus), "This shoule be only called when failure");
     if (mDataBridgeParent) {
       mDataBridgeParent->OnStopRequest(mStatus, ResourceTimingStructArgs(),
-                                       TimeStamp(), nsHttpHeaderArray());
+                                       TimeStamp(), nsHttpHeaderArray(),
+                                       TimeStamp::Now());
       mDataBridgeParent = nullptr;
     }
   });
@@ -558,18 +563,16 @@ HttpTransactionChild::OnStopRequest(nsIRequest* aRequest, nsresult aStatus) {
   if (mDataBridgeParent) {
     mDataBridgeParent->OnStopRequest(
         aStatus, GetTimingAttributes(), lastActTabOpt,
-        responseTrailers ? *responseTrailers : nsHttpHeaderArray());
+        responseTrailers ? *responseTrailers : nsHttpHeaderArray(),
+        TimeStamp::Now());
     mDataBridgeParent = nullptr;
   }
 
-  RefPtr<nsHttpConnectionInfo> connInfo = mTransaction->GetConnInfo();
-  HttpConnectionInfoCloneArgs infoArgs;
-  nsHttpConnectionInfo::SerializeHttpConnectionInfo(connInfo, infoArgs);
   Unused << SendOnStopRequest(aStatus, mTransaction->ResponseIsComplete(),
                               mTransaction->GetTransferSize(),
                               ToTimingStructArgs(mTransaction->Timings()),
                               responseTrailers, mTransactionObserverResult,
-                              lastActTabOpt, mTransaction->Caps(), infoArgs);
+                              lastActTabOpt, TimeStamp::Now());
 
   return NS_OK;
 }
@@ -646,6 +649,9 @@ HttpTransactionChild::CheckListenerChain() {
   MOZ_ASSERT(NS_IsMainThread(), "Should be on the main thread!");
   return NS_OK;
 }
+
+NS_IMETHODIMP
+HttpTransactionChild::OnDataFinished(nsresult aStatus) { return NS_OK; }
 
 NS_IMETHODIMP
 HttpTransactionChild::EarlyHint(const nsACString& aValue,

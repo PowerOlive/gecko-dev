@@ -5,6 +5,7 @@
 
 #include "NotificationController.h"
 
+#include "CssAltContent.h"
 #include "DocAccessible-inl.h"
 #include "DocAccessibleChild.h"
 #include "LocalAccessible-inl.h"
@@ -14,13 +15,14 @@
 
 #include "nsIContentInlines.h"
 
+#include "mozilla/AppShutdown.h"
 #include "mozilla/dom/BrowserChild.h"
 #include "mozilla/dom/Element.h"
-#include "mozilla/ipc/ProcessChild.h"
+#include "mozilla/PerfStats.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/ProfilerMarkers.h"
 #include "nsAccessibilityService.h"
-#include "mozilla/Telemetry.h"
+#include "mozilla/glean/AccessibleMetrics.h"
 
 using namespace mozilla;
 using namespace mozilla::a11y;
@@ -42,7 +44,11 @@ NotificationController::NotificationController(DocAccessible* aDocument,
 
 NotificationController::~NotificationController() {
   NS_ASSERTION(!mDocument, "Controller wasn't shutdown properly!");
-  if (mDocument) Shutdown();
+  if (mDocument) {
+    Shutdown();
+  }
+  MOZ_RELEASE_ASSERT(mObservingState == eNotObservingRefresh,
+                     "Must unregister before being destroyed");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -54,7 +60,9 @@ NS_IMPL_CYCLE_COLLECTING_NATIVE_RELEASE(NotificationController)
 NS_IMPL_CYCLE_COLLECTION_CLASS(NotificationController)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(NotificationController)
-  if (tmp->mDocument) tmp->Shutdown();
+  if (tmp->mDocument) {
+    tmp->Shutdown();
+  }
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(NotificationController)
@@ -79,8 +87,16 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 void NotificationController::Shutdown() {
   if (mObservingState != eNotObservingRefresh &&
       mPresShell->RemoveRefreshObserver(this, FlushType::Display)) {
+    // Note, this was our last chance to unregister, since we're about to
+    // clear mPresShell further down in this function.
     mObservingState = eNotObservingRefresh;
   }
+  MOZ_RELEASE_ASSERT(mObservingState == eNotObservingRefresh,
+                     "Must unregister before being destroyed (and we just "
+                     "passed our last change to unregister)");
+  // Immediately null out mPresShell, to prevent us from being registered as a
+  // refresh observer again.
+  mPresShell = nullptr;
 
   // Shutdown handling child documents.
   int32_t childDocCount = mHangingChildDocuments.Length();
@@ -93,9 +109,8 @@ void NotificationController::Shutdown() {
   mHangingChildDocuments.Clear();
 
   mDocument = nullptr;
-  mPresShell = nullptr;
 
-  mTextHash.Clear();
+  mTextArray.Clear();
   mContentInsertions.Clear();
   mNotifications.Clear();
   mFocusEvent = nullptr;
@@ -189,6 +204,20 @@ bool NotificationController::QueueMutationEvent(AccTreeMutationEvent* aEvent) {
     }
   }
 
+  if (aEvent->GetEventType() == nsIAccessibleEvent::EVENT_HIDE ||
+      aEvent->GetEventType() == nsIAccessibleEvent::EVENT_SHOW) {
+    LocalAccessible* target = aEvent->GetAccessible();
+    // We need to do this here while the relation is still intact. During the
+    // tick, where we we call PushNameOrDescriptionChange, it will be too late
+    // since we will already have unparented the label and severed the relation.
+    if (PushNameOrDescriptionChangeToRelations(target,
+                                               RelationType::LABEL_FOR) ||
+        PushNameOrDescriptionChangeToRelations(target,
+                                               RelationType::DESCRIPTION_FOR)) {
+      ScheduleProcessing();
+    }
+  }
+
   // We need to fire a reorder event after all of the events targeted at shown
   // or hidden children of a container.  So either queue a new one, or move an
   // existing one to the end of the queue if the container already has a
@@ -199,12 +228,6 @@ bool NotificationController::QueueMutationEvent(AccTreeMutationEvent* aEvent) {
     reorder = new AccReorderEvent(container);
     container->SetReorderEventTarget(true);
     mMutationMap.PutEvent(reorder);
-
-    // Since this is the first child of container that is changing, the name
-    // and/or description of dependent Accessibles may be changing.
-    if (PushNameOrDescriptionChange(aEvent)) {
-      ScheduleProcessing();
-    }
   } else {
     AccReorderEvent* event = downcast_accEvent(
         mMutationMap.GetEvent(container, EventMap::ReorderEvent));
@@ -346,6 +369,12 @@ void NotificationController::DropMutationEvent(AccTreeMutationEvent* aEvent) {
 }
 
 void NotificationController::CoalesceMutationEvents() {
+  AUTO_PROFILER_MARKER_TEXT("NotificationController::CoalesceMutationEvents",
+                            A11Y, {}, ""_ns);
+  PerfStats::AutoMetricRecording<PerfStats::Metric::A11Y_CoalesceMutationEvents>
+      autoRecording;
+  // DO NOT ADD CODE ABOVE THIS BLOCK: THIS CODE IS MEASURING TIMINGS.
+
   AccTreeMutationEvent* event = mFirstMutationEvent;
   while (event) {
     AccTreeMutationEvent* nextEvent = event->NextEvent();
@@ -448,9 +477,11 @@ void NotificationController::ScheduleContentInsertion(
 }
 
 void NotificationController::ScheduleProcessing() {
-  // If notification flush isn't planed yet start notification flush
+  // If notification flush isn't planned yet, start notification flush
   // asynchronously (after style and layout).
-  if (mObservingState == eNotObservingRefresh) {
+  // Note: the mPresShell null-check might be unnecessary; it's just to prevent
+  // a null-deref here, if we somehow get called after we've been shut down.
+  if (mObservingState == eNotObservingRefresh && mPresShell) {
     if (mPresShell->AddRefreshObserver(this, FlushType::Display,
                                        "Accessibility notifications")) {
       mObservingState = eRefreshObserving;
@@ -462,10 +493,10 @@ void NotificationController::ScheduleProcessing() {
 // NotificationCollector: protected
 
 bool NotificationController::IsUpdatePending() {
-  return mPresShell->IsLayoutFlushObserver() ||
+  return mPresShell->ObservingStyleFlushes() ||
          mObservingState == eRefreshProcessingForUpdate || WaitingForParent() ||
          mContentInsertions.Count() != 0 || mNotifications.Length() != 0 ||
-         mTextHash.Count() != 0 ||
+         !mTextArray.IsEmpty() ||
          !mDocument->HasLoadState(DocAccessible::eTreeConstructed);
 }
 
@@ -530,15 +561,15 @@ void NotificationController::ProcessMutationEvents() {
                     const AccTreeMutationEvent* b) const {
         int32_t aIdx = a->GetAccessible()->IndexInParent();
         int32_t bIdx = b->GetAccessible()->IndexInParent();
-        MOZ_ASSERT(aIdx >= 0 && bIdx >= 0 && aIdx != bIdx);
+        MOZ_ASSERT(aIdx >= 0 && bIdx >= 0 && (a == b || aIdx != bIdx));
         return aIdx < bIdx;
       }
       bool Equals(const AccTreeMutationEvent* a,
                   const AccTreeMutationEvent* b) const {
         DebugOnly<int32_t> aIdx = a->GetAccessible()->IndexInParent();
         DebugOnly<int32_t> bIdx = b->GetAccessible()->IndexInParent();
-        MOZ_ASSERT(aIdx >= 0 && bIdx >= 0 && aIdx != bIdx);
-        return false;
+        MOZ_ASSERT(aIdx >= 0 && bIdx >= 0 && (a == b || aIdx != bIdx));
+        return a == b;
       }
     };
 
@@ -566,23 +597,6 @@ void NotificationController::ProcessMutationEvents() {
     AccMutationEvent* mutEvent = downcast_accEvent(event);
     if (mutEvent->mTextChangeEvent) {
       nsEventShell::FireEvent(mutEvent->mTextChangeEvent);
-      if (!mDocument) {
-        return;
-      }
-    }
-
-    // Fire menupopup end event before a hide event if a menu goes away.
-
-    // XXX: We don't look into children of hidden subtree to find hiding
-    // menupopup (as we did prior bug 570275) because we don't do that when
-    // menu is showing (and that's impossible until bug 606924 is fixed).
-    // Nevertheless we should do this at least because layout coalesces
-    // the changes before our processing and we may miss some menupopup
-    // events. Now we just want to be consistent in content insertion/removal
-    // handling.
-    if (event->mAccessible->ARIARole() == roles::MENUPOPUP) {
-      nsEventShell::FireEvent(nsIAccessibleEvent::EVENT_MENUPOPUP_END,
-                              event->mAccessible);
       if (!mDocument) {
         return;
       }
@@ -635,6 +649,13 @@ void NotificationController::ProcessMutationEvents() {
         return;
       }
 
+      // The mutation in the container can change its name, or an ancestor's
+      // name. A labelled/described by relation would also need to be notified
+      // if this is the case.
+      if (PushNameOrDescriptionChange(event)) {
+        ScheduleProcessing();
+      }
+
       LocalAccessible* target = event->GetAccessible();
       target->Document()->MaybeNotifyOfValueChange(target);
       if (!mDocument) {
@@ -663,19 +684,23 @@ void NotificationController::ProcessMutationEvents() {
 // NotificationCollector: private
 
 void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
-  AUTO_PROFILER_MARKER_TEXT("NotificationController::WillRefresh", A11Y, {},
-                            ""_ns);
-  Telemetry::AutoTimer<Telemetry::A11Y_TREE_UPDATE_TIMING_MS> timer;
+  AUTO_PROFILER_MARKER_UNTYPED("NotificationController::WillRefresh", A11Y, {});
+  auto timer = glean::a11y::tree_update_timing.Measure();
   // DO NOT ADD CODE ABOVE THIS BLOCK: THIS CODE IS MEASURING TIMINGS.
 
   AUTO_PROFILER_LABEL("NotificationController::WillRefresh", A11Y);
 
-  // If the document accessible that notification collector was created for is
-  // now shut down, don't process notifications anymore.
-  NS_ASSERTION(
+  // If mDocument is null, the document accessible that this notification
+  // controller was created for is now shut down. This means we've lost our
+  // ability to unregister ourselves, which is bad. (However, it also shouldn't
+  // be logically possible for us to get here with a null mDocument; the only
+  // thing that clears that pointer is our Shutdown() method, which first
+  // unregisters and fatally asserts if that fails).
+  MOZ_RELEASE_ASSERT(
       mDocument,
       "The document was shut down while refresh observer is attached!");
-  if (!mDocument || ipc::ProcessChild::ExpectingShutdown()) {
+
+  if (AppShutdown::IsShutdownImpending()) {
     return;
   }
 
@@ -690,11 +715,31 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
     return;
   }
 
+  if (mDocument->IPCDoc() && mDocument->IPCDoc()->HasUnackedMutationEvents()) {
+    // We've sent mutation events to the parent process, but we haven't
+    // received its ACK yet. We defer accessibility updates until we do.
+    // Otherwise, we might flood the IPDL queue with many later mutation events
+    // while the parent process is still trying to process earlier ones, getting
+    // further and further behind and causing the browser to hang for extended
+    // periods. If the same nodes are repeatedly changing or being recreated,
+    // deferring updates can significantly reduce the overall number of events
+    // because we avoid generating events for the intermediate changes that
+    // occur while the parent process is busy. This also avoids the associated
+    // work to update the tree in the content process. We must defer all
+    // work here, not just mutation events, because otherwise, the tree and
+    // other events might get out of sync with the mutation events we've
+    // processed. Queued content insertions, events, etc. will be processed in
+    // a subsequent tick after we receive the ACK, though some of them may be
+    // irrelevant (and thus dropped) by the time that happens if a DOM node or
+    // Accessible was removed in the interim.
+    return;
+  }
+
   // Process parent's notifications before ours, to get proper ordering between
   // e.g. tab event and content event.
   if (WaitingForParent()) {
     mDocument->ParentDocument()->mNotificationController->WillRefresh(aTime);
-    if (!mDocument || ipc::ProcessChild::ExpectingShutdown()) {
+    if (!mDocument || AppShutdown::IsShutdownImpending()) {
       return;
     }
   }
@@ -724,7 +769,7 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
 #endif
 
     mDocument->DoInitialUpdate();
-    if (ipc::ProcessChild::ExpectingShutdown()) {
+    if (AppShutdown::IsShutdownImpending()) {
       return;
     }
 
@@ -735,8 +780,14 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
 
   mDocument->ProcessPendingUpdates();
 
-  // Process rendered text change notifications.
-  for (nsIContent* textNode : mTextHash) {
+  // Process rendered text change notifications. Even though we want to process
+  // them in the order in which they were queued, we still want to avoid
+  // duplicates.
+  nsTHashSet<nsIContent*> textHash;
+  for (nsIContent* textNode : mTextArray) {
+    if (!textHash.EnsureInserted(textNode)) {
+      continue;  // Already processed.
+    }
     LocalAccessible* textAcc = mDocument->GetAccessible(textNode);
 
     // If the text node is not in tree or doesn't have a frame, or placed in
@@ -765,9 +816,14 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
         0, UINT32_MAX, nsIFrame::TextOffsetType::OffsetsInContentText,
         nsIFrame::TrailingWhitespace::DontTrim);
 
-    // Remove text accessible if rendered text is empty.
     if (textAcc) {
-      if (text.mString.IsEmpty()) {
+      // Remove the TextLeafAccessible if:
+      // 1. The rendered text is empty; or
+      // 2. The text is just a space, but its layout frame has a width of 0,
+      // so it isn't visible. This can happen if there is whitespace before an
+      // invisible element at the end of a block.
+      if (text.mString.IsEmpty() ||
+          (text.mString.EqualsLiteral(" ") && textFrame->GetRect().IsEmpty())) {
 #ifdef A11Y_LOG
         if (logging::IsEnabled(logging::eTree | logging::eText)) {
           logging::MsgBegin("TREE", "text node lost its content; doc: %p",
@@ -797,6 +853,14 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
       }
 #endif
 
+      if (CssAltContent(textNode)) {
+        // A11y doesn't care about the text rendered by layout if there is CSS
+        // content alt text. We skip this here rather than when the update is
+        // queued because the TextLeafAccessible might not exist yet and we
+        // might need to create it below.
+        continue;
+      }
+
       TextUpdater::Run(mDocument, textAcc->AsTextLeaf(), text.mString);
       continue;
     }
@@ -825,7 +889,8 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
       }
     }
   }
-  mTextHash.Clear();
+  textHash.Clear();
+  mTextArray.Clear();
 
   // Process content inserted notifications to update the tree.
   // Processing an insertion can indirectly run script (e.g. querying a XUL
@@ -849,7 +914,9 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
   nsTArray<RefPtr<DocAccessible>> newChildDocs;
   for (uint32_t idx = 0; idx < hangingDocCnt; idx++) {
     DocAccessible* childDoc = mHangingChildDocuments[idx];
-    if (childDoc->IsDefunct()) continue;
+    if (childDoc->IsDefunct()) {
+      continue;
+    }
 
     if (IPCAccessibilityActive() && !mDocument->IPCDoc()) {
       childDoc->Shutdown();
@@ -888,12 +955,16 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
     uint32_t childDocCnt = mDocument->ChildDocumentCount(), childDocIdx = 0;
     for (; childDocIdx < childDocCnt; childDocIdx++) {
       DocAccessible* childDoc = mDocument->GetChildDocumentAt(childDocIdx);
-      if (!childDoc->HasLoadState(DocAccessible::eCompletelyLoaded)) break;
+      if (!childDoc->HasLoadState(DocAccessible::eCompletelyLoaded)) {
+        break;
+      }
     }
 
     if (childDocIdx == childDocCnt) {
       mDocument->ProcessLoad();
-      if (!mDocument) return;
+      if (!mDocument) {
+        return;
+      }
     }
   }
 
@@ -923,10 +994,12 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
   uint32_t notificationCount = notifications.Length();
   for (uint32_t idx = 0; idx < notificationCount; idx++) {
     notifications[idx]->Process();
-    if (!mDocument) return;
+    if (!mDocument) {
+      return;
+    }
   }
 
-  if (ipc::ProcessChild::ExpectingShutdown()) {
+  if (AppShutdown::IsShutdownImpending()) {
     return;
   }
 
@@ -948,6 +1021,12 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
   CoalesceMutationEvents();
   ProcessMutationEvents();
 
+  // ProcessMutationEvents for content process documents merely queues mutation
+  // events. Send those events in a batch now if applicable.
+  if (mDocument && mDocument->IPCDoc()) {
+    mDocument->IPCDoc()->SendQueuedMutationEvents();
+  }
+
   // When firing mutation events, mObservingState is set to
   // eRefreshProcessing. Any calls to ScheduleProcessing() that
   // occur before mObservingState is reset will be dropped because we only
@@ -960,14 +1039,28 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
   }
 
   if (mDocument) {
-    mDocument->ClearMovedAccessibles();
+    mDocument->ClearMutationData();
   }
 
-  if (ipc::ProcessChild::ExpectingShutdown()) {
+  if (AppShutdown::IsShutdownImpending()) {
     return;
   }
 
   ProcessEventQueue();
+
+  if (mDocument && mDocument->IPCDoc()) {
+    // There should not be any more mutation events in the mutation event queue.
+    // ProcessEventQueue should have sent all of them.
+    MOZ_ASSERT(mDocument->IPCDoc()->MutationEventQueueLength() == 0,
+               "Mutation event queue is non-empty.");
+    if (mDocument->IPCDoc()->HasUnackedMutationEvents()) {
+      // Now that all mutation events have been sent, request an ACK from the
+      // parent process. This request will be after the mutation events in the
+      // IPDL queue, so the parent process will respond once it has finished
+      // handling all the mutation events.
+      Unused << mDocument->IPCDoc()->SendRequestAckMutationEvents();
+    }
+  }
 
   if (IPCAccessibilityActive()) {
     size_t newDocCount = newChildDocs.Length();
@@ -1002,13 +1095,24 @@ void NotificationController::WillRefresh(mozilla::TimeStamp aTime) {
     }
   }
 
+  if (!mDocument) {
+    // A null mDocument means we've gotten a Shutdown() call (presumably via
+    // some script that we triggered above), and that means we're done here.
+    // Note: in this case, it's important that don't modify mObservingState;
+    // Shutdown() will have *unregistered* us as a refresh observer, and we
+    // don't want to mistakenly overwrite mObservingState and fool ourselves
+    // into thinking we've re-registered when we really haven't!
+    MOZ_ASSERT(mObservingState == eNotObservingRefresh,
+               "We've been shutdown, which means we should've been "
+               "unregistered as a refresh observer");
+    return;
+  }
   mObservingState = eRefreshObserving;
-  if (!mDocument) return;
 
   // Stop further processing if there are no new notifications of any kind or
   // events and document load is processed.
   if (mContentInsertions.Count() == 0 && mNotifications.IsEmpty() &&
-      !mFocusEvent && mEvents.IsEmpty() && mTextHash.Count() == 0 &&
+      !mFocusEvent && mEvents.IsEmpty() && mTextArray.IsEmpty() &&
       mHangingChildDocuments.IsEmpty() &&
       mDocument->HasLoadState(DocAccessible::eCompletelyLoaded) &&
       mPresShell->RemoveRefreshObserver(this, FlushType::Display)) {

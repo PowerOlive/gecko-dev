@@ -86,6 +86,8 @@ class ResponsePanel extends Component {
       targetSearchResult: PropTypes.object,
       connector: PropTypes.object.isRequired,
       showMessagesView: PropTypes.bool,
+      defaultRawResponse: PropTypes.bool,
+      setDefaultRawResponse: PropTypes.func,
     };
   }
 
@@ -94,7 +96,8 @@ class ResponsePanel extends Component {
 
     this.state = {
       filterText: "",
-      rawResponsePayloadDisplayed: !!props.targetSearchResult,
+      rawResponsePayloadDisplayed:
+        !!props.targetSearchResult || !!props.defaultRawResponse,
     };
 
     this.toggleRawResponsePayload = this.toggleRawResponsePayload.bind(this);
@@ -228,7 +231,7 @@ class ResponsePanel extends Component {
       image: "",
       priority: PriorityLevels.PRIORITY_INFO_HIGH,
       type: "info",
-      eventCallback: e => {},
+      eventCallback: () => {},
       buttons: [
         {
           mdnUrl: getCORSErrorURL(blockedReason),
@@ -341,13 +344,12 @@ class ResponsePanel extends Component {
     };
   }
 
-  renderRawResponsePayloadBtn(key, checked, onChange) {
+  renderRawResponsePayloadBtn(key, checked) {
     return [
       label(
         {
           key: `${key}RawResponsePayloadBtn`,
           className: "raw-data-toggle",
-          htmlFor: `raw-${key}-checkbox`,
           onClick: event => {
             // stop the header click event
             event.stopPropagation();
@@ -360,7 +362,12 @@ class ResponsePanel extends Component {
             id: `raw-${key}-checkbox`,
             checked,
             className: "devtools-checkbox-toggle",
-            onChange,
+            onChange: event => {
+              if (this.props.setDefaultRawResponse) {
+                this.props.setDefaultRawResponse(event.target.checked);
+              }
+              this.toggleRawResponsePayload();
+            },
             type: "checkbox",
           })
         )
@@ -394,7 +401,7 @@ class ResponsePanel extends Component {
       image: "",
       priority: PriorityLevels.PRIORITY_INFO_MEDIUM,
       type: "info",
-      eventCallback: e => {},
+      eventCallback: () => {},
       buttons: [],
     });
 
@@ -483,8 +490,7 @@ class ResponsePanel extends Component {
         hasFormattedDisplay &&
           this.renderRawResponsePayloadBtn(
             "response",
-            rawResponsePayloadDisplayed,
-            this.toggleRawResponsePayload
+            rawResponsePayloadDisplayed
           ),
       ]),
       xssiStrippedCharsInfoBox,

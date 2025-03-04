@@ -4,10 +4,12 @@
 
 "use strict";
 
-const { MultiLocalizationHelper } = require("devtools/shared/l10n");
+const {
+  MultiLocalizationHelper,
+} = require("resource://devtools/shared/l10n.js");
 const {
   FluentL10n,
-} = require("devtools/client/shared/fluent-l10n/fluent-l10n");
+} = require("resource://devtools/client/shared/fluent-l10n/fluent-l10n.js");
 
 loader.lazyRequireGetter(
   this,
@@ -15,34 +17,11 @@ loader.lazyRequireGetter(
   "resource://devtools/client/shared/link.js",
   true
 );
-loader.lazyRequireGetter(
-  this,
-  "features",
-  "resource://devtools/client/debugger/src/utils/prefs.js",
-  true
-);
-loader.lazyRequireGetter(
-  this,
-  "getOriginalLocation",
-  "resource://devtools/client/debugger/src/utils/source-maps.js",
-  true
-);
-loader.lazyRequireGetter(
-  this,
-  "createLocation",
-  "resource://devtools/client/debugger/src/utils/location.js",
-  true
-);
+
 loader.lazyRequireGetter(
   this,
   "registerStoreObserver",
   "resource://devtools/client/shared/redux/subscriber.js",
-  true
-);
-loader.lazyRequireGetter(
-  this,
-  "getMappedExpression",
-  "resource://devtools/client/debugger/src/actions/expressions.js",
   true
 );
 
@@ -51,6 +30,8 @@ const DBG_STRINGS_URI = [
   // These are used in the AppErrorBoundary component
   "devtools/client/locales/startup.properties",
   "devtools/client/locales/components.properties",
+  // Used by SourceMapLoader
+  "devtools/client/locales/toolbox.properties",
 ];
 const L10N = new MultiLocalizationHelper(...DBG_STRINGS_URI);
 
@@ -68,15 +49,51 @@ class DebuggerPanel {
   constructor(iframeWindow, toolbox, commands) {
     this.panelWin = iframeWindow;
     this.panelWin.L10N = L10N;
+    this.panelWin.sourceMapURLService = toolbox.sourceMapURLService;
 
     this.toolbox = toolbox;
     this.commands = commands;
+
+    // Somewhat equivalent of global `lazy` object used for ChromeUtils.defineESModuleGetter,
+    // but instantiated once per Debugger document as the modules will be loaded in the
+    // document scope.
+    // It is also important to release references to them in destroy in order to prevent leaks.
+    this.lazyModules = {};
   }
 
   async open() {
     // whypaused-* strings are in devtools/shared as they're used in the PausedDebuggerOverlay as well
     const fluentL10n = new FluentL10n();
     await fluentL10n.init(["devtools/shared/debugger-paused-reasons.ftl"]);
+
+    // Ensure loading all debugger modules via the Browser Loader
+    // in order to prevent loading duplicated instances of them,
+    // and also ensure loading them with debugger document as global.
+    const { browserLoader } = this.panelWin;
+    browserLoader.lazyRequireGetter(
+      this.lazyModules,
+      "features",
+      "resource://devtools/client/debugger/src/utils/prefs.js",
+      true
+    );
+    browserLoader.lazyRequireGetter(
+      this.lazyModules,
+      "getOriginalLocation",
+      "resource://devtools/client/debugger/src/utils/source-maps.js",
+      true
+    );
+    browserLoader.lazyRequireGetter(
+      this.lazyModules,
+      "createLocation",
+      "resource://devtools/client/debugger/src/utils/location.js",
+      true
+    );
+    browserLoader.lazyRequireGetter(
+      this.lazyModules,
+      "getMappedExpression",
+      "resource://devtools/client/debugger/src/actions/expressions.js",
+      true
+    );
 
     const { actions, store, selectors, client } =
       await this.panelWin.Debugger.bootstrap({
@@ -100,10 +117,10 @@ class DebuggerPanel {
     return this;
   }
 
-  _onDebuggerStateChange(state, oldState) {
+  async _onDebuggerStateChange(state, oldState) {
     const { getCurrentThread } = this._selectors;
-
     const currentThreadActorID = getCurrentThread(state);
+
     if (
       currentThreadActorID &&
       currentThreadActorID !== getCurrentThread(oldState)
@@ -112,6 +129,20 @@ class DebuggerPanel {
         this.commands.client.getFrontByID(currentThreadActorID);
       this.toolbox.selectTarget(threadFront?.targetFront.actorID);
     }
+
+    this.toolbox.emit(
+      "show-original-variable-mapping-warnings",
+      this.shouldShowOriginalVariableMappingWarnings()
+    );
+  }
+
+  shouldShowOriginalVariableMappingWarnings() {
+    const { getSelectedSource, isMapScopesEnabled } = this._selectors;
+    if (!this.isPaused() || isMapScopesEnabled(this._getState())) {
+      return false;
+    }
+    const selectedSource = getSelectedSource(this._getState());
+    return selectedSource?.isOriginal && !selectedSource?.isPrettyPrinted;
   }
 
   getVarsForTests() {
@@ -184,11 +215,7 @@ class DebuggerPanel {
    * or null if the debugger isn't paused.
    */
   getSelectedFrameActorID() {
-    const thread = this._selectors.getCurrentThread(this._getState());
-    const selectedFrame = this._selectors.getSelectedFrame(
-      this._getState(),
-      thread
-    );
+    const selectedFrame = this._selectors.getSelectedFrame(this._getState());
     if (selectedFrame) {
       return selectedFrame.id;
     }
@@ -197,7 +224,7 @@ class DebuggerPanel {
 
   getMappedExpression(expression) {
     const thread = this._selectors.getCurrentThread(this._getState());
-    return getMappedExpression(expression, thread, {
+    return this.lazyModules.getMappedExpression(expression, thread, {
       getState: this._store.getState,
       parserWorker: this.toolbox.parserWorker,
     });
@@ -267,7 +294,7 @@ class DebuggerPanel {
       return false;
     }
 
-    const generatedLocation = createLocation({
+    const generatedLocation = this.lazyModules.createLocation({
       source: generatedSource,
       line: generatedLine,
       column: generatedColumn,
@@ -276,11 +303,14 @@ class DebuggerPanel {
     // Note that getOriginalLocation can easily return generatedLocation
     // if the location can't be mapped to any original source.
     // So that we may open either regular source or original sources here.
-    const originalLocation = await getOriginalLocation(generatedLocation, {
-      // Reproduce a minimal thunkArgs for getOriginalLocation.
-      sourceMapLoader: this.toolbox.sourceMapLoader,
-      getState: this._store.getState,
-    });
+    const originalLocation = await this.lazyModules.getOriginalLocation(
+      generatedLocation,
+      {
+        // Reproduce a minimal thunkArgs for getOriginalLocation.
+        sourceMapLoader: this.toolbox.sourceMapLoader,
+        getState: this._store.getState,
+      }
+    );
 
     // view-source module only forced the load of debugger in the background.
     // Now that we know we want to show a source, force displaying it in foreground.
@@ -300,14 +330,24 @@ class DebuggerPanel {
     return true;
   }
 
-  async selectWorker(workerDescriptorFront) {
-    const threadActorID = workerDescriptorFront.threadFront?.actorID;
+  async selectServiceWorker(workerDescriptorFront) {
+    // The descriptor used by the application panel isn't fetching the worker target,
+    // but the debugger will fetch it via the watcher actor and TargetCommand.
+    // So try to match the descriptor with its related target.
+    const targets = this.commands.targetCommand.getAllTargets([
+      this.commands.targetCommand.TYPES.SERVICE_WORKER,
+    ]);
+    const workerTarget = targets.find(
+      target => target.id == workerDescriptorFront.id
+    );
 
+    const threadFront = await workerTarget.getFront("thread");
+    const threadActorID = threadFront?.actorID;
     const isThreadAvailable = this._selectors
       .getThreads(this._getState())
       .find(x => x.actor === threadActorID);
 
-    if (!features.windowlessServiceWorkers) {
+    if (!this.lazyModules.features.windowlessServiceWorkers) {
       console.error(
         "Selecting a worker needs the pref debugger.features.windowless-service-workers set to true"
       );
@@ -339,14 +379,13 @@ class DebuggerPanel {
     this._actions.selectThread(threadActorID);
   }
 
-  toggleJavascriptTracing() {
-    this._actions.toggleTracing(
-      this._selectors.getJavascriptTracingLogMethod(this._getState())
-    );
+  showTracerSidebar() {
+    this._actions.setPrimaryPaneTab("tracer");
   }
 
   destroy() {
     this.panelWin.Debugger.destroy();
+    this.lazyModules = {};
     this.emit("destroyed");
   }
 }

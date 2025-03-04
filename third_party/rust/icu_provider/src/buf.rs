@@ -21,9 +21,10 @@ impl DataMarker for BufferMarker {
 /// A data provider that returns opaque bytes.
 ///
 /// Generally, these bytes are expected to be deserializable with Serde. To get an object
-/// implementing [`DataProvider`] via Serde, use [`as_deserializing()`], which requires
-/// enabling at least one of the deserialization Cargo features:
+/// implementing [`DataProvider`] via Serde, use [`as_deserializing()`].
 ///
+/// Passing a  `BufferProvider` to a `*_with_buffer_provider` constructor requires enabling
+/// the deserialization Cargo feature for the expected format(s):
 /// - `deserialize_json`
 /// - `deserialize_postcard_1`
 /// - `deserialize_bincode_1`
@@ -36,7 +37,7 @@ impl DataMarker for BufferMarker {
 ///
 /// ```
 /// # #[cfg(feature = "deserialize_json")] {
-/// use icu_locid::locale;
+/// use icu_locid::langid;
 /// use icu_provider::hello_world::*;
 /// use icu_provider::prelude::*;
 /// use std::borrow::Cow;
@@ -44,7 +45,7 @@ impl DataMarker for BufferMarker {
 /// let buffer_provider = HelloWorldProvider.into_json_provider();
 ///
 /// let req = DataRequest {
-///     locale: &locale!("de").into(),
+///     locale: &langid!("de").into(),
 ///     metadata: Default::default(),
 /// };
 ///
@@ -92,7 +93,42 @@ pub trait BufferProvider {
     ) -> Result<DataResponse<BufferMarker>, DataError>;
 }
 
+impl<'a, T: BufferProvider + ?Sized> BufferProvider for &'a T {
+    #[inline]
+    fn load_buffer(
+        &self,
+        key: DataKey,
+        req: DataRequest,
+    ) -> Result<DataResponse<BufferMarker>, DataError> {
+        (**self).load_buffer(key, req)
+    }
+}
+
 impl<T: BufferProvider + ?Sized> BufferProvider for alloc::boxed::Box<T> {
+    #[inline]
+    fn load_buffer(
+        &self,
+        key: DataKey,
+        req: DataRequest,
+    ) -> Result<DataResponse<BufferMarker>, DataError> {
+        (**self).load_buffer(key, req)
+    }
+}
+
+impl<T: BufferProvider + ?Sized> BufferProvider for alloc::rc::Rc<T> {
+    #[inline]
+    fn load_buffer(
+        &self,
+        key: DataKey,
+        req: DataRequest,
+    ) -> Result<DataResponse<BufferMarker>, DataError> {
+        (**self).load_buffer(key, req)
+    }
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl<T: BufferProvider + ?Sized> BufferProvider for alloc::sync::Arc<T> {
+    #[inline]
     fn load_buffer(
         &self,
         key: DataKey,

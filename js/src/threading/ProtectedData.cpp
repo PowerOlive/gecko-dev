@@ -6,6 +6,7 @@
 
 #include "threading/ProtectedData.h"
 
+#include "threading/Mutex.h"
 #include "vm/HelperThreads.h"
 #include "vm/JSContext.h"
 
@@ -20,7 +21,7 @@ template <AllowedHelperThread Helper>
 static inline bool OnHelperThread() {
   if (Helper == AllowedHelperThread::IonCompile ||
       Helper == AllowedHelperThread::GCTaskOrIonCompile) {
-    if (CurrentThreadIsIonCompiling()) {
+    if (CurrentThreadIsOffThreadCompiling()) {
       return true;
     }
   }
@@ -53,6 +54,8 @@ void CheckContextLocal::check() const {
   MOZ_ASSERT(cx_ == cx);
 }
 
+void CheckMutexHeld::check() const { mutex_.assertOwnedByCurrentThread(); }
+
 template <AllowedHelperThread Helper>
 void CheckMainThread<Helper>::check() const {
   if (OnHelperThread<Helper>()) {
@@ -66,6 +69,7 @@ void CheckMainThread<Helper>::check() const {
 template class CheckMainThread<AllowedHelperThread::None>;
 template class CheckMainThread<AllowedHelperThread::GCTask>;
 template class CheckMainThread<AllowedHelperThread::IonCompile>;
+template class CheckMainThread<AllowedHelperThread::GCTaskOrIonCompile>;
 
 template <GlobalLock Lock, AllowedHelperThread Helper>
 void CheckGlobalLock<Lock, Helper>::check() const {

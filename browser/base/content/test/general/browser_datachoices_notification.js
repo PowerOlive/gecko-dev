@@ -33,12 +33,12 @@ function fakeShowPolicyTimeout(set, clear) {
   reportingPolicy.clearShowInfobarTimeout = clear;
 }
 
-function sendSessionRestoredNotification() {
+async function sendSessionRestoredNotification() {
   let reportingPolicy = ChromeUtils.importESModule(
     "resource://gre/modules/TelemetryReportingPolicy.sys.mjs"
   ).Policy;
 
-  reportingPolicy.fakeSessionRestoreNotification();
+  await reportingPolicy.fakeSessionRestoreNotification();
 }
 
 /**
@@ -54,7 +54,7 @@ function promiseNextTick() {
  * @return {Promise} Resolved when the notification is displayed.
  */
 function promiseWaitForAlertActive(aNotificationBox) {
-  let deferred = PromiseUtils.defer();
+  let deferred = Promise.withResolvers();
   aNotificationBox.stack.addEventListener(
     "AlertActive",
     function () {
@@ -71,12 +71,12 @@ function promiseWaitForAlertActive(aNotificationBox) {
  * @return {Promise} Resolved when the notification is closed.
  */
 function promiseWaitForNotificationClose(aNotification) {
-  let deferred = PromiseUtils.defer();
+  let deferred = Promise.withResolvers();
   waitForNotificationClose(aNotification, deferred.resolve);
   return deferred.promise;
 }
 
-function triggerInfoBar(expectedTimeoutMs) {
+async function triggerInfoBar(expectedTimeoutMs) {
   let showInfobarCallback = null;
   let timeoutMs = null;
   fakeShowPolicyTimeout(
@@ -86,7 +86,7 @@ function triggerInfoBar(expectedTimeoutMs) {
     },
     () => {}
   );
-  sendSessionRestoredNotification();
+  await sendSessionRestoredNotification();
   Assert.ok(!!showInfobarCallback, "Must have a timer callback.");
   if (expectedTimeoutMs !== undefined) {
     Assert.equal(timeoutMs, expectedTimeoutMs, "Timeout should match");
@@ -104,11 +104,16 @@ var checkInfobarButton = async function (aNotification) {
   );
   let button = buttons[0];
 
+  let openPrefsPromise = BrowserTestUtils.waitForLocationChange(
+    gBrowser,
+    "about:preferences#privacy"
+  );
+
   // Click on the button.
   button.click();
 
   // Wait for the preferences panel to open.
-  await promiseNextTick();
+  await openPrefsPromise;
 };
 
 add_setup(async function () {
@@ -160,6 +165,7 @@ function assertCoherentInitialState() {
 }
 
 add_task(async function test_single_window() {
+  TelemetryReportingPolicy.reset();
   clearAcceptedPolicy();
 
   // Close all the notifications, then try to trigger the data choices infobar.
@@ -174,8 +180,10 @@ add_task(async function test_single_window() {
   );
 
   // Wait for the infobar to be displayed.
-  triggerInfoBar(10 * 1000);
+  await triggerInfoBar(10 * 1000);
+
   await alertShownPromise;
+  await promiseNextTick();
 
   Assert.equal(
     gNotificationBox.allNotifications.length,
@@ -248,7 +256,7 @@ add_task(async function test_multiple_windows() {
   );
 
   // Wait for the infobars.
-  triggerInfoBar(10 * 1000);
+  await triggerInfoBar(10 * 1000);
   await Promise.all(showAlertPromises);
 
   // Both notification were displayed. Close one and check that both gets closed.

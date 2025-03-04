@@ -1,52 +1,36 @@
-From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Wed, 10 May 2023 08:01:00 +0000
-Subject: Bug 1828065 - cherry-pick upstream libwebrtc commit adf55790b6.
- r=webrtc-reviewers,mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Mon, 4 Dec 2023 12:57:00 -0600
+Subject: Bug 1867099 - (fix-66b7275561) disable wgc capture yellow-line
+ removal. r?ng!
 
-Upstream commit: https://webrtc.googlesource.com/src/+/adf55790b6ecf50c4bb2b2cf7d58441303b9d946
-    In DeviceInfoDS free the frame duration list after use
-
-    Per the docs, the caller is responsible for freeing the memory.
-
-    Bug: chromium:1441804
-    Change-Id: I9aaae493a1a86d8ab4f03930715a643a3c9fb61b
-    Reviewed-on: https://webrtc-review.googlesource.com/c/src/+/304061
-    Reviewed-by: Per Kjellander <perkj@webrtc.org>
-    Commit-Queue: Ilya Nikolaevskiy <ilnik@webrtc.org>
-    Reviewed-by: Ilya Nikolaevskiy <ilnik@webrtc.org>
-    Cr-Commit-Position: refs/heads/main@{#39983}
-
-Differential Revision: https://phabricator.services.mozilla.com/D177237
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/854cc79e99130e6537eebe8433a6a7adf5e1578d
+This code won't build until we support building with
+Win 10 SDK v10.0.20348.0 or newer.
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/0aac94794aad2ddb637f5076bc08706a11866737
 ---
- modules/video_capture/windows/device_info_ds.cc | 11 +++++++++--
- 1 file changed, 9 insertions(+), 2 deletions(-)
+ modules/desktop_capture/win/wgc_capture_session.cc | 6 ++++++
+ 1 file changed, 6 insertions(+)
 
-diff --git a/modules/video_capture/windows/device_info_ds.cc b/modules/video_capture/windows/device_info_ds.cc
-index b5867923d1..f6927281f3 100644
---- a/modules/video_capture/windows/device_info_ds.cc
-+++ b/modules/video_capture/windows/device_info_ds.cc
-@@ -519,11 +519,18 @@ int32_t DeviceInfoDS::CreateCapabilityMap(const char* deviceUniqueIdUTF8)
-         hrVC = videoControlConfig->GetFrameRateList(
-             outputCapturePin, tmp, size, &listSize, &frameDurationList);
+diff --git a/modules/desktop_capture/win/wgc_capture_session.cc b/modules/desktop_capture/win/wgc_capture_session.cc
+index 0d4b33752a..491a67d45f 100644
+--- a/modules/desktop_capture/win/wgc_capture_session.cc
++++ b/modules/desktop_capture/win/wgc_capture_session.cc
+@@ -200,6 +200,11 @@ HRESULT WgcCaptureSession::StartCapture(const DesktopCaptureOptions& options) {
+     }
+   }
  
-+        if (hrVC == S_OK) {
-+          maxFPS = GetMaxOfFrameArray(frameDurationList, listSize);
-+        }
-+
-+        CoTaskMemFree(frameDurationList);
-+        frameDurationList = NULL;
-+        listSize = 0;
-+
-         // On some odd cameras, you may get a 0 for duration. Some others may
-         // not update the out vars. GetMaxOfFrameArray returns the lowest
-         // duration (highest FPS), or 0 if there was no list with elements.
--        if (hrVC == S_OK &&
--            0 != (maxFPS = GetMaxOfFrameArray(frameDurationList, listSize))) {
-+        if (0 != maxFPS) {
-           capability.maxFPS = static_cast<int>(10000000 / maxFPS);
-           capability.supportFrameRateControl = true;
-         } else  // use existing method
--- 
-2.34.1
-
++// Until Mozilla builds with Win 10 SDK v10.0.20348.0 or newer, this
++// code will not build.  Once we support the newer SDK, Bug 1868198
++// exists to decide if we ever want to use this code since it is
++// removing an indicator that capture is happening.
++#if !defined(WEBRTC_MOZILLA_BUILD)
+   // By default, the WGC capture API adds a yellow border around the captured
+   // window or display to indicate that a capture is in progress. The section
+   // below is an attempt to remove this yellow border to make the capture
+@@ -211,6 +216,7 @@ HRESULT WgcCaptureSession::StartCapture(const DesktopCaptureOptions& options) {
+           &session3))) {
+     session3->put_IsBorderRequired(false);
+   }
++#endif
+ 
+   allow_zero_hertz_ = options.allow_wgc_zero_hertz();
+ 

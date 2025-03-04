@@ -167,9 +167,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
   ElementState elementState = GetContentState(aFrame, aAppearance);
   if (aState) {
     memset(aState, 0, sizeof(GtkWidgetState));
-
-    // For XUL checkboxes and radio buttons, the state of the parent
-    // determines our state.
     if (aWidgetFlags) {
       if (elementState.HasState(ElementState::CHECKED)) {
         *aWidgetFlags |= MOZ_GTK_WIDGET_CHECKED;
@@ -191,18 +188,13 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
         aAppearance == StyleAppearance::Toolbarbutton ||
         aAppearance == StyleAppearance::Dualbutton ||
         aAppearance == StyleAppearance::ToolbarbuttonDropdown ||
+        aAppearance == StyleAppearance::MozWindowButtonMinimize ||
+        aAppearance == StyleAppearance::MozWindowButtonRestore ||
+        aAppearance == StyleAppearance::MozWindowButtonMaximize ||
+        aAppearance == StyleAppearance::MozWindowButtonClose ||
         aAppearance == StyleAppearance::Menulist ||
-        aAppearance == StyleAppearance::MenulistButton ||
-        aAppearance == StyleAppearance::MozMenulistArrowButton) {
+        aAppearance == StyleAppearance::MenulistButton) {
       aState->active &= aState->inHover;
-    } else if (aAppearance == StyleAppearance::Treetwisty ||
-               aAppearance == StyleAppearance::Treetwistyopen) {
-      if (nsTreeBodyFrame* treeBodyFrame = do_QueryFrame(aFrame)) {
-        const mozilla::AtomArray& atoms =
-            treeBodyFrame->GetPropertyArrayForCurrentDrawingItem();
-        aState->selected = atoms.Contains(nsGkAtoms::selected);
-        aState->inHover = atoms.Contains(nsGkAtoms::hover);
-      }
     }
 
     if (IsFrameContentNodeInNamespace(aFrame, kNameSpaceID_XUL)) {
@@ -210,22 +202,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
       // actually has element focus, so we check the focused attribute
       // to see whether to draw in the focused state.
       aState->focused = elementState.HasState(ElementState::FOCUSRING);
-      if (aAppearance == StyleAppearance::Radio ||
-          aAppearance == StyleAppearance::Checkbox) {
-        // In XUL, checkboxes and radios shouldn't have focus rings, their
-        // labels do
-        aState->focused = FALSE;
-      }
-
-      // menu item state is determined by the attribute "_moz-menuactive",
-      // and not by the mouse hovering (accessibility).  as a special case,
-      // menus which are children of a menu bar are only marked as prelight
-      // if they are open, not on normal hover.
-
-      if (aAppearance == StyleAppearance::Menuarrow) {
-        aState->inHover = CheckBooleanAttr(aFrame, nsGkAtoms::menuactive);
-        aState->active = FALSE;
-      }
 
       // A button with drop down menu open or an activated toggle button
       // should always appear depressed.
@@ -234,20 +210,11 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
           aAppearance == StyleAppearance::Dualbutton ||
           aAppearance == StyleAppearance::ToolbarbuttonDropdown ||
           aAppearance == StyleAppearance::Menulist ||
-          aAppearance == StyleAppearance::MenulistButton ||
-          aAppearance == StyleAppearance::MozMenulistArrowButton) {
+          aAppearance == StyleAppearance::MenulistButton) {
         bool menuOpen = IsOpenButton(aFrame);
         aState->depressed = IsCheckedButton(aFrame) || menuOpen;
         // we must not highlight buttons with open drop down menus on hover.
         aState->inHover = aState->inHover && !menuOpen;
-      }
-
-      // When the input field of the drop down button has focus, some themes
-      // should draw focus for the drop down button as well.
-      if ((aAppearance == StyleAppearance::MenulistButton ||
-           aAppearance == StyleAppearance::MozMenulistArrowButton) &&
-          aWidgetFlags) {
-        *aWidgetFlags = CheckBooleanAttr(aFrame, nsGkAtoms::parentfocused);
       }
     }
 
@@ -257,7 +224,8 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
         aAppearance == StyleAppearance::MozWindowButtonMinimize ||
         aAppearance == StyleAppearance::MozWindowButtonMaximize ||
         aAppearance == StyleAppearance::MozWindowButtonRestore) {
-      aState->backdrop = !nsWindow::GetTopLevelWindowActiveState(aFrame);
+      aState->backdrop = aFrame->PresContext()->Document()->State().HasState(
+          dom::DocumentState::WINDOW_INACTIVE);
     }
   }
 
@@ -270,24 +238,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
     case StyleAppearance::Dualbutton:
       if (aWidgetFlags) *aWidgetFlags = GTK_RELIEF_NONE;
       aGtkWidgetType = MOZ_GTK_TOOLBAR_BUTTON;
-      break;
-    case StyleAppearance::Checkbox:
-      aGtkWidgetType = MOZ_GTK_CHECKBUTTON;
-      break;
-    case StyleAppearance::Radio:
-      aGtkWidgetType = MOZ_GTK_RADIOBUTTON;
-      break;
-    case StyleAppearance::Spinner:
-      aGtkWidgetType = MOZ_GTK_SPINBUTTON;
-      break;
-    case StyleAppearance::SpinnerUpbutton:
-      aGtkWidgetType = MOZ_GTK_SPINBUTTON_UP;
-      break;
-    case StyleAppearance::SpinnerDownbutton:
-      aGtkWidgetType = MOZ_GTK_SPINBUTTON_DOWN;
-      break;
-    case StyleAppearance::SpinnerTextfield:
-      aGtkWidgetType = MOZ_GTK_SPINBUTTON_ENTRY;
       break;
     case StyleAppearance::Range: {
       if (IsRangeHorizontal(aFrame)) {
@@ -309,13 +259,8 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
       }
       break;
     }
-    case StyleAppearance::Separator:
-      aGtkWidgetType = MOZ_GTK_TOOLBAR_SEPARATOR;
-      break;
-    case StyleAppearance::Toolbargripper:
-      aGtkWidgetType = MOZ_GTK_GRIPPER;
-      break;
     case StyleAppearance::NumberInput:
+    case StyleAppearance::PasswordInput:
     case StyleAppearance::Textfield:
       aGtkWidgetType = MOZ_GTK_ENTRY;
       break;
@@ -323,47 +268,7 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
       aGtkWidgetType = MOZ_GTK_TEXT_VIEW;
       break;
     case StyleAppearance::Listbox:
-    case StyleAppearance::Treeview:
       aGtkWidgetType = MOZ_GTK_TREEVIEW;
-      break;
-    case StyleAppearance::Treeheadercell:
-      if (aWidgetFlags) {
-        // In this case, the flag denotes whether the header is the sorted one
-        // or not
-        if (GetTreeSortDirection(aFrame) == eTreeSortDirection_Natural)
-          *aWidgetFlags = false;
-        else
-          *aWidgetFlags = true;
-      }
-      aGtkWidgetType = MOZ_GTK_TREE_HEADER_CELL;
-      break;
-    case StyleAppearance::Treeheadersortarrow:
-      if (aWidgetFlags) {
-        switch (GetTreeSortDirection(aFrame)) {
-          case eTreeSortDirection_Ascending:
-            *aWidgetFlags = GTK_ARROW_DOWN;
-            break;
-          case eTreeSortDirection_Descending:
-            *aWidgetFlags = GTK_ARROW_UP;
-            break;
-          case eTreeSortDirection_Natural:
-          default:
-            /* This prevents the treecolums from getting smaller
-             * and wider when switching sort direction off and on
-             * */
-            *aWidgetFlags = GTK_ARROW_NONE;
-            break;
-        }
-      }
-      aGtkWidgetType = MOZ_GTK_TREE_HEADER_SORTARROW;
-      break;
-    case StyleAppearance::Treetwisty:
-      aGtkWidgetType = MOZ_GTK_TREEVIEW_EXPANDER;
-      if (aWidgetFlags) *aWidgetFlags = GTK_EXPANDER_COLLAPSED;
-      break;
-    case StyleAppearance::Treetwistyopen:
-      aGtkWidgetType = MOZ_GTK_TREEVIEW_EXPANDER;
-      if (aWidgetFlags) *aWidgetFlags = GTK_EXPANDER_EXPANDED;
       break;
     case StyleAppearance::MenulistButton:
     case StyleAppearance::Menulist:
@@ -371,9 +276,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
       if (aWidgetFlags)
         *aWidgetFlags =
             IsFrameContentNodeInNamespace(aFrame, kNameSpaceID_XHTML);
-      break;
-    case StyleAppearance::MozMenulistArrowButton:
-      aGtkWidgetType = MOZ_GTK_DROPDOWN_ARROW;
       break;
     case StyleAppearance::ToolbarbuttonDropdown:
     case StyleAppearance::ButtonArrowDown:
@@ -392,9 +294,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
           *aWidgetFlags = GTK_ARROW_LEFT;
       }
       break;
-    case StyleAppearance::Toolbar:
-      aGtkWidgetType = MOZ_GTK_TOOLBAR;
-      break;
     case StyleAppearance::Tooltip:
       aGtkWidgetType = MOZ_GTK_TOOLTIP;
       break;
@@ -411,14 +310,6 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
                                  : MOZ_GTK_PROGRESS_CHUNK_INDETERMINATE
                            : MOZ_GTK_PROGRESS_CHUNK;
     } break;
-    case StyleAppearance::TabScrollArrowBack:
-    case StyleAppearance::TabScrollArrowForward:
-      if (aWidgetFlags)
-        *aWidgetFlags = aAppearance == StyleAppearance::TabScrollArrowBack
-                            ? GTK_ARROW_LEFT
-                            : GTK_ARROW_RIGHT;
-      aGtkWidgetType = MOZ_GTK_TAB_SCROLLARROW;
-      break;
     case StyleAppearance::Tabpanels:
       aGtkWidgetType = MOZ_GTK_TABPANELS;
       break;
@@ -446,17 +337,14 @@ bool nsNativeThemeGTK::GetGtkWidgetAndState(StyleAppearance aAppearance,
       else
         aGtkWidgetType = MOZ_GTK_SPLITTER_HORIZONTAL;
       break;
-    case StyleAppearance::Menuarrow:
-      aGtkWidgetType = MOZ_GTK_MENUARROW;
-      break;
     case StyleAppearance::MozWindowTitlebar:
       aGtkWidgetType = MOZ_GTK_HEADER_BAR;
       break;
+    case StyleAppearance::MozWindowDecorations:
+      aGtkWidgetType = MOZ_GTK_WINDOW_DECORATION;
+      break;
     case StyleAppearance::MozWindowTitlebarMaximized:
       aGtkWidgetType = MOZ_GTK_HEADER_BAR_MAXIMIZED;
-      break;
-    case StyleAppearance::MozWindowButtonBox:
-      aGtkWidgetType = MOZ_GTK_HEADER_BAR_BUTTON_BOX;
       break;
     case StyleAppearance::MozWindowButtonClose:
       aGtkWidgetType = MOZ_GTK_HEADER_BAR_BUTTON_CLOSE;
@@ -739,16 +627,6 @@ CSSIntMargin nsNativeThemeGTK::GetExtraSizeForWidget(
   return extra;
 }
 
-bool nsNativeThemeGTK::IsWidgetVisible(StyleAppearance aAppearance) {
-  switch (aAppearance) {
-    case StyleAppearance::MozWindowButtonBox:
-      return false;
-    default:
-      break;
-  }
-  return true;
-}
-
 NS_IMETHODIMP
 nsNativeThemeGTK::DrawWidgetBackground(gfxContext* aContext, nsIFrame* aFrame,
                                        StyleAppearance aAppearance,
@@ -765,8 +643,7 @@ nsNativeThemeGTK::DrawWidgetBackground(gfxContext* aContext, nsIFrame* aFrame,
   GtkTextDirection direction = GetTextDirection(aFrame);
   gint flags;
 
-  if (!IsWidgetVisible(aAppearance) ||
-      !GetGtkWidgetAndState(aAppearance, aFrame, gtkWidgetType, &state,
+  if (!GetGtkWidgetAndState(aAppearance, aFrame, gtkWidgetType, &state,
                             &flags)) {
     return NS_OK;
   }
@@ -957,11 +834,6 @@ LayoutDeviceIntMargin nsNativeThemeGTK::GetWidgetBorder(
   CSSIntMargin result;
   GtkTextDirection direction = GetTextDirection(aFrame);
   switch (aAppearance) {
-    case StyleAppearance::Toolbox:
-      // gtk has no toolbox equivalent.  So, although we map toolbox to
-      // gtk's 'toolbar' for purposes of painting the widget background,
-      // we don't use the toolbar border for toolbox.
-      break;
     case StyleAppearance::Dualbutton:
       // TOOLBAR_DUAL_BUTTON is an interesting case.  We want a border to draw
       // around the entire button + dropdown, and also an inner border if you're
@@ -1000,26 +872,17 @@ bool nsNativeThemeGTK::GetWidgetPadding(nsDeviceContext* aContext,
   switch (aAppearance) {
     case StyleAppearance::Toolbarbutton:
     case StyleAppearance::Tooltip:
-    case StyleAppearance::MozWindowButtonBox:
     case StyleAppearance::MozWindowButtonClose:
     case StyleAppearance::MozWindowButtonMinimize:
     case StyleAppearance::MozWindowButtonMaximize:
     case StyleAppearance::MozWindowButtonRestore:
     case StyleAppearance::Dualbutton:
-    case StyleAppearance::TabScrollArrowBack:
-    case StyleAppearance::TabScrollArrowForward:
-    case StyleAppearance::MozMenulistArrowButton:
     case StyleAppearance::ToolbarbuttonDropdown:
     case StyleAppearance::ButtonArrowUp:
     case StyleAppearance::ButtonArrowDown:
     case StyleAppearance::ButtonArrowNext:
     case StyleAppearance::ButtonArrowPrevious:
     case StyleAppearance::RangeThumb:
-    // Radios and checkboxes return a fixed size in GetMinimumWidgetSize
-    // and have a meaningful baseline, so they can't have
-    // author-specified padding.
-    case StyleAppearance::Checkbox:
-    case StyleAppearance::Radio:
       aResult->SizeTo(0, 0, 0, 0);
       return true;
     default:
@@ -1055,7 +918,7 @@ auto nsNativeThemeGTK::IsWidgetNonNative(nsIFrame* aFrame,
   // If the current GTK theme color scheme matches our color-scheme, then we
   // can draw a native widget.
   if (LookAndFeel::ColorSchemeForFrame(aFrame) ==
-      LookAndFeel::ColorSchemeForChrome()) {
+      PreferenceSheet::ColorSchemeForChrome()) {
     return NonNative::No;
   }
 
@@ -1080,6 +943,14 @@ auto nsNativeThemeGTK::IsWidgetNonNative(nsIFrame* aFrame,
   }
 
   return NonNative::BecauseColorMismatch;
+}
+
+bool nsNativeThemeGTK::IsWidgetAlwaysNonNative(nsIFrame* aFrame,
+                                               StyleAppearance aAppearance) {
+  return Theme::IsWidgetAlwaysNonNative(aFrame, aAppearance) ||
+         aAppearance == StyleAppearance::MozMenulistArrowButton ||
+         aAppearance == StyleAppearance::Checkbox ||
+         aAppearance == StyleAppearance::Radio;
 }
 
 LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
@@ -1107,21 +978,6 @@ LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
                                        &result.width);
       }
     } break;
-    case StyleAppearance::TabScrollArrowBack:
-    case StyleAppearance::TabScrollArrowForward: {
-      moz_gtk_get_tab_scroll_arrow_size(&result.width, &result.height);
-    } break;
-    case StyleAppearance::MozMenulistArrowButton: {
-      moz_gtk_get_combo_box_entry_button_size(&result.width, &result.height);
-    } break;
-    case StyleAppearance::Checkbox:
-    case StyleAppearance::Radio: {
-      const ToggleGTKMetrics* metrics = GetToggleMetrics(
-          aAppearance == StyleAppearance::Radio ? MOZ_GTK_RADIOBUTTON
-                                                : MOZ_GTK_CHECKBUTTON);
-      result.width = metrics->minSizeWithBorder.width;
-      result.height = metrics->minSizeWithBorder.height;
-    } break;
     case StyleAppearance::ToolbarbuttonDropdown:
     case StyleAppearance::ButtonArrowUp:
     case StyleAppearance::ButtonArrowDown:
@@ -1133,30 +989,28 @@ LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
     case StyleAppearance::MozWindowButtonClose: {
       const ToolbarButtonGTKMetrics* metrics =
           GetToolbarButtonMetrics(MOZ_GTK_HEADER_BAR_BUTTON_CLOSE);
-      result.width = metrics->minSizeWithBorderMargin.width;
-      result.height = metrics->minSizeWithBorderMargin.height;
+      result.width = metrics->minSizeWithBorder.width;
+      result.height = metrics->minSizeWithBorder.height;
       break;
     }
     case StyleAppearance::MozWindowButtonMinimize: {
       const ToolbarButtonGTKMetrics* metrics =
           GetToolbarButtonMetrics(MOZ_GTK_HEADER_BAR_BUTTON_MINIMIZE);
-      result.width = metrics->minSizeWithBorderMargin.width;
-      result.height = metrics->minSizeWithBorderMargin.height;
+      result.width = metrics->minSizeWithBorder.width;
+      result.height = metrics->minSizeWithBorder.height;
       break;
     }
     case StyleAppearance::MozWindowButtonMaximize:
     case StyleAppearance::MozWindowButtonRestore: {
       const ToolbarButtonGTKMetrics* metrics =
           GetToolbarButtonMetrics(MOZ_GTK_HEADER_BAR_BUTTON_MAXIMIZE);
-      result.width = metrics->minSizeWithBorderMargin.width;
-      result.height = metrics->minSizeWithBorderMargin.height;
+      result.width = metrics->minSizeWithBorder.width;
+      result.height = metrics->minSizeWithBorder.height;
       break;
     }
     case StyleAppearance::Button:
     case StyleAppearance::Menulist:
-    case StyleAppearance::MenulistButton:
-    case StyleAppearance::Toolbarbutton:
-    case StyleAppearance::Treeheadercell: {
+    case StyleAppearance::MenulistButton: {
       if (aAppearance == StyleAppearance::Menulist ||
           aAppearance == StyleAppearance::MenulistButton) {
         // Include the arrow size.
@@ -1172,6 +1026,7 @@ LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
       result.height += border.TopBottom();
     } break;
     case StyleAppearance::NumberInput:
+    case StyleAppearance::PasswordInput:
     case StyleAppearance::Textfield: {
       gint contentHeight = 0;
       gint borderPaddingHeight = 0;
@@ -1205,27 +1060,6 @@ LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
         result.height = height;
       }
     } break;
-    case StyleAppearance::Separator: {
-      moz_gtk_get_toolbar_separator_width(&result.width);
-    } break;
-    case StyleAppearance::Spinner:
-      // hard code these sizes
-      result.width = 14;
-      result.height = 26;
-      break;
-    case StyleAppearance::Treeheadersortarrow:
-    case StyleAppearance::SpinnerUpbutton:
-    case StyleAppearance::SpinnerDownbutton:
-      // hard code these sizes
-      result.width = 14;
-      result.height = 13;
-      break;
-    case StyleAppearance::Treetwisty:
-    case StyleAppearance::Treetwistyopen: {
-      gint expander_size;
-      moz_gtk_get_treeview_expander_size(&expander_size);
-      result.width = result.height = expander_size;
-    } break;
     default:
       break;
   }
@@ -1234,60 +1068,16 @@ LayoutDeviceIntSize nsNativeThemeGTK::GetMinimumWidgetSize(
                                     GetWidgetScaleFactor(aFrame));
 }
 
-NS_IMETHODIMP
-nsNativeThemeGTK::WidgetStateChanged(nsIFrame* aFrame,
-                                     StyleAppearance aAppearance,
-                                     nsAtom* aAttribute, bool* aShouldRepaint,
-                                     const nsAttrValue* aOldValue) {
-  *aShouldRepaint = false;
-
-  if (IsWidgetNonNative(aFrame, aAppearance) != NonNative::No) {
-    return Theme::WidgetStateChanged(aFrame, aAppearance, aAttribute,
-                                     aShouldRepaint, aOldValue);
-  }
-
+bool nsNativeThemeGTK::WidgetAttributeChangeRequiresRepaint(
+    StyleAppearance aAppearance, nsAtom* aAttribute) {
   // Some widget types just never change state.
-  if (aAppearance == StyleAppearance::Toolbox ||
-      aAppearance == StyleAppearance::Toolbar ||
-      aAppearance == StyleAppearance::Progresschunk ||
+  if (aAppearance == StyleAppearance::Progresschunk ||
       aAppearance == StyleAppearance::ProgressBar ||
-      aAppearance == StyleAppearance::Tooltip) {
-    return NS_OK;
+      aAppearance == StyleAppearance::Tooltip ||
+      aAppearance == StyleAppearance::MozWindowDecorations) {
+    return false;
   }
-
-  if (aAppearance == StyleAppearance::MozWindowTitlebar ||
-      aAppearance == StyleAppearance::MozWindowTitlebarMaximized ||
-      aAppearance == StyleAppearance::MozWindowButtonClose ||
-      aAppearance == StyleAppearance::MozWindowButtonMinimize ||
-      aAppearance == StyleAppearance::MozWindowButtonMaximize ||
-      aAppearance == StyleAppearance::MozWindowButtonRestore) {
-    *aShouldRepaint = true;
-    return NS_OK;
-  }
-
-  // XXXdwh Not sure what can really be done here.  Can at least guess for
-  // specific widgets that they're highly unlikely to have certain states.
-  // For example, a toolbar doesn't care about any states.
-  if (!aAttribute) {
-    // Hover/focus/active changed.  Always repaint.
-    *aShouldRepaint = true;
-    return NS_OK;
-  }
-
-  // Check the attribute to see if it's relevant.
-  // disabled, checked, dlgtype, default, etc.
-  *aShouldRepaint = false;
-  if (aAttribute == nsGkAtoms::disabled || aAttribute == nsGkAtoms::checked ||
-      aAttribute == nsGkAtoms::selected ||
-      aAttribute == nsGkAtoms::visuallyselected ||
-      aAttribute == nsGkAtoms::focused || aAttribute == nsGkAtoms::readonly ||
-      aAttribute == nsGkAtoms::_default ||
-      aAttribute == nsGkAtoms::menuactive || aAttribute == nsGkAtoms::open ||
-      aAttribute == nsGkAtoms::parentfocused) {
-    *aShouldRepaint = true;
-    return NS_OK;
-  }
-  return NS_OK;
+  return Theme::WidgetAttributeChangeRequiresRepaint(aAppearance, aAttribute);
 }
 
 NS_IMETHODIMP
@@ -1320,10 +1110,6 @@ nsNativeThemeGTK::ThemeSupportsWidget(nsPresContext* aPresContext,
       [[fallthrough]];
 
     case StyleAppearance::Button:
-    case StyleAppearance::Radio:
-    case StyleAppearance::Checkbox:
-    case StyleAppearance::Toolbox:  // N/A
-    case StyleAppearance::Toolbar:
     case StyleAppearance::Toolbarbutton:
     case StyleAppearance::Dualbutton:  // so we can override the border with 0
     case StyleAppearance::ToolbarbuttonDropdown:
@@ -1331,55 +1117,28 @@ nsNativeThemeGTK::ThemeSupportsWidget(nsPresContext* aPresContext,
     case StyleAppearance::ButtonArrowDown:
     case StyleAppearance::ButtonArrowNext:
     case StyleAppearance::ButtonArrowPrevious:
-    case StyleAppearance::Separator:
-    case StyleAppearance::Toolbargripper:
     case StyleAppearance::Listbox:
-    case StyleAppearance::Treeview:
-      // case StyleAppearance::Treeitem:
-    case StyleAppearance::Treetwisty:
-      // case StyleAppearance::Treeline:
-      // case StyleAppearance::Treeheader:
-    case StyleAppearance::Treeheadercell:
-    case StyleAppearance::Treeheadersortarrow:
-    case StyleAppearance::Treetwistyopen:
     case StyleAppearance::ProgressBar:
     case StyleAppearance::Progresschunk:
     case StyleAppearance::Tab:
     // case StyleAppearance::Tabpanel:
     case StyleAppearance::Tabpanels:
-    case StyleAppearance::TabScrollArrowBack:
-    case StyleAppearance::TabScrollArrowForward:
     case StyleAppearance::Tooltip:
-    case StyleAppearance::Spinner:
-    case StyleAppearance::SpinnerUpbutton:
-    case StyleAppearance::SpinnerDownbutton:
-    case StyleAppearance::SpinnerTextfield:
     case StyleAppearance::NumberInput:
+    case StyleAppearance::PasswordInput:
     case StyleAppearance::Textfield:
     case StyleAppearance::Textarea:
     case StyleAppearance::Range:
     case StyleAppearance::RangeThumb:
-    case StyleAppearance::Menuarrow:
     case StyleAppearance::Splitter:
-    case StyleAppearance::MozWindowButtonBox:
     case StyleAppearance::MozWindowButtonClose:
     case StyleAppearance::MozWindowButtonMinimize:
     case StyleAppearance::MozWindowButtonMaximize:
     case StyleAppearance::MozWindowButtonRestore:
     case StyleAppearance::MozWindowTitlebar:
     case StyleAppearance::MozWindowTitlebarMaximized:
+    case StyleAppearance::MozWindowDecorations:
       return !IsWidgetStyled(aPresContext, aFrame, aAppearance);
-
-    case StyleAppearance::MozMenulistArrowButton:
-      if (aFrame && aFrame->GetWritingMode().IsVertical()) {
-        return false;
-      }
-      // "Native" dropdown buttons cause padding and margin problems, but only
-      // in HTML so allow them in XUL.
-      return (!aFrame ||
-              IsFrameContentNodeInNamespace(aFrame, kNameSpaceID_XUL)) &&
-             !IsWidgetStyled(aPresContext, aFrame, aAppearance);
-
     default:
       break;
   }
@@ -1390,12 +1149,7 @@ nsNativeThemeGTK::ThemeSupportsWidget(nsPresContext* aPresContext,
 NS_IMETHODIMP_(bool)
 nsNativeThemeGTK::WidgetIsContainer(StyleAppearance aAppearance) {
   // XXXdwh At some point flesh all of this out.
-  if (aAppearance == StyleAppearance::MozMenulistArrowButton ||
-      aAppearance == StyleAppearance::Radio ||
-      aAppearance == StyleAppearance::RangeThumb ||
-      aAppearance == StyleAppearance::Checkbox ||
-      aAppearance == StyleAppearance::TabScrollArrowBack ||
-      aAppearance == StyleAppearance::TabScrollArrowForward ||
+  if (aAppearance == StyleAppearance::RangeThumb ||
       aAppearance == StyleAppearance::ButtonArrowUp ||
       aAppearance == StyleAppearance::ButtonArrowDown ||
       aAppearance == StyleAppearance::ButtonArrowNext ||
@@ -1415,8 +1169,8 @@ bool nsNativeThemeGTK::ThemeDrawsFocusForWidget(nsIFrame* aFrame,
     case StyleAppearance::MenulistButton:
     case StyleAppearance::Textarea:
     case StyleAppearance::Textfield:
-    case StyleAppearance::Treeheadercell:
     case StyleAppearance::NumberInput:
+    case StyleAppearance::PasswordInput:
       return true;
     default:
       return false;

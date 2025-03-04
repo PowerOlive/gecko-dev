@@ -26,9 +26,8 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
     this.view = view;
     this.input = view.input;
     lazy.UrlbarPrefs.addObserver(this);
-    // Override the SearchOneOffs.jsm value for the Address Bar.
+    // Override the SearchOneOffs.sys.mjs value for the Address Bar.
     this.disableOneOffsHorizontalKeyNavigation = true;
-    this._webEngines = [];
   }
 
   /**
@@ -43,12 +42,8 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
 
   /**
    * Invoked when Web provided search engines list changes.
-   *
-   * @param {Array} engines Array of Web provided search engines. Each engine
-   *        is defined as  { icon, name, tooltip, uri }.
    */
-  updateWebEngines(engines) {
-    this._webEngines = engines;
+  updateWebEngines() {
     this.invalidateCache();
     if (this.view.isOpen) {
       this._rebuild();
@@ -62,6 +57,9 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
    *   True to enable, false to disable.
    */
   enable(enable) {
+    if (lazy.UrlbarPrefs.getScotchBonnetPref("scotchBonnet.disableOneOffs")) {
+      enable = false;
+    }
     if (enable) {
       this.telemetryOrigin = "urlbar";
       this.style.display = "";
@@ -112,7 +110,7 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
   }
 
   /**
-   * The selected one-off, a xul:button, including the search-settings button.
+   * The selected one-off including the search-settings button.
    *
    * @param {DOMElement|null} button
    *   The selected one-off button. Null if no one-off is selected.
@@ -165,8 +163,7 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
   }
 
   /**
-   * Called when a one-off is clicked. This is not called for the settings
-   * button.
+   * Called when a one-off is clicked.
    *
    * @param {event} event
    *   The event that triggered the pick.
@@ -322,15 +319,6 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
   }
 
   /**
-   * Overrides _getAddEngines to return engines that can be added.
-   *
-   * @returns {Array} engines
-   */
-  _getAddEngines() {
-    return this._webEngines;
-  }
-
-  /**
    * Overrides _rebuildEngineList to add the local one-offs.
    *
    * @param {Array} engines
@@ -338,8 +326,8 @@ export class UrlbarSearchOneOffs extends SearchOneOffs {
    * @param {Array} addEngines
    *        The engines that can be added.
    */
-  _rebuildEngineList(engines, addEngines) {
-    super._rebuildEngineList(engines, addEngines);
+  async _rebuildEngineList(engines, addEngines) {
+    await super._rebuildEngineList(engines, addEngines);
 
     for (let { source, pref, restrict } of lazy.UrlbarUtils
       .LOCAL_SEARCH_MODES) {

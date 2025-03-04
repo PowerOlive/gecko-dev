@@ -11,6 +11,7 @@
 #ifndef PC_CHANNEL_INTERFACE_H_
 #define PC_CHANNEL_INTERFACE_H_
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,7 +29,6 @@ class VideoBitrateAllocatorFactory;
 
 namespace cricket {
 
-class MediaChannel;
 class VoiceChannel;
 class VideoChannel;
 class MediaContentDescription;
@@ -79,6 +79,7 @@ class ChannelInterface {
   // Used for latency measurements.
   virtual void SetFirstPacketReceivedCallback(
       std::function<void()> callback) = 0;
+  virtual void SetFirstPacketSentCallback(std::function<void()> callback) = 0;
 
   // Channel control
   virtual bool SetLocalContent(const MediaContentDescription* content,

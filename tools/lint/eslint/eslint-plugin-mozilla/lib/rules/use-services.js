@@ -14,7 +14,7 @@ let servicesInterfaceMap = helpers.servicesData;
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/use-services.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/use-services.html",
     },
     // fixable: "code",
     messages: {
@@ -104,7 +104,7 @@ module.exports = {
           // would need to replace with `SpecialPowers.Services.${serviceName}`.
           // At the moment we do not have an easy way to detect that.
           // fix(fixer) {
-          //   let sourceCode = context.getSourceCode();
+          //   let sourceCode = context.sourceCode;
           //   return fixer.replaceTextRange(
           //     [
           //       sourceCode.getFirstToken(node.callee).range[0],

@@ -51,6 +51,19 @@ CSS_PSEUDO_ELEMENT(highlight, ":highlight", 0)
 CSS_PSEUDO_ELEMENT(selection, ":selection",
                    CSS_PSEUDO_ELEMENT_CONTAINS_ELEMENTS)
 
+CSS_PSEUDO_ELEMENT(targetText, ":target-text", 0)
+
+CSS_PSEUDO_ELEMENT(viewTransition, ":view-transition",
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
+CSS_PSEUDO_ELEMENT(viewTransitionGroup, ":view-transition-group",
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
+CSS_PSEUDO_ELEMENT(viewTransitionImagePair, ":view-transition-image-pair",
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
+CSS_PSEUDO_ELEMENT(viewTransitionOld, ":view-transition-old",
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
+CSS_PSEUDO_ELEMENT(viewTransitionNew, ":view-transition-new",
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
+
 // XXXbz should we really allow random content to style these?  Maybe
 // use our flags to prevent that?
 CSS_PSEUDO_ELEMENT(mozFocusInner, ":-moz-focus-inner", 0)
@@ -93,5 +106,17 @@ CSS_PSEUDO_ELEMENT(mozTextControlPreview, ":-moz-text-control-preview",
 CSS_PSEUDO_ELEMENT(mozReveal, ":-moz-reveal",
                    CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS)
 
+// The button in an <input type=file>
 CSS_PSEUDO_ELEMENT(fileSelectorButton, ":file-selector-button",
                    CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE)
+
+// Standard progress/meter/range pseudo-elements.
+CSS_PSEUDO_ELEMENT(sliderTrack, ":slider-track",
+                   CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE |
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS_AND_CHROME)
+CSS_PSEUDO_ELEMENT(sliderThumb, ":slider-thumb",
+                   CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE |
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS_AND_CHROME)
+CSS_PSEUDO_ELEMENT(sliderFill, ":slider-fill",
+                   CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE |
+                   CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS_AND_CHROME)

@@ -2,16 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { BaseFeature } from "resource:///modules/urlbar/private/BaseFeature.sys.mjs";
+import { SuggestProvider } from "resource:///modules/urlbar/private/SuggestFeature.sys.mjs";
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   QuickSuggest: "resource:///modules/QuickSuggest.sys.mjs",
-  QuickSuggestRemoteSettings:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
-  SuggestionsMap:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   UrlbarResult: "resource:///modules/UrlbarResult.sys.mjs",
   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
@@ -27,28 +23,21 @@ const RESULT_MENU_COMMAND = {
 /**
  * A feature that manages Pocket suggestions in remote settings.
  */
-export class PocketSuggestions extends BaseFeature {
-  constructor() {
-    super();
-    this.#lowConfidenceSuggestionsMap = new lazy.SuggestionsMap();
-    this.#highConfidenceSuggestionsMap = new lazy.SuggestionsMap();
-  }
-
-  get shouldEnable() {
-    return (
-      lazy.UrlbarPrefs.get("quickSuggestRemoteSettingsEnabled") &&
-      lazy.UrlbarPrefs.get("pocketFeatureGate") &&
-      lazy.UrlbarPrefs.get("suggest.pocket") &&
-      lazy.UrlbarPrefs.get("suggest.quicksuggest.nonsponsored")
-    );
-  }
-
+export class PocketSuggestions extends SuggestProvider {
   get enablingPreferences() {
-    return ["suggest.pocket", "suggest.quicksuggest.nonsponsored"];
+    return [
+      "pocketFeatureGate",
+      "suggest.pocket",
+      "suggest.quicksuggest.nonsponsored",
+    ];
   }
 
   get merinoProvider() {
     return "pocket";
+  }
+
+  get rustSuggestionType() {
+    return "Pocket";
   }
 
   get showLessFrequentlyCount() {
@@ -59,90 +48,9 @@ export class PocketSuggestions extends BaseFeature {
   get canShowLessFrequently() {
     let cap =
       lazy.UrlbarPrefs.get("pocketShowLessFrequentlyCap") ||
-      lazy.QuickSuggestRemoteSettings.config.show_less_frequently_cap ||
+      lazy.QuickSuggest.config.showLessFrequentlyCap ||
       0;
     return !cap || this.showLessFrequentlyCount < cap;
-  }
-
-  enable(enabled) {
-    if (enabled) {
-      lazy.QuickSuggestRemoteSettings.register(this);
-    } else {
-      lazy.QuickSuggestRemoteSettings.unregister(this);
-      this.#lowConfidenceSuggestionsMap.clear();
-      this.#highConfidenceSuggestionsMap.clear();
-    }
-  }
-
-  async queryRemoteSettings(searchString) {
-    // If the search string matches high confidence suggestions, they should be
-    // treated as top picks. Otherwise try to match low confidence suggestions.
-    let is_top_pick = false;
-    let suggestions = this.#highConfidenceSuggestionsMap.get(searchString);
-    if (suggestions.length) {
-      is_top_pick = true;
-    } else {
-      suggestions = this.#lowConfidenceSuggestionsMap.get(searchString);
-    }
-
-    let lowerSearchString = searchString.toLocaleLowerCase();
-    return suggestions.map(suggestion => {
-      // Add `full_keyword` to each matched suggestion. It should be the longest
-      // keyword that starts with the user's search string.
-      let full_keyword = lowerSearchString;
-      let keywords = is_top_pick
-        ? suggestion.highConfidenceKeywords
-        : suggestion.lowConfidenceKeywords;
-      for (let keyword of keywords) {
-        if (
-          keyword.startsWith(lowerSearchString) &&
-          full_keyword.length < keyword.length
-        ) {
-          full_keyword = keyword;
-        }
-      }
-      return { ...suggestion, is_top_pick, full_keyword };
-    });
-  }
-
-  async onRemoteSettingsSync(rs) {
-    let records = await rs.get({ filters: { type: "pocket-suggestions" } });
-    if (!this.isEnabled) {
-      return;
-    }
-
-    let lowMap = new lazy.SuggestionsMap();
-    let highMap = new lazy.SuggestionsMap();
-
-    this.logger.debug(`Got ${records.length} records`);
-    for (let record of records) {
-      let { buffer } = await rs.attachments.download(record);
-      if (!this.isEnabled) {
-        return;
-      }
-
-      let suggestions = JSON.parse(new TextDecoder("utf-8").decode(buffer));
-      this.logger.debug(`Adding ${suggestions.length} suggestions`);
-
-      await lowMap.add(suggestions, {
-        keywordsProperty: "lowConfidenceKeywords",
-        mapKeyword:
-          lazy.SuggestionsMap.MAP_KEYWORD_PREFIXES_STARTING_AT_FIRST_WORD,
-      });
-      if (!this.isEnabled) {
-        return;
-      }
-
-      await highMap.add(suggestions, {
-        keywordsProperty: "highConfidenceKeywords",
-      });
-      if (!this.isEnabled) {
-        return;
-      }
-    }
-
-    this.#lowConfidenceSuggestionsMap = lowMap;
-    this.#highConfidenceSuggestionsMap = highMap;
   }
 
   makeResult(queryContext, suggestion, searchString) {
@@ -166,10 +74,17 @@ export class PocketSuggestions extends BaseFeature {
       }
     }
 
-    let isBestMatch =
-      suggestion.is_top_pick &&
-      lazy.UrlbarPrefs.get("bestMatchEnabled") &&
-      lazy.UrlbarPrefs.get("suggest.bestmatch");
+    // Merino will set `is_top_pick` if the suggestion should be a best match.
+    let isBestMatch = !!suggestion.is_top_pick;
+
+    if (suggestion.source == "rust") {
+      isBestMatch = suggestion.isTopPick;
+
+      // The Rust component doesn't implement these properties. For now we use
+      // dummy values. See issue #5878 in application-services.
+      suggestion.description = suggestion.title;
+      suggestion.full_keyword = searchString;
+    }
 
     let url = new URL(suggestion.url);
     url.searchParams.set("utm_medium", "firefox-desktop");
@@ -179,6 +94,21 @@ export class PocketSuggestions extends BaseFeature {
       "pocket-collections-in-the-address-bar"
     );
     url.searchParams.set("utm_content", "treatment");
+
+    let resultProperties = {
+      isBestMatch,
+      isRichSuggestion: true,
+      richSuggestionIconSize: isBestMatch ? 24 : 16,
+      showFeedbackMenu: true,
+    };
+
+    if (!isBestMatch) {
+      let suggestedIndex = lazy.UrlbarPrefs.get("pocketSuggestIndex");
+      if (suggestedIndex !== null) {
+        resultProperties.isSuggestedIndexRelativeToGroup = true;
+        resultProperties.suggestedIndex = suggestedIndex;
+      }
+    }
 
     return Object.assign(
       new lazy.UrlbarResult(
@@ -207,41 +137,38 @@ export class PocketSuggestions extends BaseFeature {
           helpUrl: lazy.QuickSuggest.HELP_URL,
         })
       ),
-      {
-        isRichSuggestion: true,
-        richSuggestionIconSize: isBestMatch ? 24 : 16,
-        showFeedbackMenu: true,
-      }
+      resultProperties
     );
   }
 
-  handleCommand(view, result, selType) {
-    switch (selType) {
+  onEngagement(queryContext, controller, details, _searchString) {
+    let { result } = details;
+    switch (details.selType) {
       case RESULT_MENU_COMMAND.HELP:
         // "help" is handled by UrlbarInput, no need to do anything here.
         break;
       // selType == "dismiss" when the user presses the dismiss key shortcut.
       case "dismiss":
       case RESULT_MENU_COMMAND.NOT_RELEVANT:
-        // PocketSuggestions adds the UTM parameters to the original URL and
-        // returns it as payload.url in the result. However, as
-        // UrlbarProviderQuickSuggest filters suggestions with original URL of
-        // provided suggestions, need to use the original URL when adding to the
-        // block list.
-        lazy.QuickSuggest.blockedSuggestions.add(result.payload.originalUrl);
-        view.acknowledgeDismissal(result, {
+        lazy.QuickSuggest.blockedSuggestions.blockResult(result);
+        result.acknowledgeDismissalL10n = {
           id: "firefox-suggest-dismissal-acknowledgment-one",
-        });
+        };
+        controller.removeResult(result);
         break;
       case RESULT_MENU_COMMAND.NOT_INTERESTED:
         lazy.UrlbarPrefs.set("suggest.pocket", false);
-        view.acknowledgeDismissal(result, {
+        result.acknowledgeDismissalL10n = {
           id: "firefox-suggest-dismissal-acknowledgment-all",
-        });
+        };
+        controller.removeResult(result);
         break;
       case RESULT_MENU_COMMAND.SHOW_LESS_FREQUENTLY:
-        view.acknowledgeFeedback(result);
+        controller.view.acknowledgeFeedback(result);
         this.incrementShowLessFrequentlyCount();
+        if (!this.canShowLessFrequently) {
+          controller.view.invalidateResultMenuCommands();
+        }
         break;
     }
   }
@@ -298,7 +225,4 @@ export class PocketSuggestions extends BaseFeature {
       );
     }
   }
-
-  #lowConfidenceSuggestionsMap;
-  #highConfidenceSuggestionsMap;
 }

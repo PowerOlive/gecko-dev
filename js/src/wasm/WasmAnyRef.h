@@ -127,27 +127,8 @@ class AnyRef {
   // Given a 32-bit signed integer within 31-bit signed bounds, turn it into
   // an AnyRef.
   static AnyRef fromInt32(int32_t value) {
-    // The value must be within 31-bit signed bounds for the logic below to
-    // work.
     MOZ_ASSERT(!int32NeedsBoxing(value));
-    // Extend the value to the native pointer size, and make it unsigned to
-    // avoid undefined behavior.
-    uintptr_t wideValue = (uintptr_t)value;
-    // Left shift the value by 1, truncating the high bit.
-    //
-    // There are four cases here based on the two high bits:
-    //   00 - [0, MaxI31Value]
-    //   01 - (MaxI31Value, INT32_MAX]
-    //   10 - [INT32_MIN, MinI31Value)
-    //   11 - [MinI31Value, -1]
-    //
-    // The middle two cases can be ruled out, because the value is guaranteed
-    // to be within the i31 range. Therefore if we truncate the high bit upon
-    // converting to i31 and perform a signed widening upon converting back to
-    // i32, we can losslessly represent all i31 values.
-    uintptr_t shiftedValue = wideValue << 1;
-    uintptr_t taggedValue = shiftedValue | (uintptr_t)AnyRefTag::I31;
-    return AnyRef(taggedValue);
+    return AnyRef::fromUint32Truncate(uint32_t(value));
   }
 
  public:
@@ -209,6 +190,58 @@ class AnyRef {
   // value failed due to an OOM.
   static bool fromJSValue(JSContext* cx, JS::HandleValue value,
                           JS::MutableHandle<AnyRef> result);
+
+  // fromUint32Truncate will produce an i31 from an int32 by truncating the
+  // highest bit. For values in the 31-bit range, this losslessly preserves the
+  // value. For values outside the 31-bit range, this performs 31-bit
+  // wraparound.
+  //
+  // There are four cases here based on the two high bits:
+  //   00 - [0, MaxI31Value]
+  //   01 - (MaxI31Value, INT32_MAX]
+  //   10 - [INT32_MIN, MinI31Value)
+  //   11 - [MinI31Value, -1]
+  //
+  // The middle two cases can be ruled out if the value is guaranteed to be
+  // within the i31 range. Therefore if we truncate the high bit upon converting
+  // to i31 and perform a signed widening upon converting back to i32, we can
+  // losslessly represent all i31 values.
+  static AnyRef fromUint32Truncate(uint32_t value) {
+    // See 64-bit GPRs carrying 32-bit values invariants in MacroAssember.h
+#if defined(JS_CODEGEN_NONE) || defined(JS_CODEGEN_X64) || \
+    defined(JS_CODEGEN_ARM64)
+    // Truncate the value to the 31-bit value size.
+    uintptr_t wideValue = uintptr_t(value & 0x7FFFFFFF);
+#elif defined(JS_CODEGEN_LOONG64) || defined(JS_CODEGEN_MIPS64) || \
+    defined(JS_CODEGEN_RISCV64)
+    // Sign extend the value to the native pointer size.
+    uintptr_t wideValue = uintptr_t(int64_t((uint64_t(value) << 33)) >> 33);
+#elif !defined(JS_64BIT)
+    // Transfer 32-bit value as is.
+    uintptr_t wideValue = (uintptr_t)value;
+#else
+#  error "unknown architecture"
+#endif
+
+    // Left shift the value by 1, truncating the high bit.
+    uintptr_t shiftedValue = wideValue << 1;
+    uintptr_t taggedValue = shiftedValue | (uintptr_t)AnyRefTag::I31;
+#ifdef JS_64BIT
+    debugAssertCanonicalInt32(taggedValue);
+#endif
+    return AnyRef(taggedValue);
+  }
+
+#ifdef JS_64BIT
+  // Ensure the value fits into a 32-bits integer on 64-bits platforms.
+  static void debugAssertCanonicalInt32(uintptr_t value) {
+#  ifdef DEBUG
+#    if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_ARM64)
+    MOZ_ASSERT(value <= UINT32_MAX);
+#    endif
+#  endif
+  }
+#endif
 
   static bool int32NeedsBoxing(int32_t value) {
     // We can represent every signed 31-bit number without boxing
@@ -297,8 +330,12 @@ class AnyRef {
   // Unpack an i31, interpreting the integer as signed.
   int32_t toI31() const {
     MOZ_ASSERT(isI31());
+#ifdef JS_64BIT
+    debugAssertCanonicalInt32(value_);
+#endif
     // On 64-bit targets, we only care about the low 4-bytes.
-    uint32_t truncatedValue = *reinterpret_cast<const uint32_t*>(&value_);
+    uint32_t truncatedValue;
+    memcpy(&truncatedValue, &value_, sizeof(uint32_t));
     // Perform a right arithmetic shift (see AnyRef::fromI31 for more details),
     // avoiding undefined behavior by using an unsigned type.
     uint32_t shiftedValue = value_ >> 1;
@@ -306,7 +343,7 @@ class AnyRef {
       shiftedValue |= (1 << 31);
     }
     // Perform a bitwise cast to see the result as a signed value.
-    return *reinterpret_cast<int32_t*>(&shiftedValue);
+    return mozilla::BitwiseCast<int32_t>(shiftedValue);
   }
 
   // Convert from AnyRef to a JS Value. This currently does not require any
@@ -341,7 +378,9 @@ class WrappedPtrOperations<wasm::AnyRef, Wrapper> {
   bool isNull() const { return value().isNull(); }
   bool isI31() const { return value().isI31(); }
   bool isJSObject() const { return value().isJSObject(); }
+  bool isJSString() const { return value().isJSString(); }
   JSObject& toJSObject() const { return value().toJSObject(); }
+  JSString* toJSString() const { return value().toJSString(); }
 };
 
 // If the Value is a GC pointer type, call |f| with the pointer cast to that

@@ -28,7 +28,7 @@ ChromiumCDMChild::ChromiumCDMChild(GMPContentChild* aPlugin)
   GMP_LOG_DEBUG("ChromiumCDMChild:: ctor this=%p", this);
 }
 
-void ChromiumCDMChild::Init(cdm::ContentDecryptionModule_10* aCDM,
+void ChromiumCDMChild::Init(cdm::ContentDecryptionModule_11* aCDM,
                             const nsACString& aStorageId) {
   MOZ_ASSERT(IsOnMessageLoopThread());
   mCDM = aCDM;
@@ -367,6 +367,13 @@ void ChromiumCDMChild::RequestStorageId(uint32_t aVersion) {
                     mStorageId.Length());
 }
 
+void ChromiumCDMChild::ReportMetrics(cdm::MetricName aMetricName,
+                                     uint64_t aValue) {
+  GMP_LOG_DEBUG("ChromiumCDMChild::ReportMetrics() aMetricName=%" PRIu32
+                ", aValue=%" PRIu64,
+                aMetricName, aValue);
+}
+
 ChromiumCDMChild::~ChromiumCDMChild() {
   GMP_LOG_DEBUG("ChromiumCDMChild:: dtor this=%p", this);
 }
@@ -450,7 +457,7 @@ mozilla::ipc::IPCResult ChromiumCDMChild::RecvCreateSessionAndGenerateRequest(
       "pid=%" PRIu32 ", sessionType=%" PRIu32 ", initDataType=%" PRIu32
       ") initDataLen=%zu",
       aPromiseId, aSessionType, aInitDataType, aInitData.Length());
-  MOZ_ASSERT(aSessionType <= cdm::SessionType::kPersistentUsageRecord);
+  MOZ_ASSERT(aSessionType <= cdm::SessionType::kPersistentLicense);
   MOZ_ASSERT(aInitDataType <= cdm::InitDataType::kWebM);
   if (mCDM) {
     mCDM->CreateSessionAndGenerateRequest(
@@ -783,12 +790,12 @@ void ChromiumCDMChild::ReturnOutput(WidevineVideoFrame& aFrame) {
   output.mFormat() = static_cast<cdm::VideoFormat>(aFrame.Format());
   output.mImageWidth() = aFrame.Size().width;
   output.mImageHeight() = aFrame.Size().height;
-  output.mYPlane() = {aFrame.PlaneOffset(cdm::VideoPlane::kYPlane),
-                      aFrame.Stride(cdm::VideoPlane::kYPlane)};
-  output.mUPlane() = {aFrame.PlaneOffset(cdm::VideoPlane::kUPlane),
-                      aFrame.Stride(cdm::VideoPlane::kUPlane)};
-  output.mVPlane() = {aFrame.PlaneOffset(cdm::VideoPlane::kVPlane),
-                      aFrame.Stride(cdm::VideoPlane::kVPlane)};
+  output.mYPlane() = {aFrame.PlaneOffset(cdm::kYPlane),
+                      aFrame.Stride(cdm::kYPlane)};
+  output.mUPlane() = {aFrame.PlaneOffset(cdm::kUPlane),
+                      aFrame.Stride(cdm::kUPlane)};
+  output.mVPlane() = {aFrame.PlaneOffset(cdm::kVPlane),
+                      aFrame.Stride(cdm::kVPlane)};
   output.mTimestamp() = aFrame.Timestamp();
 
   uint64_t duration = 0;

@@ -1,13 +1,16 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-/* import-globals-from pippki.js */
+
 "use strict";
 
 const gCertFileTypes = "*.p7b; *.crt; *.cert; *.cer; *.pem; *.der";
 
 var { NetUtil } = ChromeUtils.importESModule(
   "resource://gre/modules/NetUtil.sys.mjs"
+);
+const { exportToFile, viewCertHelper } = ChromeUtils.importESModule(
+  "resource://gre/modules/psm/pippki.sys.mjs"
 );
 
 var key;
@@ -541,7 +544,7 @@ async function backupCerts() {
     { id: "choose-p12-backup-file-dialog" },
     { id: "file-browse-pkcs12-spec" },
   ]);
-  fp.init(window, backupFileDialog, Ci.nsIFilePicker.modeSave);
+  fp.init(window.browsingContext, backupFileDialog, Ci.nsIFilePicker.modeSave);
   fp.appendFilter(filePkcs12Spec, "*.p12");
   fp.appendFilters(Ci.nsIFilePicker.filterAll);
   fp.defaultExtension = "p12";
@@ -590,7 +593,7 @@ async function restoreCerts() {
       { id: "file-browse-pkcs12-spec" },
       { id: "file-browse-certificate-spec" },
     ]);
-  fp.init(window, restoreFileDialog, Ci.nsIFilePicker.modeOpen);
+  fp.init(window.browsingContext, restoreFileDialog, Ci.nsIFilePicker.modeOpen);
   fp.appendFilter(filePkcs12Spec, "*.p12; *.pfx");
   fp.appendFilter(fileCertSpec, gCertFileTypes);
   fp.appendFilters(Ci.nsIFilePicker.filterAll);
@@ -668,7 +671,7 @@ async function exportCerts() {
   getSelectedCerts();
 
   for (let cert of selected_certs) {
-    await exportToFile(window, cert);
+    await exportToFile(window, document, cert);
   }
 }
 
@@ -736,7 +739,7 @@ async function addCACerts() {
     { id: "import-ca-certs-prompt" },
     { id: "file-browse-certificate-spec" },
   ]);
-  fp.init(window, importCa, Ci.nsIFilePicker.modeOpen);
+  fp.init(window.browsingContext, importCa, Ci.nsIFilePicker.modeOpen);
   fp.appendFilter(fileCertSpec, gCertFileTypes);
   fp.appendFilters(Ci.nsIFilePicker.filterAll);
   fp.open(rv => {
@@ -755,7 +758,7 @@ async function addEmailCert() {
     { id: "import-email-cert-prompt" },
     { id: "file-browse-certificate-spec" },
   ]);
-  fp.init(window, importEmail, Ci.nsIFilePicker.modeOpen);
+  fp.init(window.browsingContext, importEmail, Ci.nsIFilePicker.modeOpen);
   fp.appendFilter(fileCertSpec, gCertFileTypes);
   fp.appendFilters(Ci.nsIFilePicker.filterAll);
   fp.open(rv => {

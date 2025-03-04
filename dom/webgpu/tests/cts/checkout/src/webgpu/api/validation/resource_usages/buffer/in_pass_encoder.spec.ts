@@ -4,6 +4,7 @@ Buffer Usages Validation Tests in Render Pass and Compute Pass.
 
 import { makeTestGroup } from '../../../../../common/framework/test_group.js';
 import { assert, unreachable } from '../../../../../common/util/util.js';
+import { GPUTestBase, MaxLimitsTestMixin } from '../../../../gpu_test.js';
 import { ValidationTest } from '../../validation_test.js';
 
 const kBoundBufferSize = 256;
@@ -27,6 +28,10 @@ export const kAllBufferUsages: BufferUsage[] = [
   'indexedIndirect',
 ];
 
+function resourceVisibilityToVisibility(resourceVisibility: 'compute' | 'fragment') {
+  return resourceVisibility === 'compute' ? GPUShaderStage.COMPUTE : GPUShaderStage.FRAGMENT;
+}
+
 export class BufferResourceUsageTest extends ValidationTest {
   createBindGroupLayoutForTest(
     type: 'uniform' | 'storage' | 'read-only-storage',
@@ -34,8 +39,7 @@ export class BufferResourceUsageTest extends ValidationTest {
   ): GPUBindGroupLayout {
     const bindGroupLayoutEntry: GPUBindGroupLayoutEntry = {
       binding: 0,
-      visibility:
-        resourceVisibility === 'compute' ? GPUShaderStage.COMPUTE : GPUShaderStage.FRAGMENT,
+      visibility: resourceVisibilityToVisibility(resourceVisibility),
       buffer: {
         type,
       },
@@ -63,7 +67,7 @@ export class BufferResourceUsageTest extends ValidationTest {
   }
 
   beginSimpleRenderPass(encoder: GPUCommandEncoder) {
-    const colorTexture = this.device.createTexture({
+    const colorTexture = this.createTextureTracked({
       format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
       size: [16, 16, 1],
@@ -138,7 +142,45 @@ function IsBufferUsageInBindGroup(bufferUsage: BufferUsage): boolean {
   }
 }
 
-export const g = makeTestGroup(BufferResourceUsageTest);
+function skipIfStorageBuffersNotAvailableInStages(
+  t: GPUTestBase,
+  visibility: number,
+  numRequired: number
+) {
+  if (t.isCompatibility) {
+    t.skipIf(
+      (visibility & GPUShaderStage.FRAGMENT) !== 0 &&
+        !(t.device.limits.maxStorageBuffersInFragmentStage! >= numRequired),
+      `maxStorageBuffersInFragmentStage${t.device.limits.maxStorageBuffersInFragmentStage} < ${numRequired}`
+    );
+    t.skipIf(
+      (visibility & GPUShaderStage.VERTEX) !== 0 &&
+        !(t.device.limits.maxStorageBuffersInVertexStage! >= numRequired),
+      `maxStorageBuffersInVertexStage${t.device.limits.maxStorageBuffersInVertexStage} < ${numRequired}`
+    );
+  }
+}
+
+/**
+ * Skips test if usage is a storage buffer and there are not numRequired
+ * storage buffers supported for the given visibility.
+ */
+export function skipIfStorageBuffersUsedAndNotAvailableInStages(
+  t: GPUTestBase,
+  usage: BufferUsage | 'copy-src' | 'copy-dst',
+  visibility: 'fragment' | 'compute',
+  numRequired: number
+) {
+  if (usage === 'storage' || usage === 'read-only-storage') {
+    skipIfStorageBuffersNotAvailableInStages(
+      t,
+      resourceVisibilityToVisibility(visibility),
+      numRequired
+    );
+  }
+}
+
+export const g = makeTestGroup(MaxLimitsTestMixin(BufferResourceUsageTest));
 
 g.test('subresources,buffer_usage_in_one_compute_pass_with_no_dispatch')
   .desc(
@@ -156,8 +198,21 @@ bindGroup, dynamicOffsets), do not contribute directly to a usage scope.`
       .combine('visibility1', ['compute', 'fragment'] as const)
       .combine('hasOverlap', [true, false])
   )
-  .fn(async t => {
+  .fn(t => {
     const { usage0, usage1, visibility0, visibility1, hasOverlap } = t.params;
+    const numStorageBuffersNeededInFragmentStage = 1;
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage0,
+      visibility0,
+      numStorageBuffersNeededInFragmentStage
+    );
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage1,
+      visibility1,
+      numStorageBuffersNeededInFragmentStage
+    );
 
     const buffer = t.createBufferWithState('valid', {
       size: kBoundBufferSize * 2,
@@ -188,7 +243,11 @@ g.test('subresources,buffer_usage_in_one_compute_pass_with_one_dispatch')
 Test that when one buffer is used in one compute pass encoder, its list of internal usages within
 one usage scope can only be a compatible usage list. According to WebGPU SPEC, within one dispatch,
 for each bind group slot that is used by the current GPUComputePipeline's layout, every subresource
-referenced by that bind group is "used" in the usage scope. `
+referenced by that bind group is "used" in the usage scope.
+
+For both usage === storage, there is writable buffer binding aliasing so we skip this case and will
+have tests covered (https://github.com/gpuweb/cts/issues/2232)
+`
   )
   .params(u =>
     u
@@ -231,11 +290,16 @@ referenced by that bind group is "used" in the usage scope. `
         ) {
           return false;
         }
+
+        // Avoid writable storage buffer bindings aliasing.
+        if (t.usage0 === 'storage' && t.usage1 === 'storage') {
+          return false;
+        }
         return true;
       })
       .combine('hasOverlap', [true, false])
   )
-  .fn(async t => {
+  .fn(t => {
     const {
       usage0AccessibleInDispatch,
       usage1AccessibleInDispatch,
@@ -246,6 +310,19 @@ referenced by that bind group is "used" in the usage scope. `
       visibility1,
       hasOverlap,
     } = t.params;
+    const numStorageBuffersNeededInFragmentStage = 1;
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage0,
+      visibility0,
+      numStorageBuffersNeededInFragmentStage
+    );
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage1,
+      visibility1,
+      numStorageBuffersNeededInFragmentStage
+    );
 
     const buffer = t.createBufferWithState('valid', {
       size: kBoundBufferSize * 2,
@@ -381,7 +458,7 @@ dispatch calls refer to different usage scopes.`
       .combine('inSamePass', [true, false])
       .combine('hasOverlap', [true, false])
   )
-  .fn(async t => {
+  .fn(t => {
     const { usage0, usage1, inSamePass, hasOverlap } = t.params;
 
     const UseBufferOnComputePassEncoder = (
@@ -464,8 +541,22 @@ there is no draw call in the render pass.
       .combine('visibility1', ['compute', 'fragment'] as const)
       .unless(t => t.visibility1 === 'compute' && !IsBufferUsageInBindGroup(t.usage1))
   )
-  .fn(async t => {
+  .fn(t => {
     const { usage0, usage1, hasOverlap, visibility0, visibility1 } = t.params;
+
+    const numStorageBuffersNeededInFragmentStage = 1;
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage0,
+      visibility0,
+      numStorageBuffersNeededInFragmentStage
+    );
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage1,
+      visibility1,
+      numStorageBuffersNeededInFragmentStage
+    );
 
     const UseBufferOnRenderPassEncoder = (
       buffer: GPUBuffer,
@@ -526,7 +617,11 @@ g.test('subresources,buffer_usage_in_one_render_pass_with_one_draw')
 Test that when one buffer is used in one render pass encoder where there is one draw call, its list
 of internal usages within one usage scope (all the commands in the whole render pass) can only be a
 compatible usage list. The usage scope rules are not related to the buffer offset or the bind group
-layout visibilities.`
+layout visibilities.
+
+For both usage === storage, there is writable buffer binding aliasing so we skip this case and will
+have tests covered (https://github.com/gpuweb/cts/issues/2232)
+`
   )
   .params(u =>
     u
@@ -557,6 +652,11 @@ layout visibilities.`
         }
         // As usage1 is accessible in the draw call, the draw call cannot be before usage1.
         if (t.drawBeforeUsage1 && t.usage1AccessibleInDraw) {
+          return false;
+        }
+
+        // Avoid writable storage buffer bindings aliasing.
+        if (t.usage0 === 'storage' && t.usage1 === 'storage') {
           return false;
         }
         return true;
@@ -593,7 +693,7 @@ layout visibilities.`
       })
       .combine('hasOverlap', [true, false])
   )
-  .fn(async t => {
+  .fn(t => {
     const {
       // Buffer with usage0 will be "used" in the draw call if this value is true.
       usage0AccessibleInDraw,
@@ -609,6 +709,21 @@ layout visibilities.`
       visibility1,
       hasOverlap,
     } = t.params;
+
+    const numStorageBuffersNeededInFragmentStage = 1;
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage0,
+      visibility0,
+      numStorageBuffersNeededInFragmentStage
+    );
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage1,
+      visibility1,
+      numStorageBuffersNeededInFragmentStage
+    );
+
     const buffer = t.createBufferWithState('valid', {
       size: kBoundBufferSize * 2,
       usage:
@@ -676,7 +791,7 @@ layout visibilities.`
           renderPassEncoder.drawIndirect(buffer, offset);
           break;
         case 'indexedIndirect': {
-          const indexBuffer = t.device.createBuffer({
+          const indexBuffer = t.createBufferTracked({
             size: 4,
             usage: GPUBufferUsage.INDEX,
           });
@@ -820,7 +935,7 @@ different render pass encoders belong to different usage scopes.`
       .combine('inSamePass', [true, false])
       .combine('hasOverlap', [true, false])
   )
-  .fn(async t => {
+  .fn(t => {
     const { usage0, usage1, inSamePass, hasOverlap } = t.params;
     const buffer = t.createBufferWithState('valid', {
       size: kBoundBufferSize * 2,
@@ -831,6 +946,21 @@ different render pass encoders belong to different usage scopes.`
         GPUBufferUsage.INDEX |
         GPUBufferUsage.INDIRECT,
     });
+
+    const numStorageBuffersNeededInFragmentStage = 1;
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage0,
+      'fragment',
+      numStorageBuffersNeededInFragmentStage
+    );
+    skipIfStorageBuffersUsedAndNotAvailableInStages(
+      t,
+      usage1,
+      'fragment',
+      numStorageBuffersNeededInFragmentStage
+    );
+
     const UseBufferOnRenderPassEncoderInDrawCall = (
       offset: number,
       usage: BufferUsage,

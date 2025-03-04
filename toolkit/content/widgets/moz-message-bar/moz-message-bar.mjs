@@ -4,6 +4,10 @@
 
 import { html, ifDefined } from "../vendor/lit.all.mjs";
 import { MozLitElement } from "../lit-utils.mjs";
+// eslint-disable-next-line import/no-unassigned-import
+import "chrome://global/content/elements/moz-button.mjs";
+
+window.MozXULElement?.insertFTLIfNeeded("toolkit/global/mozMessageBar.ftl");
 
 const messageTypeToIconData = {
   info: {
@@ -22,6 +26,10 @@ const messageTypeToIconData = {
     iconSrc: "chrome://global/skin/icons/error.svg",
     l10nId: "moz-message-bar-icon-error",
   },
+  critical: {
+    iconSrc: "chrome://global/skin/icons/error.svg",
+    l10nId: "moz-message-bar-icon-error",
+  },
 };
 
 /**
@@ -33,45 +41,62 @@ const messageTypeToIconData = {
  * @property {string} heading - The heading of the message.
  * @property {string} message - The message text.
  * @property {boolean} dismissable - Whether or not the element is dismissable.
+ * @property {string} messageL10nId - l10n ID for the message.
+ * @property {string} messageL10nArgs - Any args needed for the message l10n ID.
  * @fires message-bar:close
  *  Custom event indicating that message bar was closed.
- *  @fires message-bar:user-dismissed
+ * @fires message-bar:user-dismissed
  *  Custom event indicating that message bar was dismissed by the user.
  */
 
 export default class MozMessageBar extends MozLitElement {
   static queries = {
-    actionsSlotEl: "slot[name=actions]",
+    actionsSlot: "slot[name=actions]",
     actionsEl: ".actions",
+    closeButton: "moz-button.close",
+    messageEl: ".message",
+    supportLinkSlot: "slot[name=support-link]",
   };
 
   static properties = {
     type: { type: String },
-    heading: { type: String },
-    message: { type: String },
+    heading: { type: String, fluent: true },
+    message: { type: String, fluent: true },
     dismissable: { type: Boolean },
+    messageL10nId: { type: String },
+    messageL10nArgs: { type: String },
   };
-
-  // Use a relative URL in storybook to get faster reloads on style changes.
-  static stylesheetUrl = window.IS_STORYBOOK
-    ? "./moz-message-bar/moz-message-bar.css"
-    : "chrome://global/content/elements/moz-message-bar.css";
 
   constructor() {
     super();
-    MozXULElement.insertFTLIfNeeded("toolkit/global/mozMessageBar.ftl");
     this.type = "info";
-    this.role = "status";
     this.dismissable = false;
   }
 
-  onSlotchange(e) {
-    let actions = this.actionsSlotEl.assignedNodes();
+  onActionSlotchange() {
+    let actions = this.actionsSlot.assignedNodes();
     this.actionsEl.classList.toggle("active", actions.length);
   }
 
+  onLinkSlotChange() {
+    this.messageEl.classList.toggle(
+      "has-link-after",
+      !!this.supportLinkEls.length
+    );
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.setAttribute("role", "alert");
+  }
+
   disconnectedCallback() {
+    super.disconnectedCallback();
     this.dispatchEvent(new CustomEvent("message-bar:close"));
+  }
+
+  get supportLinkEls() {
+    return this.supportLinkSlot.assignedElements();
   }
 
   iconTemplate() {
@@ -99,14 +124,16 @@ export default class MozMessageBar extends MozLitElement {
     return "";
   }
 
-  closeButtonTemplate() {
+  closeButtonTemplate({ size } = {}) {
     if (this.dismissable) {
       return html`
-        <button
-          class="close ghost-button"
+        <moz-button
+          type="icon ghost"
+          class="close"
+          size=${ifDefined(size)}
           data-l10n-id="moz-message-bar-close-button"
           @click=${this.dismiss}
-        ></button>
+        ></moz-button>
       `;
     }
     return "";
@@ -114,19 +141,37 @@ export default class MozMessageBar extends MozLitElement {
 
   render() {
     return html`
-      <link rel="stylesheet" href=${this.constructor.stylesheetUrl} />
+      <link
+        rel="stylesheet"
+        href="chrome://global/content/elements/moz-message-bar.css"
+      />
       <div class="container">
         <div class="content">
           <div class="text-container">
             ${this.iconTemplate()}
             <div class="text-content">
               ${this.headingTemplate()}
-              <span class="message">${ifDefined(this.message)}</span>
-              <slot name="support-link"></slot>
+              <div>
+                <span
+                  class="message"
+                  data-l10n-id=${ifDefined(this.messageL10nId)}
+                  data-l10n-args=${ifDefined(
+                    JSON.stringify(this.messageL10nArgs)
+                  )}
+                >
+                  ${this.message}
+                </span>
+                <span class="link">
+                  <slot
+                    name="support-link"
+                    @slotchange=${this.onLinkSlotChange}
+                  ></slot>
+                </span>
+              </div>
             </div>
           </div>
           <span class="actions">
-            <slot name="actions" @slotchange=${this.onSlotchange}></slot>
+            <slot name="actions" @slotchange=${this.onActionSlotchange}></slot>
           </span>
         </div>
         ${this.closeButtonTemplate()}

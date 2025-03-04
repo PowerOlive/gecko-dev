@@ -2,23 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { BaseFeature } from "resource:///modules/urlbar/private/BaseFeature.sys.mjs";
+import { SuggestProvider } from "resource:///modules/urlbar/private/SuggestFeature.sys.mjs";
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   QuickSuggest: "resource:///modules/QuickSuggest.sys.mjs",
-  QuickSuggestRemoteSettings:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
-  SuggestionsMap:
-    "resource:///modules/urlbar/private/QuickSuggestRemoteSettings.sys.mjs",
   UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   UrlbarResult: "resource:///modules/UrlbarResult.sys.mjs",
   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
 });
 
 const RESULT_MENU_COMMAND = {
-  HELP: "help",
+  MANAGE: "manage",
   NOT_INTERESTED: "not_interested",
   NOT_RELEVANT: "not_relevant",
 };
@@ -26,15 +22,7 @@ const RESULT_MENU_COMMAND = {
 /**
  * A feature that supports MDN suggestions.
  */
-export class MDNSuggestions extends BaseFeature {
-  get shouldEnable() {
-    return (
-      lazy.UrlbarPrefs.get("mdn.featureGate") &&
-      lazy.UrlbarPrefs.get("suggest.mdn") &&
-      lazy.UrlbarPrefs.get("suggest.quicksuggest.nonsponsored")
-    );
-  }
-
+export class MDNSuggestions extends SuggestProvider {
   get enablingPreferences() {
     return [
       "mdn.featureGate",
@@ -47,58 +35,30 @@ export class MDNSuggestions extends BaseFeature {
     return "mdn";
   }
 
-  enable(enabled) {
-    if (enabled) {
-      lazy.QuickSuggestRemoteSettings.register(this);
-    } else {
-      lazy.QuickSuggestRemoteSettings.unregister(this);
-    }
+  get rustSuggestionType() {
+    return "Mdn";
   }
 
-  queryRemoteSettings(searchString) {
-    const suggestions = this.#suggestionsMap?.get(searchString);
-    return suggestions
-      ? suggestions.map(suggestion => ({ ...suggestion }))
-      : [];
-  }
-
-  async onRemoteSettingsSync(rs) {
-    const records = await rs.get({ filters: { type: "mdn-suggestions" } });
-    if (!this.isEnabled) {
-      return;
-    }
-
-    const suggestionsMap = new lazy.SuggestionsMap();
-
-    for (const record of records) {
-      const { buffer } = await rs.attachments.download(record);
-      if (!this.isEnabled) {
-        return;
-      }
-
-      const results = JSON.parse(new TextDecoder("utf-8").decode(buffer));
-      await suggestionsMap.add(results, {
-        mapKeyword:
-          lazy.SuggestionsMap.MAP_KEYWORD_PREFIXES_STARTING_AT_FIRST_WORD,
-      });
-      if (!this.isEnabled) {
-        return;
-      }
-    }
-
-    this.#suggestionsMap = suggestionsMap;
-  }
-
-  async makeResult(queryContext, suggestion, searchString) {
+  async makeResult(queryContext, suggestion) {
     if (!this.isEnabled) {
       // The feature is disabled on the client, but Merino may still return
       // mdn suggestions anyway, and we filter them out here.
       return null;
     }
 
+    const url = new URL(suggestion.url);
+    url.searchParams.set("utm_medium", "firefox-desktop");
+    url.searchParams.set("utm_source", "firefox-suggest");
+    url.searchParams.set(
+      "utm_campaign",
+      "firefox-mdn-web-docs-suggestion-experiment"
+    );
+    url.searchParams.set("utm_content", "treatment");
+
     const payload = {
       icon: "chrome://global/skin/icons/mdn.svg",
-      url: suggestion.url,
+      url: url.href,
+      originalUrl: suggestion.url,
       title: [suggestion.title, lazy.UrlbarUtils.HIGHLIGHT.TYPED],
       description: suggestion.description,
       shouldShowUrl: true,
@@ -114,11 +74,14 @@ export class MDNSuggestions extends BaseFeature {
           payload
         )
       ),
-      { showFeedbackMenu: true }
+      {
+        isBestMatch: true,
+        showFeedbackMenu: true,
+      }
     );
   }
 
-  getResultCommands(result) {
+  getResultCommands() {
     return [
       {
         l10n: {
@@ -141,35 +104,36 @@ export class MDNSuggestions extends BaseFeature {
       },
       { name: "separator" },
       {
-        name: RESULT_MENU_COMMAND.HELP,
+        name: RESULT_MENU_COMMAND.MANAGE,
         l10n: {
-          id: "urlbar-result-menu-learn-more-about-firefox-suggest",
+          id: "urlbar-result-menu-manage-firefox-suggest",
         },
       },
     ];
   }
 
-  handleCommand(view, result, selType) {
-    switch (selType) {
-      case RESULT_MENU_COMMAND.HELP:
-        // "help" is handled by UrlbarInput, no need to do anything here.
+  onEngagement(queryContext, controller, details, _searchString) {
+    let { result } = details;
+    switch (details.selType) {
+      case RESULT_MENU_COMMAND.MANAGE:
+        // "manage" is handled by UrlbarInput, no need to do anything here.
         break;
       // selType == "dismiss" when the user presses the dismiss key shortcut.
       case "dismiss":
       case RESULT_MENU_COMMAND.NOT_RELEVANT:
-        lazy.QuickSuggest.blockedSuggestions.add(result.payload.url);
-        view.acknowledgeDismissal(result, {
+        lazy.QuickSuggest.blockedSuggestions.blockResult(result);
+        result.acknowledgeDismissalL10n = {
           id: "firefox-suggest-dismissal-acknowledgment-one-mdn",
-        });
+        };
+        controller.removeResult(result);
         break;
       case RESULT_MENU_COMMAND.NOT_INTERESTED:
         lazy.UrlbarPrefs.set("suggest.mdn", false);
-        view.acknowledgeDismissal(result, {
+        result.acknowledgeDismissalL10n = {
           id: "firefox-suggest-dismissal-acknowledgment-all-mdn",
-        });
+        };
+        controller.removeResult(result);
         break;
     }
   }
-
-  #suggestionsMap = null;
 }

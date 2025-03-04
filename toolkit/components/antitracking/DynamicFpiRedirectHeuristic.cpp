@@ -12,7 +12,7 @@
 
 #include "mozilla/net/HttpBaseChannel.h"
 #include "mozilla/net/UrlClassifierCommon.h"
-#include "mozilla/Telemetry.h"
+#include "mozilla/glean/AntitrackingMetrics.h"
 #include "nsContentUtils.h"
 #include "nsIChannel.h"
 #include "nsICookieJarSettings.h"
@@ -155,7 +155,7 @@ void AddConsoleReport(nsIChannel* aNewChannel, nsIURI* aNewURI,
   httpChannel->AddConsoleReport(nsIScriptError::warningFlag,
                                 ANTITRACKING_CONSOLE_CATEGORY,
                                 nsContentUtils::eNECKO_PROPERTIES, uri, 0, 0,
-                                "CookieAllowedForFpiByHeuristic"_ns, params);
+                                "CookieAllowedForDFPIByHeuristic"_ns, params);
 }
 
 bool ShouldRedirectHeuristicApplyTrackingResource(nsIChannel* aOldChannel,
@@ -318,6 +318,19 @@ void DynamicFpiRedirectHeuristic(nsIChannel* aOldChannel, nsIURI* aOldURI,
     return;
   }
 
+  // Check if the new principal is a third party principal
+  bool aResult;
+  rv = newPrincipal->IsThirdPartyPrincipal(oldPrincipal, &aResult);
+
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    LOG(("Error while checking if new principal is third party"));
+    return;
+  }
+  if (!aResult) {
+    LOG(("New principal is a first party principal"));
+    return;
+  }
+
   LOG(("Adding a first-party storage exception for %s...",
        PromiseFlatCString(newOrigin).get()));
 
@@ -326,10 +339,16 @@ void DynamicFpiRedirectHeuristic(nsIChannel* aOldChannel, nsIURI* aOldURI,
 
   AddConsoleReport(aNewChannel, aNewURI, oldOrigin, newOrigin);
 
-  Telemetry::AccumulateCategorical(
-      Telemetry::LABELS_STORAGE_ACCESS_GRANTED_COUNT::StorageGranted);
-  Telemetry::AccumulateCategorical(
-      Telemetry::LABELS_STORAGE_ACCESS_GRANTED_COUNT::Redirect);
+  glean::contentblocking::storage_access_granted_count
+      .EnumGet(glean::contentblocking::StorageAccessGrantedCountLabel::
+                   eStoragegranted)
+      .Add();
+  glean::contentblocking::storage_access_granted_count
+      .EnumGet(
+          glean::contentblocking::StorageAccessGrantedCountLabel::eRedirect)
+      .Add();
+
+  // We don't need to test if this is a tracker or not, we know it isn't one!
 
   // We don't care about this promise because the operation is actually sync.
   RefPtr<StorageAccessAPIHelper::ParentAccessGrantPromise> promise =

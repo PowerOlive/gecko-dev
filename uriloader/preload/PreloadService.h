@@ -26,7 +26,9 @@ enum class ReferrerPolicy : uint8_t;
 }  // namespace dom
 
 /**
- * Intended to scope preloads and speculative loads under one roof.  This class
+ * Intended to scope preloads
+ * (https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/preload)
+ * and speculative loads initiated by the parser under one roof.  This class
  * is intended to be a member of dom::Document. Provides registration of
  * speculative loads via a `key` which is defined to consist of the URL,
  * resource type, and resource-specific attributes that are further
@@ -76,25 +78,30 @@ class PreloadService {
                          const nsAString& aIntegrity, const nsAString& aSrcset,
                          const nsAString& aSizes, const nsAString& aCORS,
                          const nsAString& aReferrerPolicy,
-                         uint64_t aEarlyHintPreloaderId);
+                         uint64_t aEarlyHintPreloaderId,
+                         const nsAString& aFetchPriority);
 
   void PreloadScript(nsIURI* aURI, const nsAString& aType,
                      const nsAString& aCharset, const nsAString& aCrossOrigin,
                      const nsAString& aReferrerPolicy, const nsAString& aNonce,
+                     const nsAString& aFetchPriority,
                      const nsAString& aIntegrity, bool aScriptFromHead,
                      uint64_t aEarlyHintPreloaderId);
 
   void PreloadImage(nsIURI* aURI, const nsAString& aCrossOrigin,
                     const nsAString& aImageReferrerPolicy, bool aIsImgSet,
-                    uint64_t aEarlyHintPreloaderId);
+                    uint64_t aEarlyHintPreloaderId,
+                    const nsAString& aFetchPriority);
 
   void PreloadFont(nsIURI* aURI, const nsAString& aCrossOrigin,
                    const nsAString& aReferrerPolicy,
-                   uint64_t aEarlyHintPreloaderId);
+                   uint64_t aEarlyHintPreloaderId,
+                   const nsAString& aFetchPriority);
 
   void PreloadFetch(nsIURI* aURI, const nsAString& aCrossOrigin,
                     const nsAString& aReferrerPolicy,
-                    uint64_t aEarlyHintPreloaderId);
+                    uint64_t aEarlyHintPreloaderId,
+                    const nsAString& aFetchPriority);
 
   static void NotifyNodeEvent(nsINode* aNode, bool aSuccess);
 
@@ -116,7 +123,8 @@ class PreloadService {
       const nsAString& aSrcset, const nsAString& aSizes,
       const nsAString& aNonce, const nsAString& aIntegrity,
       const nsAString& aCORS, const nsAString& aReferrerPolicy,
-      bool aFromHeader, uint64_t aEarlyHintPreloaderId);
+      const nsAString& aFetchPriority, bool aFromHeader,
+      uint64_t aEarlyHintPreloaderId);
 
  private:
   nsRefPtrHashtable<PreloadHashKey, PreloaderBase> mPreloads;

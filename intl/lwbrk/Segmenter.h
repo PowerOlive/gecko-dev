@@ -139,6 +139,7 @@ class WordBreakIteratorUtf16 final : public SegmentIteratorUtf16 {
   explicit WordBreakIteratorUtf16(Span<const char16_t> aText);
   ~WordBreakIteratorUtf16() override;
 
+  void Reset(Span<const char16_t> aText);
   Maybe<uint32_t> Next() override;
   Maybe<uint32_t> Seek(uint32_t aPos) override;
 
@@ -162,7 +163,7 @@ class GraphemeClusterBreakIteratorUtf16 final : public SegmentIteratorUtf16 {
 
 #if defined(MOZ_ICU4X) && defined(JS_HAS_INTL_API)
  private:
-  capi::ICU4XGraphemeClusterSegmenter* mSegmenter = nullptr;
+  static capi::ICU4XGraphemeClusterSegmenter* sSegmenter;
   capi::ICU4XGraphemeClusterBreakIteratorUtf16* mIterator = nullptr;
 #endif
 };

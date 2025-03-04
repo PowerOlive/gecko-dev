@@ -5,15 +5,28 @@ extern crate alloc;
 use alloc::alloc::Layout;
 
 #[cfg(target_arch = "wasm32")]
+// defines `extern "C" diplomat_init()`
 mod wasm_glue;
-#[cfg(target_arch = "wasm32")]
-pub use wasm_glue::{console_log, console_trace, console_warn};
 
 mod writeable;
 pub use writeable::DiplomatWriteable;
 
 mod result;
 pub use result::DiplomatResult;
+
+/// Like [`char`], but unvalidated.
+pub type DiplomatChar = u32;
+
+/// Like [`str`], but unvalidated.
+pub type DiplomatStr = [u8];
+
+/// Like `Wstr`, but unvalidated.
+pub type DiplomatStr16 = [u16];
+
+/// Like [`u8`], but interpreted explicitly as a raw byte as opposed to a numerical value.
+/// This matters for languages like JavaScript or Dart, where there's only a single numeric
+/// type, but special types for byte buffers.
+pub type DiplomatByte = u8;
 
 /// Allocates a buffer of a given size in Rust's memory.
 ///

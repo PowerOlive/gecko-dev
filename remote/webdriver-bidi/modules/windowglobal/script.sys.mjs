@@ -159,7 +159,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
 
     const seenNodeIds = new Map();
     switch (evaluationStatus) {
-      case EvaluationStatus.Normal:
+      case EvaluationStatus.Normal: {
         const dataSuccess = this.serialize(
           this.#toRawObject(result),
           serializationOptions,
@@ -174,7 +174,8 @@ class ScriptModule extends WindowGlobalBiDiModule {
           result: dataSuccess,
           _extraData: { seenNodeIds },
         };
-      case EvaluationStatus.Throw:
+      }
+      case EvaluationStatus.Throw: {
         const dataThrow = this.#buildExceptionDetails(
           exception,
           stack,
@@ -189,6 +190,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
           realmId: realm.id,
           _extraData: { seenNodeIds },
         };
+      }
       default:
         throw new lazy.error.UnsupportedOperationError(
           `Unsupported completion value for expression evaluation`
@@ -243,7 +245,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
       } = script;
       const realm = this.messageHandler.getRealm({ sandboxName: sandbox });
       const deserializedArguments = commandArguments.map(arg =>
-        this.deserialize(realm, arg, {
+        this.deserialize(arg, realm, {
           emitScriptMessage: this.#emitScriptMessage,
         })
       );
@@ -290,7 +292,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
       const rawObject = maybeDebuggerObject.unsafeDereference();
 
       // TODO: Getters for Maps and Sets iterators return "Opaque" objects and
-      // are not iterable. RemoteValue.jsm' serializer should handle calling
+      // are not iterable. RemoteValue.sys.mjs' serializer should handle calling
       // waiveXrays on Maps/Sets/... and then unwaiveXrays on entries but since
       // we serialize with maxDepth=1, calling waiveXrays once on the root
       // object allows to return correctly serialized values.
@@ -324,6 +326,8 @@ class ScriptModule extends WindowGlobalBiDiModule {
    *     in case of ECMAScript objects should be serialized.
    * @param {RemoteValue=} options.thisParameter
    *     The value of the this keyword for the function call.
+   * @param {boolean=} options.userActivation
+   *     Determines whether execution should be treated as initiated by user.
    *
    * @returns {object}
    *     - evaluationStatus {EvaluationStatus} One of "normal", "throw".
@@ -342,6 +346,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
       sandbox: sandboxName = null,
       serializationOptions,
       thisParameter = null,
+      userActivation,
     } = options;
 
     const realm = this.messageHandler.getRealm({ realmId, sandboxName });
@@ -349,7 +354,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
     const deserializedArguments =
       commandArguments !== null
         ? commandArguments.map(arg =>
-            this.deserialize(realm, arg, {
+            this.deserialize(arg, realm, {
               emitScriptMessage: this.#emitScriptMessage,
             })
           )
@@ -357,10 +362,12 @@ class ScriptModule extends WindowGlobalBiDiModule {
 
     const deserializedThis =
       thisParameter !== null
-        ? this.deserialize(realm, thisParameter, {
+        ? this.deserialize(thisParameter, realm, {
             emitScriptMessage: this.#emitScriptMessage,
           })
         : null;
+
+    realm.userActivationEnabled = userActivation;
 
     const rv = realm.executeInGlobalWithBindings(
       functionDeclaration,
@@ -412,6 +419,8 @@ class ScriptModule extends WindowGlobalBiDiModule {
    *     The ownership model to use for the results of this evaluation.
    * @param {string=} options.sandbox
    *     The name of the sandbox.
+   * @param {boolean=} options.userActivation
+   *     Determines whether execution should be treated as initiated by user.
    *
    * @returns {object}
    *     - evaluationStatus {EvaluationStatus} One of "normal", "throw".
@@ -428,9 +437,12 @@ class ScriptModule extends WindowGlobalBiDiModule {
       resultOwnership,
       sandbox: sandboxName = null,
       serializationOptions,
+      userActivation,
     } = options;
 
     const realm = this.messageHandler.getRealm({ realmId, sandboxName });
+
+    realm.userActivationEnabled = userActivation;
 
     const rv = realm.executeInGlobal(expression);
 
@@ -465,8 +477,7 @@ class ScriptModule extends WindowGlobalBiDiModule {
    */
 
   _applySessionData(params) {
-    // We only care about updates coming on context creation.
-    if (params.category === "preload-script" && params.initial) {
+    if (params.category === "preload-script") {
       this.#preloadScripts = new Set();
       for (const item of params.sessionData) {
         if (this.messageHandler.matchesContext(item.contextDescriptor)) {

@@ -13,8 +13,6 @@
 #include "nsWindowRoot.h"
 #include "nsPIDOMWindow.h"
 #include "nsPresContext.h"
-#include "nsLayoutCID.h"
-#include "nsContentCID.h"
 #include "nsString.h"
 #include "nsFrameLoaderOwner.h"
 #include "nsFrameLoader.h"
@@ -39,7 +37,10 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-nsWindowRoot::nsWindowRoot(nsPIDOMWindowOuter* aWindow) { mWindow = aWindow; }
+nsWindowRoot::nsWindowRoot(nsPIDOMWindowOuter* aWindow) {
+  SetIsOnMainThread();
+  mWindow = aWindow;
+}
 
 nsWindowRoot::~nsWindowRoot() {
   if (mListenerManager) {

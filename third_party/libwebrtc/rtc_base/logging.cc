@@ -57,7 +57,6 @@ static const int kMaxLogLineSize = 1024 - 60;
 namespace rtc {
 
 bool LogMessage::aec_debug_ = false;
-uint32_t LogMessage::aec_debug_size_ = 4*1024*1024;
 std::string LogMessage::aec_filename_base_;
 
 void LogMessage::set_aec_debug(bool enable) {
@@ -67,6 +66,11 @@ void LogMessage::set_aec_debug(bool enable) {
 
 std::string LogMessage::aec_debug_filename() {
   return aec_filename_base_;
+}
+
+void LogMessage::set_aec_debug_filename(const char* filename) {
+  aec_filename_base_ = filename;
+  webrtc::ApmDataDumper::SetOutputDirectory(aec_filename_base_);
 }
 
 namespace {
@@ -235,7 +239,7 @@ LogMessage::~LogMessage() {
   }
 }
 
-void LogMessage::AddTag(const char* tag) {
+void LogMessage::AddTag([[maybe_unused]] const char* tag) {
 #ifdef WEBRTC_ANDROID
   log_line_.set_tag(tag);
 #endif

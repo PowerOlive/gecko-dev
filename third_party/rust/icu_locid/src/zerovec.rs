@@ -22,7 +22,7 @@
 //! To produce more human-readable serialized output, you can use [`UnvalidatedStr`].
 //!
 //! ```
-//! use icu_locid::Locale;
+//! use icu::locid::Locale;
 //! use zerovec::ule::UnvalidatedStr;
 //! use zerovec::ZeroMap;
 //!
@@ -57,11 +57,11 @@
 //! tuple, and then construct the [`LanguageIdentifier`] externally.
 //!
 //! ```
-//! use icu_locid::subtags::{Language, Region, Script};
-//! use icu_locid::LanguageIdentifier;
-//! use icu_locid::{
-//!     langid, subtags_language as language, subtags_region as region,
-//!     subtags_script as script,
+//! use icu::locid::subtags::{Language, Region, Script};
+//! use icu::locid::LanguageIdentifier;
+//! use icu::locid::{
+//!     langid,
+//!     subtags::{language, region, script},
 //! };
 //! use zerovec::ZeroMap;
 //!
@@ -99,8 +99,8 @@
 //! As above, to produce more human-readable serialized output, you can use [`UnvalidatedStr`].
 //!
 //! ```
-//! use icu_locid::langid;
-//! use icu_locid::Locale;
+//! use icu::locid::langid;
+//! use icu::locid::Locale;
 //! use zerovec::ule::UnvalidatedStr;
 //! use zerovec::ZeroMap;
 //!

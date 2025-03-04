@@ -29,21 +29,35 @@ var gExceptionPaths = [
   "chrome://activity-stream/content/data/content/tippytop/images/",
   "chrome://activity-stream/content/data/content/tippytop/favicons/",
   // These resources are referenced by messages delivered through Remote Settings
-  "chrome://activity-stream/content/data/content/assets/remote/",
   "chrome://activity-stream/content/data/content/assets/mobile-download-qr-new-user-cn.svg",
   "chrome://activity-stream/content/data/content/assets/mobile-download-qr-existing-user-cn.svg",
+  "chrome://activity-stream/content/data/content/assets/mr-amo-collection.svg",
   "chrome://activity-stream/content/data/content/assets/person-typing.svg",
+  "chrome://activity-stream/content/data/content/assets/tabs-side-zap-transparent.svg",
+  "chrome://activity-stream/content/data/content/assets/tabs-top-zap-transparent.svg",
+  "chrome://activity-stream/content/data/content/assets/nuo-taborientation.svg",
+  "chrome://activity-stream/content/data/content/assets/euo-tab-orientation.svg",
+  "chrome://activity-stream/content/data/content/assets/euo-chatbot.svg",
   "chrome://browser/content/assets/moz-vpn.svg",
   "chrome://browser/content/assets/vpn-logo.svg",
   "chrome://browser/content/assets/focus-promo.png",
   "chrome://browser/content/assets/klar-qr-code.svg",
+  "chrome://browser/content/asrouter/assets/fox-with-box-on-cloud.svg",
+  "chrome://browser/content/asrouter/assets/fox-with-devices.svg",
+  "chrome://browser/content/asrouter/assets/fox-with-locked-box.svg",
+  "chrome://browser/content/asrouter/assets/fox-with-mobile.svg",
 
   // toolkit/components/pdfjs/content/build/pdf.js
   "resource://pdf.js/web/images/",
+  // This file is only loaded in using a dynamic import in pdf.js in case wasm
+  // is not available.
+  "resource://pdf.js/web/wasm/openjpeg_nowasm_fallback.js",
 
   // Exclude the form autofill path that has been moved out of the extensions to
   // toolkit, see bug 1691821.
   "resource://gre-resources/autofill/",
+  // Localization file added programatically in FormAutofillUtils.sys.mjs
+  "resource://gre/localization/en-US/toolkit/formautofill",
 
   // Exclude all search-extensions because they aren't referenced by filename
   "resource://search-extensions/",
@@ -65,11 +79,32 @@ var gExceptionPaths = [
   // Nimbus schemas are referenced programmatically.
   "resource://nimbus/schemas/",
 
-  // Activity stream schemas are referenced programmatically.
-  "resource://activity-stream/schemas",
+  // Normandy schemas are referenced programmatically.
+  "resource://normandy/schemas/",
+
+  // ASRouter schemas are referenced programmatically.
+  "chrome://browser/content/asrouter/schemas/",
 
   // Localization file added programatically in FeatureCallout.sys.mjs
   "resource://app/localization/en-US/browser/featureCallout.ftl",
+
+  // Localization file added programatically in ContentAnalysis.sys.mjs
+  "resource://gre/localization/en-US/toolkit/contentanalysis/",
+
+  // CSS files are referenced inside JS in an html template
+  "chrome://browser/content/aboutlogins/components/",
+
+  // Strip on Share parameter lists
+  "chrome://global/content/antitracking/",
+
+  // CSS file is referenced inside JS in login-form.mjs
+  "chrome://global/content/megalist/LoginFormComponent/",
+
+  // The ONNX runtime picks files to run programmaticaly
+  "chrome://global/content/ml/",
+
+  // The profile avatars are directly referenced.
+  "chrome://browser/content/profiles/assets/",
 ];
 
 // These are not part of the omni.ja file, so we find them only when running
@@ -88,29 +123,16 @@ if (AppConstants.MOZ_BACKGROUNDTASKS) {
   gExceptionPaths.push("resource://app/modules/backgroundtasks/");
 }
 
-// Temporary allowlist for shopping - we'll reference this soon.
-if (AppConstants.NIGHTLY_BUILD) {
-  gExceptionPaths.push("chrome://browser/content/shopping/shopping.html");
-  gExceptionPaths.push("chrome://global/content/shopping/ShoppingProduct.mjs");
-}
-
-if (AppConstants.NIGHTLY_BUILD) {
-  // This is nightly-only debug tool.
-  gExceptionPaths.push(
-    "chrome://browser/content/places/interactionsViewer.html"
-  );
-}
-
 // Each allowlist entry should have a comment indicating which file is
 // referencing the listed file in a way that the test can't detect, or a
 // bug number to remove or use the file if it is indeed currently unreferenced.
 var allowlist = [
-  // toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
-  { file: "chrome://pdf.js/locale/chrome.properties" },
-  { file: "chrome://pdf.js/locale/viewer.properties" },
-
   // security/manager/pki/resources/content/device_manager.js
   { file: "chrome://pippki/content/load_device.xhtml" },
+
+  // Intentionally unreferenced, see bug 1941134
+  { file: "resource://gre/res/designmode.css" },
+  { file: "resource://gre/res/EditorOverride.css" },
 
   // The l10n build system can't package string files only for some platforms.
   // See bug 1339424 for why this is hard to fix.
@@ -128,9 +150,6 @@ var allowlist = [
   {
     file: "resource://app/localization/en-US/browser/linuxDesktopEntry.ftl",
   },
-
-  // toolkit/content/aboutRights-unbranded.xhtml doesn't use aboutRights.css
-  { file: "chrome://global/skin/aboutRights.css", skipUnofficial: true },
 
   // devtools/client/inspector/bin/dev-server.js
   {
@@ -164,6 +183,9 @@ var allowlist = [
 
   // toolkit/mozapps/extensions/AddonContentPolicy.cpp
   { file: "resource://gre/localization/en-US/toolkit/global/cspErrors.ftl" },
+
+  // toolkit/components/antitracking/bouncetrackingprotection/BounceTrackingProtection.cpp
+  { file: "resource://gre/localization/en-US/toolkit/global/antiTracking.ftl" },
 
   // The l10n build system can't package string files only for some platforms.
   {
@@ -204,7 +226,7 @@ var allowlist = [
   },
 
   // Files from upstream library
-  { file: "resource://pdf.js/web/debugger.js" },
+  { file: "resource://pdf.js/web/debugger.mjs" },
   { file: "resource://pdf.js/web/debugger.css" },
 
   // Starting from here, files in the allowlist are bugs that need fixing.
@@ -258,10 +280,16 @@ var allowlist = [
   {
     file: "resource://gre/localization/en-US/toolkit/updates/backgroundupdate.ftl",
   },
+
   // Bug 1713242 - referenced by aboutThirdParty.html which is only for Windows
   {
     file: "resource://gre/localization/en-US/toolkit/about/aboutThirdParty.ftl",
     platforms: ["linux", "macosx"],
+  },
+  // Bug 1854618 - referenced by aboutWebauthn.html which is only for Linux and Mac
+  {
+    file: "resource://gre/localization/en-US/toolkit/about/aboutWebauthn.ftl",
+    platforms: ["win", "android"],
   },
   // Bug 1973834 - referenced by aboutWindowsMessages.html which is only for Windows
   {
@@ -282,16 +310,45 @@ var allowlist = [
   { file: "chrome://browser/content/screenshots/download.svg" },
   { file: "chrome://browser/content/screenshots/download-white.svg" },
 
-  // FIXME: Bug 1836386: PromiseWorker with ESM is going to be used by newtab.
-  { file: "resource://gre/modules/workers/PromiseWorker.mjs" },
+  // Referenced programmatically
+  { file: "chrome://browser/content/backup/BackupManifest.1.schema.json" },
+  { file: "chrome://browser/content/backup/ArchiveJSONBlock.1.schema.json" },
+
+  // Bug 1733498 - Migrate necko errors l10n strings from .properties to Fluent
+  {
+    file: "resource://gre/localization/en-US/netwerk/necko.ftl",
+  },
 ];
 
-if (AppConstants.NIGHTLY_BUILD && AppConstants.platform != "win") {
-  // This path is refereneced in nsFxrCommandLineHandler.cpp, which is only
-  // compiled in Windows. This path is allowed so that non-Windows builds
-  // can access the FxR UI via --chrome rather than --fxr (which includes VR-
-  // specific functionality)
-  allowlist.push({ file: "chrome://fxr/content/fxrui.html" });
+if (AppConstants.NIGHTLY_BUILD) {
+  allowlist.push(
+    ...[
+      // This is nightly-only debug tool.
+      { file: "chrome://browser/content/places/interactionsViewer.html" },
+
+      // A debug tool that is only available in Nightly builds, and is accessed
+      // directly by developers via the chrome URI (bug 1888491)
+      { file: "chrome://browser/content/backup/debug.html" },
+    ]
+  );
+}
+
+if (AppConstants.platform != "win") {
+  // toolkit/mozapps/defaultagent/Notification.cpp
+  // toolkit/mozapps/defaultagent/ScheduledTask.cpp
+  // toolkit/mozapps/defaultagent/BackgroundTask_defaultagent.sys.mjs
+  // Bug 1854425 - referenced by default browser agent which is not detected
+  allowlist.push({
+    file: "resource://app/localization/en-US/browser/backgroundtasks/defaultagent.ftl",
+  });
+
+  if (AppConstants.NIGHTLY_BUILD) {
+    // This path is refereneced in nsFxrCommandLineHandler.cpp, which is only
+    // compiled in Windows. This path is allowed so that non-Windows builds
+    // can access the FxR UI via --chrome rather than --fxr (which includes VR-
+    // specific functionality)
+    allowlist.push({ file: "chrome://fxr/content/fxrui.html" });
+  }
 }
 
 if (AppConstants.platform == "android") {
@@ -324,14 +381,8 @@ const ignorableAllowlist = new Set([
   // The following files are outside of the omni.ja file, so we only catch them
   // when testing on a non-packaged build.
 
-  // toolkit/mozapps/extensions/nsBlocklistService.js
-  "resource://app/blocklist.xml",
-
   // dom/media/gmp/GMPParent.cpp
   "resource://gre/gmp-clearkey/0.1/manifest.json",
-
-  // Bug 1351669 - obsolete test file
-  "resource://gre/res/test.properties",
 ]);
 for (let entry of ignorableAllowlist) {
   allowlist.add(entry);
@@ -365,7 +416,6 @@ if (AppConstants.MOZ_CODE_COVERAGE) {
 }
 
 const gInterestingCategories = new Set([
-  "agent-style-sheets",
   "addon-provider-module",
   "webextension-modules",
   "webextension-scripts",
@@ -380,7 +430,6 @@ var gChromeReg = Cc["@mozilla.org/chrome/chrome-registry;1"].getService(
 );
 var gChromeMap = new Map();
 var gOverrideMap = new Map();
-var gComponentsSet = new Set();
 
 // In this map when the value is a Set of URLs, the file is referenced if any
 // of the files in the Set is referenced.
@@ -444,12 +493,17 @@ function parseManifest(manifestUri) {
             Services.io.newURI(argv[0]).specIgnoringRef
           );
         }
-      } else if (type == "category" && gInterestingCategories.has(argv[0])) {
-        gReferencesFromCode.set(argv[2], null);
+      } else if (type == "category") {
+        if (gInterestingCategories.has(argv[0])) {
+          gReferencesFromCode.set(argv[2], null);
+        } else if (argv[1].startsWith("resource://")) {
+          // Assume that any resource paths immediately after the category name
+          // are for use with BrowserUtils.callModulesFromCategory (rather than
+          // having to hardcode a list of categories in this test).
+          gReferencesFromCode.set(argv[1], null);
+        }
       } else if (type == "resource") {
         trackResourcePrefix(argv[0]);
-      } else if (type == "component") {
-        gComponentsSet.add(argv[1]);
       }
     }
   });
@@ -591,6 +645,10 @@ function parseCodeFile(fileUri) {
       );
 
       if (!urls) {
+        urls = line.match(/["']moz-src:\/\/\/[^"']+["']/g);
+      }
+
+      if (!urls) {
         urls = line.match(/["']resource:\/\/[^"']+["']/g);
         if (
           urls &&
@@ -677,7 +735,10 @@ function parseCodeFile(fileUri) {
             if (!/\.(properties|js|jsm|mjs|json|css)$/.test(url)) {
               url += ".js";
             }
-            if (url.startsWith("resource://")) {
+            if (
+              url.startsWith("resource://") ||
+              url.startsWith("moz-src:///")
+            ) {
               addCodeReference(url, fileUri);
             } else {
               // if we end up with a chrome:// url here, it's likely because
@@ -727,13 +788,22 @@ function parseCodeFile(fileUri) {
 function convertToCodeURI(fileUri) {
   let baseUri = fileUri;
   let path = "";
-  while (true) {
+  while (baseUri) {
     let slashPos = baseUri.lastIndexOf("/", baseUri.length - 2);
     if (slashPos <= 0) {
       // File not accessible from chrome protocol, try resource://
       for (let res of gResourceMap) {
         if (fileUri.startsWith(res[1])) {
-          return fileUri.replace(res[1], "resource://" + res[0] + "/");
+          let resourceUriString = fileUri.replace(
+            res[1],
+            `resource://${res[0]}/`
+          );
+          // If inside moz-src, treat as moz-src url.
+          resourceUriString = resourceUriString.replace(
+            /^resource:\/\/gre\/moz-src\//,
+            "moz-src:///"
+          );
+          return resourceUriString;
         }
       }
       // Give up and return the original URL.
@@ -745,6 +815,7 @@ function convertToCodeURI(fileUri) {
       return gChromeMap.get(baseUri) + path;
     }
   }
+  throw new Error(`Unparsable URI: ${fileUri}`);
 }
 
 async function chromeFileExists(aURI) {
@@ -792,6 +863,7 @@ function findChromeUrlsFromArray(array, prefix) {
     // Only keep strings that look like real chrome or resource urls.
     if (
       /chrome:\/\/[a-zA-Z09-]+\/(content|skin|locale)\//.test(string) ||
+      /moz-src:\/\/\/\w+/.test(string) ||
       /resource:\/\/[a-zA-Z09-]*\/.*\.[a-z]+/.test(string)
     ) {
       gReferencesFromCode.set(string, null);
@@ -805,10 +877,12 @@ add_task(async function checkAllTheFiles() {
   const libxul = await IOUtils.read(PathUtils.xulLibraryPath);
   findChromeUrlsFromArray(libxul, "chrome://");
   findChromeUrlsFromArray(libxul, "resource://");
+  findChromeUrlsFromArray(libxul, "moz-src:///");
   // Handle NS_LITERAL_STRING.
   let uint16 = new Uint16Array(libxul.buffer);
   findChromeUrlsFromArray(uint16, "chrome://");
   findChromeUrlsFromArray(uint16, "resource://");
+  findChromeUrlsFromArray(uint16, "moz-src:///");
 
   const kCodeExtensions = [
     ".xml",
@@ -861,9 +935,6 @@ add_task(async function checkAllTheFiles() {
   // Wait for all manifest to be parsed
   await PerfTestHelpers.throttledMapPromises(manifestURIs, parseManifest);
 
-  for (let jsm of Components.manager.getComponentJSMs()) {
-    gReferencesFromCode.set(jsm, null);
-  }
   for (let esModule of Components.manager.getComponentESModules()) {
     gReferencesFromCode.set(esModule, null);
   }
@@ -900,6 +971,7 @@ add_task(async function checkAllTheFiles() {
   // the non-devtools paths:
   let devtoolsPrefixes = [
     "chrome://devtools",
+    "moz-src:///devtools/",
     "resource://devtools/",
     "resource://devtools-shared-images/",
     "resource://devtools-highlighter-styles/",
@@ -914,7 +986,9 @@ add_task(async function checkAllTheFiles() {
   for (let uri of uris) {
     uri = convertToCodeURI(uri.spec);
     if (
-      (uri.startsWith("chrome://") || uri.startsWith("resource://")) &&
+      (uri.startsWith("chrome://") ||
+        uri.startsWith("resource://") ||
+        uri.startsWith("moz-src:///")) &&
       isDevtools == hasDevtoolsPrefix(uri)
     ) {
       chromeFiles.push(uri);
@@ -970,9 +1044,6 @@ add_task(async function checkAllTheFiles() {
       let rv = isUnreferenced(f);
       if (rv && f.startsWith("resource://app/")) {
         rv = isUnreferenced(f.replace("resource://app/", "resource:///"));
-      }
-      if (rv && /^resource:\/\/(?:app|gre)\/components\/[^/]+\.js$/.test(f)) {
-        rv = !gComponentsSet.has(f.replace(/.*\//, ""));
       }
       if (!rv) {
         foundReference = true;
@@ -1054,7 +1125,9 @@ add_task(async function checkAllTheFiles() {
     }
 
     if (
-      (file.startsWith("chrome://") || file.startsWith("resource://")) &&
+      (file.startsWith("chrome://") ||
+        file.startsWith("resource://") ||
+        file.startsWith("moz-src:///")) &&
       !(await chromeFileExists(file))
     ) {
       // Ignore chrome prefixes that have been automatically expanded.

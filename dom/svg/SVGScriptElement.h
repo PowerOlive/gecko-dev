@@ -43,6 +43,7 @@ class SVGScriptElement final : public SVGScriptElementBase,
   void GetScriptCharset(nsAString& charset) override;
   void FreezeExecutionAttrs(const Document* aOwnerDoc) override;
   CORSMode GetCORSMode() const override;
+  FetchPriority GetFetchPriority() const override;
 
   // ScriptElement
   bool HasScriptContent() override;
@@ -82,7 +83,7 @@ class SVGScriptElement final : public SVGScriptElementBase,
   nsIContent* GetAsContent() override { return this; }
 
   enum { HREF, XLINK_HREF };
-  SVGAnimatedString mStringAttributes[2];
+  SVGAnimatedScriptHrefString mStringAttributes[2];
   static StringInfo sStringInfo[2];
 };
 

@@ -14,7 +14,9 @@ addAccessibleTask(
 <div id="ariaDirectory" role="directory">ARIA directory</div>
 <div id="ariaAlertdialog" role="alertdialog">ARIA alertdialog</div>
 <div id="ariaFeed" role="feed">ARIA feed</div>
-<div id="ariaRowgroup" role="rowgroup">ARIA rowgroup</div>
+<div role="table">
+  <div id="ariaRowgroup" role="rowgroup">ARIA rowgroup</div>
+</div>
 <div id="ariaSearchbox" role="searchbox">ARIA searchbox</div>
 <div id="ariaUnknown" role="unknown">unknown ARIA role</div>
 <button id="htmlButton">HTML button</button>
@@ -53,8 +55,7 @@ addAccessibleTask(
     testComputedARIARole("ariaUnnamedRegion", "navigation");
     // The directory ARIA role is an alias of list.
     testComputedARIARole("ariaDirectory", "list");
-    // alertdialog, feed, rowgroup and searchbox map to a Gecko role, but it
-    // isn't unique.
+    // alertdialog, feed and rowgroupmap to a Gecko role, but it isn't unique.
     testComputedARIARole("ariaAlertdialog", "alertdialog");
     testComputedARIARole("ariaFeed", "feed");
     testComputedARIARole("ariaRowgroup", "rowgroup");

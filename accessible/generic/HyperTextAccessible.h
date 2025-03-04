@@ -146,8 +146,6 @@ class HyperTextAccessible : public AccessibleWrap,
   virtual int32_t CaretOffset() const override;
   virtual void SetCaretOffset(int32_t aOffset) override;
 
-  virtual int32_t CaretLineNumber() override;
-
   /**
    * Return the caret rect and the widget containing the caret within this
    * text accessible.
@@ -156,11 +154,6 @@ class HyperTextAccessible : public AccessibleWrap,
    * @return      the caret rect
    */
   mozilla::LayoutDeviceIntRect GetCaretRect(nsIWidget** aWidget);
-
-  /**
-   * Return true if caret is at end of line.
-   */
-  bool IsCaretAtEndOfLine() const;
 
   virtual int32_t SelectionCount() override;
 

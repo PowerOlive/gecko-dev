@@ -1,36 +1,30 @@
-From: Nico Grunbaum <na-g@nostrum.com>
-Date: Thu, 22 Jun 2023 16:23:00 +0000
-Subject: Bug 1837918 - libwebrtc update broke the build on
- OpenBSD;r=mjf,webrtc-reviewers
+From: Byron Campen <docfaraday@gmail.com>
+Date: Thu, 25 Jul 2024 10:07:00 -0500
+Subject: Bug 1909234 - (fix-4fec6f9c67dc) Hollow out the new ssl_adapter lib.
+ r?mjf
 
-Differential Revision: https://phabricator.services.mozilla.com/D181791
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/2a6a838b7021bb285f9485c2ceda6ba2543e0d6f
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/ee2f06666bcc6d22c4d7c93b78fb52d28452d055
 ---
- modules/video_capture/video_capture_options.h | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
+ rtc_base/BUILD.gn | 2 ++
+ 1 file changed, 2 insertions(+)
 
-diff --git a/modules/video_capture/video_capture_options.h b/modules/video_capture/video_capture_options.h
-index c90e035f37..18ec208ec5 100644
---- a/modules/video_capture/video_capture_options.h
-+++ b/modules/video_capture/video_capture_options.h
-@@ -51,7 +51,7 @@ class RTC_EXPORT VideoCaptureOptions {
+diff --git a/rtc_base/BUILD.gn b/rtc_base/BUILD.gn
+index 3473185b84..ea3a02eb5e 100644
+--- a/rtc_base/BUILD.gn
++++ b/rtc_base/BUILD.gn
+@@ -1623,6 +1623,7 @@ if (!build_with_mozilla) {
+ }
  
-   void Init(Callback* callback);
+ rtc_library("ssl_adapter") {
++if (!build_with_mozilla) {
+   visibility = [ "*" ]
+   sources = [
+     "openssl_adapter.cc",
+@@ -1671,6 +1672,7 @@ rtc_library("ssl_adapter") {
+     configs += [ "..:external_ssl_library" ]
+   }
+ }
++}
  
--#if defined(WEBRTC_LINUX)
-+#if defined(WEBRTC_LINUX) || defined(WEBRTC_BSD)
-   bool allow_v4l2() const { return allow_v4l2_; }
-   void set_allow_v4l2(bool allow) { allow_v4l2_ = allow; }
- #endif
-@@ -64,7 +64,7 @@ class RTC_EXPORT VideoCaptureOptions {
- #endif
- 
-  private:
--#if defined(WEBRTC_LINUX)
-+#if defined(WEBRTC_LINUX) || defined(WEBRTC_BSD)
-   bool allow_v4l2_ = false;
- #endif
- #if defined(WEBRTC_USE_PIPEWIRE)
--- 
-2.34.1
-
+ rtc_source_set("gtest_prod") {
+   sources = [ "gtest_prod_util.h" ]

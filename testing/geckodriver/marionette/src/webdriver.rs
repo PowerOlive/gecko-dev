@@ -14,6 +14,8 @@ pub struct Url {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Locator {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
     pub using: Selector,
     pub value: String,
 }
@@ -57,6 +59,13 @@ pub struct Keys {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PrintPageRange {
+    Integer(u64),
+    Range(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PrintParameters {
     pub orientation: PrintOrientation,
@@ -64,7 +73,7 @@ pub struct PrintParameters {
     pub background: bool,
     pub page: PrintPage,
     pub margin: PrintMargins,
-    pub page_ranges: Vec<String>,
+    pub page_ranges: Vec<PrintPageRange>,
     pub shrink_to_fit: bool,
 }
 
@@ -82,17 +91,12 @@ impl Default for PrintParameters {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PrintOrientation {
     Landscape,
+    #[default]
     Portrait,
-}
-
-impl Default for PrintOrientation {
-    fn default() -> Self {
-        PrintOrientation::Portrait
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -127,6 +131,25 @@ impl Default for PrintMargins {
             right: 1.0,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SetPermissionParameters {
+    pub descriptor: SetPermissionDescriptor,
+    pub state: SetPermissionState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SetPermissionDescriptor {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SetPermissionState {
+    Denied,
+    Granted,
+    Prompt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -230,18 +253,6 @@ pub enum Command {
     FindElement(Locator),
     #[serde(rename = "WebDriver:FindElements")]
     FindElements(Locator),
-    #[serde(rename = "WebDriver:FindElement")]
-    FindElementElement {
-        element: String,
-        using: Selector,
-        value: String,
-    },
-    #[serde(rename = "WebDriver:FindElements")]
-    FindElementElements {
-        element: String,
-        using: Selector,
-        value: String,
-    },
     #[serde(rename = "WebDriver:FindElementFromShadowRoot")]
     FindShadowRootElement {
         #[serde(rename = "shadowRoot")]
@@ -326,6 +337,8 @@ pub enum Command {
     ReleaseActions,
     #[serde(rename = "WebDriver:SendAlertText")]
     SendAlertText(Keys),
+    #[serde(rename = "WebDriver:SetPermission")]
+    SetPermission(SetPermissionParameters),
     #[serde(rename = "WebDriver:SetTimeouts")]
     SetTimeouts(Timeouts),
     #[serde(rename = "WebDriver:SetWindowRect")]
@@ -336,10 +349,6 @@ pub enum Command {
     SwitchToParentFrame,
     #[serde(rename = "WebDriver:SwitchToWindow")]
     SwitchToWindow(Window),
-    #[serde(rename = "WebDriver:TakeScreenshot")]
-    TakeElementScreenshot(ScreenshotOptions),
-    #[serde(rename = "WebDriver:TakeScreenshot")]
-    TakeFullScreenshot(ScreenshotOptions),
     #[serde(rename = "WebDriver:TakeScreenshot")]
     TakeScreenshot(ScreenshotOptions),
     #[serde(rename = "WebAuthn:AddVirtualAuthenticator")]
@@ -413,6 +422,7 @@ mod tests {
             "value": "link text",
         });
         let data = Locator {
+            element: None,
             using: Selector::PartialLinkText,
             value: "link text".into(),
         };
@@ -452,6 +462,7 @@ mod tests {
     #[test]
     fn test_command_with_params() {
         let locator = Locator {
+            element: None,
             using: Selector::Css,
             value: "value".into(),
         };
@@ -510,11 +521,11 @@ mod tests {
     #[test]
     fn test_json_command_as_struct() {
         assert_ser(
-            &Command::FindElementElement {
-                element: "foo".into(),
+            &Command::FindElement(Locator {
+                element: Some("foo".into()),
                 using: Selector::XPath,
                 value: "bar".into(),
-            },
+            }),
             json!({"WebDriver:FindElement": {"element": "foo", "using": "xpath", "value": "bar" }}),
         );
     }

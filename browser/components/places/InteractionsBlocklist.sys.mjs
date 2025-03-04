@@ -2,16 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  FilterAdult: "resource:///modules/FilterAdult.sys.mjs",
   UrlbarUtils: "resource:///modules/UrlbarUtils.sys.mjs",
-});
-
-XPCOMUtils.defineLazyModuleGetters(lazy, {
-  FilterAdult: "resource://activity-stream/lib/FilterAdult.jsm",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", function () {
@@ -184,15 +179,10 @@ class _InteractionsBlocklist {
 
     // First, find the URL's base host: the hostname without any subdomains or a
     // public suffix.
-    let url;
-    try {
-      url = new URL(urlToCheck);
-      if (!url) {
-        throw new Error();
-      }
-    } catch (ex) {
+    let url = URL.parse(urlToCheck);
+    if (!url) {
       lazy.logConsole.warn(
-        `Invalid URL passed to InteractionsBlocklist.isUrlBlocklisted: ${url}`
+        `Invalid URL passed to InteractionsBlocklist.isUrlBlocklisted: ${urlToCheck}`
       );
       return false;
     }

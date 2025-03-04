@@ -22,9 +22,8 @@
 #include "XULTreeElement.h"
 #include "js/CompilationAndEvaluation.h"
 #include "js/CompileOptions.h"  // JS::CompileOptions, JS::OwningCompileOptions, , JS::ReadOnlyCompileOptions, JS::ReadOnlyDecodeOptions, JS::DecodeOptions
-#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::CompileGlobalScriptToStencil, JS::CompilationStorage
+#include "js/experimental/CompileScript.h"  // JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::ThreadStackQuotaForSize, JS::CompileGlobalScriptToStencil, JS::CompilationStorage
 #include "js/experimental/JSStencil.h"      // JS::Stencil, JS::FrontendContext
-#include "js/OffThreadScriptCompilation.h"
 #include "js/SourceText.h"
 #include "js/Transcoding.h"
 #include "js/Utility.h"
@@ -38,6 +37,7 @@
 #include "mozilla/EventQueue.h"
 #include "mozilla/EventStateManager.h"
 #include "mozilla/FlushType.h"
+#include "mozilla/FocusModel.h"
 #include "mozilla/GlobalKeyListener.h"
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/MacroForEach.h"
@@ -49,8 +49,10 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/ShutdownPhase.h"
 #include "mozilla/StaticAnalysisFunctions.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_javascript.h"
 #include "mozilla/StaticPtr.h"
+#include "mozilla/FocusModel.h"
 #include "mozilla/TaskController.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/URLExtraData.h"
@@ -173,7 +175,6 @@ nsXULElement* nsXULElement::Construct(
   }
 
   if (nodeInfo->Equals(nsGkAtoms::menupopup) ||
-      nodeInfo->Equals(nsGkAtoms::popup) ||
       nodeInfo->Equals(nsGkAtoms::panel)) {
     return NS_NewXULPopupElement(nodeInfo.forget());
   }
@@ -221,68 +222,42 @@ nsXULElement* nsXULElement::Construct(
 }
 
 /* static */
-already_AddRefed<nsXULElement> nsXULElement::CreateFromPrototype(
-    nsXULPrototypeElement* aPrototype, mozilla::dom::NodeInfo* aNodeInfo,
-    bool aIsScriptable, bool aIsRoot) {
-  RefPtr<mozilla::dom::NodeInfo> ni = aNodeInfo;
+already_AddRefed<Element> nsXULElement::CreateFromPrototype(
+    nsXULPrototypeElement* aPrototype, Document* aDocument, bool aIsRoot) {
+  mozilla::dom::NodeInfo* ni = aPrototype->mNodeInfo;
+  RefPtr<mozilla::dom::NodeInfo> nodeInfo =
+      aDocument->NodeInfoManager()->GetNodeInfo(
+          ni->NameAtom(), ni->GetPrefixAtom(), ni->NamespaceID(), ELEMENT_NODE);
+
   nsCOMPtr<Element> baseElement;
-  NS_NewXULElement(getter_AddRefs(baseElement), ni.forget(),
+  NS_NewXULElement(getter_AddRefs(baseElement), nodeInfo.forget(),
                    dom::FROM_PARSER_NETWORK, aPrototype->mIsAtom);
-
-  if (baseElement) {
-    nsXULElement* element = FromNode(baseElement);
-
-    if (aPrototype->mHasIdAttribute) {
-      element->SetHasID();
-    }
-    if (aPrototype->mHasClassAttribute) {
-      element->SetMayHaveClass();
-    }
-    if (aPrototype->mHasStyleAttribute) {
-      element->SetMayHaveStyle();
-    }
-
-    element->MakeHeavyweight(aPrototype);
-    if (aIsScriptable) {
-      // Check each attribute on the prototype to see if we need to do
-      // any additional processing and hookup that would otherwise be
-      // done 'automagically' by SetAttr().
-      for (const auto& attribute : aPrototype->mAttributes) {
-        element->AddListenerForAttributeIfNeeded(attribute.mName);
-      }
-    }
-
-    return baseElement.forget().downcast<nsXULElement>();
+  if (!baseElement) {
+    return nullptr;
   }
 
-  return nullptr;
-}
+  nsXULElement* element = FromNode(baseElement);
 
-nsresult nsXULElement::CreateFromPrototype(nsXULPrototypeElement* aPrototype,
-                                           Document* aDocument,
-                                           bool aIsScriptable, bool aIsRoot,
-                                           Element** aResult) {
-  // Create an nsXULElement from a prototype
-  MOZ_ASSERT(aPrototype != nullptr, "null ptr");
-  if (!aPrototype) return NS_ERROR_NULL_POINTER;
-
-  MOZ_ASSERT(aResult != nullptr, "null ptr");
-  if (!aResult) return NS_ERROR_NULL_POINTER;
-
-  RefPtr<mozilla::dom::NodeInfo> nodeInfo;
-  if (aDocument) {
-    mozilla::dom::NodeInfo* ni = aPrototype->mNodeInfo;
-    nodeInfo = aDocument->NodeInfoManager()->GetNodeInfo(
-        ni->NameAtom(), ni->GetPrefixAtom(), ni->NamespaceID(), ELEMENT_NODE);
-  } else {
-    nodeInfo = aPrototype->mNodeInfo;
+  if (aPrototype->mHasIdAttribute) {
+    element->SetHasID();
+  }
+  if (aPrototype->mHasClassAttribute) {
+    element->SetMayHaveClass();
+  }
+  if (aPrototype->mHasStyleAttribute) {
+    element->SetMayHaveStyle();
   }
 
-  RefPtr<nsXULElement> element =
-      CreateFromPrototype(aPrototype, nodeInfo, aIsScriptable, aIsRoot);
-  element.forget(aResult);
+  element->MakeHeavyweight(aPrototype);
 
-  return NS_OK;
+  // Check each attribute on the prototype to see if we need to do
+  // any additional processing and hookup that would otherwise be
+  // done 'automagically' by SetAttr().
+  for (const auto& attribute : aPrototype->mAttributes) {
+    element->AddListenerForAttributeIfNeeded(attribute.mName);
+  }
+
+  return baseElement.forget();
 }
 
 nsresult NS_NewXULElement(Element** aResult,
@@ -374,91 +349,54 @@ static bool IsNonList(mozilla::dom::NodeInfo* aNodeInfo) {
          !aNodeInfo->Equals(nsGkAtoms::richlistbox);
 }
 
-bool nsXULElement::IsFocusableInternal(int32_t* aTabIndex, bool aWithMouse) {
-  /*
-   * Returns true if an element may be focused, and false otherwise. The inout
-   * argument aTabIndex will be set to the tab order index to be used; -1 for
-   * elements that should not be part of the tab order and a greater value to
-   * indicate its tab order.
-   *
-   * Confusingly, the supplied value for the aTabIndex argument may indicate
-   * whether the element may be focused as a result of the -moz-user-focus
-   * property, where -1 means no and 0 means yes.
-   *
-   * For controls, the element cannot be focused and is not part of the tab
-   * order if it is disabled.
-   *
-   * -moz-user-focus is overridden if a tabindex (even -1) is specified.
-   *
-   * Specifically, the behaviour for all XUL elements is as follows:
-   *  *aTabIndex = -1  no tabindex     Not focusable or tabbable
-   *  *aTabIndex = -1  tabindex="-1"   Focusable but not tabbable
-   *  *aTabIndex = -1  tabindex=">=0"  Focusable and tabbable
-   *  *aTabIndex >= 0  no tabindex     Focusable and tabbable
-   *  *aTabIndex >= 0  tabindex="-1"   Focusable but not tabbable
-   *  *aTabIndex >= 0  tabindex=">=0"  Focusable and tabbable
-   *
-   * If aTabIndex is null, then the tabindex is not computed, and
-   * true is returned for non-disabled controls and false otherwise.
-   */
-
-  // elements are not focusable by default
-  bool shouldFocus = false;
-
+nsXULElement::XULFocusability nsXULElement::GetXULFocusability(
+    IsFocusableFlags aFlags) {
 #ifdef XP_MACOSX
-  // on Mac, mouse interactions only focus the element if it's a list,
+  // On Mac, mouse interactions only focus the element if it's a list,
   // or if it's a remote target, since the remote target must handle
   // the focus.
-  if (aWithMouse && IsNonList(mNodeInfo) &&
+  if ((aFlags & IsFocusableFlags::WithMouse) && IsNonList(mNodeInfo) &&
       !EventStateManager::IsTopLevelRemoteTarget(this)) {
-    return false;
+    return XULFocusability::NeverFocusable();
   }
 #endif
 
+  XULFocusability result;
   nsCOMPtr<nsIDOMXULControlElement> xulControl = AsXULControl();
   if (xulControl) {
-    // a disabled element cannot be focused and is not part of the tab order
+    // A disabled element cannot be focused and is not part of the tab order
     bool disabled;
     xulControl->GetDisabled(&disabled);
     if (disabled) {
-      if (aTabIndex) *aTabIndex = -1;
-      return false;
+      return XULFocusability::NeverFocusable();
     }
-    shouldFocus = true;
+    result.mDefaultFocusable = true;
   }
-
-  if (aTabIndex) {
-    Maybe<int32_t> attrVal = GetTabIndexAttrValue();
-    if (attrVal.isSome()) {
-      // The tabindex attribute was specified, so the element becomes
-      // focusable.
-      shouldFocus = true;
-      *aTabIndex = attrVal.value();
-    } else {
-      // otherwise, if there is no tabindex attribute, just use the value of
-      // *aTabIndex to indicate focusability. Reset any supplied tabindex to 0.
-      shouldFocus = *aTabIndex >= 0;
-      if (shouldFocus) {
-        *aTabIndex = 0;
-      }
-    }
-
-    if (xulControl && shouldFocus && sTabFocusModelAppliesToXUL &&
-        !(sTabFocusModel & eTabFocus_formElementsMask)) {
-      // By default, the tab focus model doesn't apply to xul element on any
-      // system but OS X. on OS X we're following it for UI elements (XUL) as
-      // sTabFocusModel is based on "Full Keyboard Access" system setting (see
-      // mac/nsILookAndFeel). both textboxes and list elements (i.e. trees and
-      // list) should always be focusable (textboxes are handled as html:input)
-      // For compatibility, we only do this for controls, otherwise elements
-      // like <browser> cannot take this focus.
-      if (IsNonList(mNodeInfo)) {
-        *aTabIndex = -1;
-      }
-    }
+  if (Maybe<int32_t> attrVal = GetTabIndexAttrValue()) {
+    // The tabindex attribute was specified, so the element becomes
+    // focusable.
+    result.mDefaultFocusable = true;
+    result.mForcedFocusable.emplace(true);
+    result.mForcedTabIndexIfFocusable.emplace(attrVal.value());
   }
+  if (xulControl && FocusModel::AppliesToXUL() &&
+      !FocusModel::IsTabFocusable(TabFocusableType::FormElements) &&
+      IsNonList(mNodeInfo)) {
+    // By default, the tab focus model doesn't apply to xul element on any
+    // system but OS X. For compatibility, we only do this for controls,
+    // otherwise elements like <browser> cannot take this focus.
+    result.mForcedTabIndexIfFocusable = Some(-1);
+  }
+  return result;
+}
 
-  return shouldFocus;
+// XUL elements are not focusable unless explicitly opted-into it with
+// -moz-user-focus: normal, or the tabindex attribute.
+Focusable nsXULElement::IsFocusableWithoutStyle(IsFocusableFlags aFlags) {
+  const auto focusability = GetXULFocusability(aFlags);
+  const bool focusable = focusability.mDefaultFocusable;
+  return {focusable,
+          focusable ? focusability.mForcedTabIndexIfFocusable.valueOr(-1) : -1};
 }
 
 bool nsXULElement::HasMenu() {
@@ -590,19 +528,6 @@ void nsXULElement::AddListenerForAttributeIfNeeded(const nsAttrName& aName) {
   }
 }
 
-//----------------------------------------------------------------------
-//
-// nsIContent interface
-//
-void nsXULElement::UpdateEditableState(bool aNotify) {
-  // Don't call through to Element here because the things
-  // it does don't work for cases when we're an editable control.
-  nsIContent* parent = GetParent();
-
-  SetEditableFlag(parent && parent->HasFlag(NODE_IS_EDITABLE));
-  UpdateState(aNotify);
-}
-
 class XULInContentErrorReporter : public Runnable {
  public:
   explicit XULInContentErrorReporter(Document& aDocument)
@@ -659,29 +584,6 @@ nsresult nsXULElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   }
 #endif
 
-  // Within Bug 1492063 and its dependencies we started to apply a
-  // CSP to system privileged about pages. Since some about: pages
-  // are implemented in *.xul files we added this workaround to
-  // apply a CSP to them. To do so, we check the introduced custom
-  // attribute 'csp' on the root element.
-  if (doc.GetRootElement() == this) {
-    nsAutoString cspPolicyStr;
-    GetAttr(nsGkAtoms::csp, cspPolicyStr);
-
-#ifdef DEBUG
-    {
-      nsCOMPtr<nsIContentSecurityPolicy> docCSP = doc.GetCsp();
-      uint32_t policyCount = 0;
-      if (docCSP) {
-        docCSP->GetPolicyCount(&policyCount);
-      }
-      MOZ_ASSERT(policyCount == 0, "how come we already have a policy?");
-    }
-#endif
-
-    CSP_ApplyMetaCSPToDoc(doc, cspPolicyStr);
-  }
-
   if (NodeInfo()->Equals(nsGkAtoms::keyset, kNameSpaceID_XUL)) {
     // Create our XUL key listener and hook it up.
     XULKeySetGlobalKeyListener::AttachKeyHandler(this);
@@ -703,7 +605,7 @@ nsresult nsXULElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   return rv;
 }
 
-void nsXULElement::UnbindFromTree(bool aNullParent) {
+void nsXULElement::UnbindFromTree(UnbindContext& aContext) {
   if (NodeInfo()->Equals(nsGkAtoms::keyset, kNameSpaceID_XUL)) {
     XULKeySetGlobalKeyListener::DetachKeyHandler(this);
   }
@@ -738,7 +640,7 @@ void nsXULElement::UnbindFromTree(bool aNullParent) {
     slots->mControllers = nullptr;
   }
 
-  nsStyledElement::UnbindFromTree(aNullParent);
+  nsStyledElement::UnbindFromTree(aContext);
 }
 
 void nsXULElement::DoneAddingChildren(bool aHaveNotified) {
@@ -916,9 +818,9 @@ void nsXULElement::List(FILE* out, int32_t aIndent) const {
 bool nsXULElement::IsEventStoppedFromAnonymousScrollbar(EventMessage aMessage) {
   return (IsRootOfNativeAnonymousSubtree() &&
           IsAnyOfXULElements(nsGkAtoms::scrollbar, nsGkAtoms::scrollcorner) &&
-          (aMessage == eMouseClick || aMessage == eMouseDoubleClick ||
+          (aMessage == ePointerClick || aMessage == eMouseDoubleClick ||
            aMessage == eXULCommand || aMessage == eContextMenu ||
-           aMessage == eDragStart || aMessage == eMouseAuxClick));
+           aMessage == eDragStart || aMessage == ePointerAuxClick));
 }
 
 nsresult nsXULElement::DispatchXULCommand(const EventChainVisitor& aVisitor,
@@ -1040,25 +942,35 @@ void nsXULElement::ClickWithInputSource(uint16_t aInputSource,
       // This helps to avoid commands being dispatched from
       // XULButtonElement::PostHandleEventForMenu.
       eventUp.mFlags.mMultipleActionsPrevented = true;
-      WidgetMouseEvent eventClick(aIsTrustedEvent, eMouseClick, nullptr,
-                                  WidgetMouseEvent::eReal);
+      WidgetPointerEvent eventClick(aIsTrustedEvent, ePointerClick, nullptr);
       eventDown.mInputSource = eventUp.mInputSource = eventClick.mInputSource =
           aInputSource;
+      switch (aInputSource) {
+        case MouseEvent_Binding::MOZ_SOURCE_MOUSE:
+          MOZ_ASSERT(eventClick.pointerId == 0 || eventClick.pointerId == 1,
+                     "pointerId for the primary mouse pointer must be 0 or 1");
+          break;
+        case MouseEvent_Binding::MOZ_SOURCE_KEYBOARD:
+        case MouseEvent_Binding::MOZ_SOURCE_UNKNOWN:
+          // pointerId definition in Pointer Events:
+          // > The pointerId value of -1 MUST be reserved and used to indicate
+          // > events that were generated by something other than a pointing
+          // > device.
+          eventDown.pointerId = eventUp.pointerId = eventClick.pointerId = -1;
+          break;
+      }
 
       // send mouse down
       nsEventStatus status = nsEventStatus_eIgnore;
-      EventDispatcher::Dispatch(static_cast<nsIContent*>(this), context,
-                                &eventDown, nullptr, &status);
+      EventDispatcher::Dispatch(this, context, &eventDown, nullptr, &status);
 
       // send mouse up
       status = nsEventStatus_eIgnore;  // reset status
-      EventDispatcher::Dispatch(static_cast<nsIContent*>(this), context,
-                                &eventUp, nullptr, &status);
+      EventDispatcher::Dispatch(this, context, &eventUp, nullptr, &status);
 
       // send mouse click
       status = nsEventStatus_eIgnore;  // reset status
-      EventDispatcher::Dispatch(static_cast<nsIContent*>(this), context,
-                                &eventClick, nullptr, &status);
+      EventDispatcher::Dispatch(this, context, &eventClick, nullptr, &status);
 
       // If the click has been prevented, lets skip the command call
       // this is how a physical click works
@@ -1335,6 +1247,12 @@ nsresult nsXULPrototypeElement::Deserialize(
     return NS_ERROR_UNEXPECTED;
   }
 
+  if (mNodeInfo->Equals(nsGkAtoms::parsererror) &&
+      mNodeInfo->NamespaceEquals(
+          nsDependentAtomString(nsGkAtoms::nsuri_parsererror))) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
   // Read Attributes
   rv = aStream->Read32(&number);
   if (NS_WARN_IF(NS_FAILED(rv))) return rv;
@@ -1469,6 +1387,10 @@ nsresult nsXULPrototypeElement::SetAttrAt(uint32_t aPos,
     // Store id as atom.
     // id="" means that the element has no id. Not that it has
     // emptystring as id.
+    mAttributes[aPos].mValue.ParseAtom(aValue);
+
+    return NS_OK;
+  } else if (mAttributes[aPos].mName.Equals(nsGkAtoms::aria_activedescendant)) {
     mAttributes[aPos].mValue.ParseAtom(aValue);
 
     return NS_OK;
@@ -1803,7 +1725,8 @@ static void CheckErrorsAndWarnings(JS::FrontendContext* aFc,
       NS_WARNING(
           nsPrintfCString(
               "Had compilation error in ScriptCompileTask: %s at %s:%u:%u",
-              message, filename, report->lineno, report->column)
+              message, filename, report->lineno,
+              report->column.oneOriginValue())
               .get());
     }
 
@@ -1837,7 +1760,7 @@ static void CheckErrorsAndWarnings(JS::FrontendContext* aFc,
     NS_WARNING(
         nsPrintfCString(
             "Had compilation warning in ScriptCompileTask: %s at %s:%u:%u",
-            message, filename, report->lineno, report->column)
+            message, filename, report->lineno, report->column.oneOriginValue())
             .get());
   }
 }
@@ -1874,8 +1797,9 @@ class ScriptCompileTask final : public Task {
  private:
   void Compile() {
     // NOTE: The stack limit must be set from the same thread that compiles.
-    const size_t kDefaultStackQuota = 128 * sizeof(size_t) * 1024;
-    JS::SetNativeStackQuota(mFrontendContext, kDefaultStackQuota);
+    size_t stackSize = TaskController::GetThreadStackSize();
+    JS::SetNativeStackQuota(mFrontendContext,
+                            JS::ThreadStackQuotaForSize(stackSize));
 
     JS::SourceText<Utf8Unit> srcBuf;
     if (NS_WARN_IF(!srcBuf.init(mFrontendContext, mText.get(), mTextLength,
@@ -1883,9 +1807,8 @@ class ScriptCompileTask final : public Task {
       return;
     }
 
-    JS::CompilationStorage compileStorage;
-    mStencil = JS::CompileGlobalScriptToStencil(mFrontendContext, mOptions,
-                                                srcBuf, compileStorage);
+    mStencil =
+        JS::CompileGlobalScriptToStencil(mFrontendContext, mOptions, srcBuf);
 #ifdef DEBUG
     // Chrome-privileged code shouldn't have any compilation error.
     CheckErrorsAndWarnings(mFrontendContext, mOptions);
@@ -1894,9 +1817,9 @@ class ScriptCompileTask final : public Task {
   }
 
  public:
-  bool Run() override {
+  TaskResult Run() override {
     Compile();
-    return true;
+    return TaskResult::Complete;
   }
 
   already_AddRefed<JS::Stencil> StealStencil() { return mStencil.forget(); }
@@ -1932,11 +1855,11 @@ class NotifyOffThreadScriptCompletedTask : public Task {
         mReceiver(aReceiver),
         mCompileTask(aCompileTask) {}
 
-  bool Run() override {
+  TaskResult Run() override {
     MOZ_ASSERT(NS_IsMainThread());
 
     if (PastShutdownPhase(ShutdownPhase::XPCOMShutdownFinal)) {
-      return true;
+      return TaskResult::Complete;
     }
 
     RefPtr<JS::Stencil> stencil = mCompileTask->StealStencil();
@@ -1945,7 +1868,7 @@ class NotifyOffThreadScriptCompletedTask : public Task {
     (void)mReceiver->OnScriptCompileComplete(
         stencil, stencil ? NS_OK : NS_ERROR_FAILURE);
 
-    return true;
+    return TaskResult::Complete;
   }
 
 #ifdef MOZ_COLLECTING_RUNNABLE_TELEMETRY

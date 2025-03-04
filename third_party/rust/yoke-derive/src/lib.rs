@@ -60,7 +60,7 @@ fn yokeable_derive_impl(input: &DeriveInput) -> TokenStream2 {
         let name = &input.ident;
         quote! {
             // This is safe because there are no lifetime parameters.
-            unsafe impl<'a, #(#tybounds),*> yoke::Yokeable<'a> for #name<#(#typarams),*> where #(#static_bounds),* {
+            unsafe impl<'a, #(#tybounds),*> yoke::Yokeable<'a> for #name<#(#typarams),*> where #(#static_bounds,)* Self: Sized {
                 type Output = Self;
                 #[inline]
                 fn transform(&self) -> &Self::Output {
@@ -198,7 +198,7 @@ fn yokeable_derive_impl(input: &DeriveInput) -> TokenStream2 {
                         // are the same
                         debug_assert!(mem::size_of::<Self::Output>() == mem::size_of::<Self>());
                         let ptr: *const Self = (&this as *const Self::Output).cast();
-                        #[allow(clippy::forget_copy)] // This is a noop if the struct is copy, which Clippy doesn't like
+                        #[allow(forgetting_copy_types, clippy::forget_copy, clippy::forget_non_drop)] // This is a noop if the struct is copy, which Clippy doesn't like
                         mem::forget(this);
                         ptr::read(ptr)
                     }
@@ -220,7 +220,7 @@ fn yokeable_derive_impl(input: &DeriveInput) -> TokenStream2 {
             //
             // This custom derive can be improved to handle this case when
             // necessary
-            unsafe impl<'a, #(#tybounds),*> yoke::Yokeable<'a> for #name<'static, #(#typarams),*> where #(#static_bounds),* {
+            unsafe impl<'a, #(#tybounds),*> yoke::Yokeable<'a> for #name<'static, #(#typarams),*> where #(#static_bounds,)* {
                 type Output = #name<'a, #(#typarams),*>;
                 #[inline]
                 fn transform(&'a self) -> &'a Self::Output {
@@ -237,7 +237,7 @@ fn yokeable_derive_impl(input: &DeriveInput) -> TokenStream2 {
                     // are the same
                     debug_assert!(mem::size_of::<Self::Output>() == mem::size_of::<Self>());
                     let ptr: *const Self = (&this as *const Self::Output).cast();
-                    #[allow(clippy::forget_copy)] // This is a noop if the struct is copy, which Clippy doesn't like
+                    #[allow(forgetting_copy_types, clippy::forget_copy, clippy::forget_non_drop)] // This is a noop if the struct is copy, which Clippy doesn't like
                     mem::forget(this);
                     ptr::read(ptr)
                 }

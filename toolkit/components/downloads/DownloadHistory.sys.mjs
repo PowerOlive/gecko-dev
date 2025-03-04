@@ -190,12 +190,12 @@ let DownloadCache = {
       return this._initializePromise;
     }
     this._initializePromise = (async () => {
-      const placesObserver = new PlacesWeakCallbackWrapper(
+      this._placesObserver = new PlacesWeakCallbackWrapper(
         this.handlePlacesEvents.bind(this)
       );
       PlacesObservers.addListener(
         ["history-cleared", "page-removed"],
-        placesObserver
+        this._placesObserver
       );
 
       let pageAnnos = await lazy.PlacesUtils.history.fetchAnnotatedPages([
@@ -728,7 +728,7 @@ class DownloadHistoryList extends DownloadList {
   }
 
   // nsINavHistoryResultObserver
-  containerStateChanged(node, oldState, newState) {
+  containerStateChanged(node) {
     this.invalidateContainer(node);
   }
 
@@ -766,7 +766,7 @@ class DownloadHistoryList extends DownloadList {
   }
 
   // nsINavHistoryResultObserver
-  nodeRemoved(parent, placesNode, aOldIndex) {
+  nodeRemoved(parent, placesNode) {
     let slotsForUrl = this._slotsForUrl.get(placesNode.uri);
     for (let slot of slotsForUrl) {
       if (slot.sessionDownload) {

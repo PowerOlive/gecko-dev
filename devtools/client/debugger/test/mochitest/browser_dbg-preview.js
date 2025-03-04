@@ -18,7 +18,6 @@ add_task(async function () {
   ]);
 
   await selectSource(dbg, "preview.js");
-  await testBucketedArray(dbg);
 
   await testPreviews(dbg, "empties", [
     { line: 6, column: 9, expression: "a", result: '""' },
@@ -28,7 +27,7 @@ add_task(async function () {
   ]);
 
   await testPreviews(dbg, "objects", [
-    { line: 27, column: 10, expression: "empty", result: "{}" },
+    { line: 27, column: 10, expression: "empty", result: "Object" },
     { line: 28, column: 22, expression: "foo", result: 1 },
   ]);
 
@@ -50,7 +49,7 @@ add_task(async function () {
     {
       line: 50,
       column: 47,
-      expression: "Foo.#privateStatic",
+      expression: "#privateStatic",
       fields: [
         ["first", `"a"`],
         ["second", `"b"`],
@@ -68,6 +67,76 @@ add_task(async function () {
     { line: 51, column: 39, expression: "#privateVar", result: 2 },
   ]);
 
+  await testPreviews(dbg, "multipleTokens", [
+    { line: 81, column: 4, expression: "foo", result: "Object" },
+    { line: 81, column: 11, expression: "blip", result: "Object" },
+    { line: 82, column: 8, expression: "bar", result: "Object" },
+    { line: 84, column: 16, expression: "boom", result: `0` },
+  ]);
+
+  await testPreviews(dbg, "thisProperties", [
+    { line: 96, column: 13, expression: "myProperty", result: "Object" },
+    { line: 96, column: 23, expression: "x", result: "this-myProperty-x" },
+    {
+      line: 98,
+      column: 13,
+      expression: "propertyName",
+      result: "myProperty",
+    },
+    {
+      line: 98,
+      column: 26,
+      expression: "y",
+      result: "this-myProperty-y",
+    },
+    {
+      line: 99,
+      column: 14,
+      expression: "propertyName",
+      result: "myProperty",
+    },
+    {
+      line: 99,
+      column: 28,
+      expression: "z",
+      result: "this-myProperty-z",
+    },
+  ]);
+
+  await testPreviews(dbg, "valueOfExpression", [
+    { line: 107, column: 6, expression: "value", result: "foo" },
+  ]);
+
+  // javascript.options.experimental.explicit_resource_management is set to true, but it's
+  // only supported on Nightly at the moment, so only check for SuppressedError if
+  // they're supported.
+  if (AppConstants.ENABLE_EXPLICIT_RESOURCE_MANAGEMENT) {
+    info("Check that preview works in a script with `using` keyword");
+
+    const onPaused = waitForPaused(dbg);
+    dbg.commands.scriptCommand.execute(
+      `
+      {
+        using erm = {
+          [Symbol.dispose]() {},
+          foo: 42
+        };
+        console.log(erm.foo);
+        debugger;
+      }`,
+      {}
+    );
+
+    await onPaused;
+    await assertPreviews(dbg, [
+      // assignment
+      { line: 3, column: 16, expression: "erm", result: "Object" },
+      { line: 7, column: 26, expression: "foo", result: "42" },
+    ]);
+    await resume(dbg);
+  }
+
+  await selectSource(dbg, "preview.js");
   info(
     "Check that closing the preview tooltip doesn't release the underlying object actor"
   );
@@ -92,7 +161,7 @@ add_task(async function () {
   );
   const nodes = popupEl.querySelectorAll(".preview-popup .node");
   const initialNodesLength = nodes.length;
-  nodes[1].querySelector(".arrow").click();
+  nodes[1].querySelector(".theme-twisty").click();
   await waitFor(
     () =>
       popupEl.querySelectorAll(".preview-popup .node").length >
@@ -111,52 +180,4 @@ async function testPreviews(dbg, fnName, previews) {
   await resume(dbg);
 
   info(`Ran tests for ${fnName}`);
-}
-
-async function testBucketedArray(dbg) {
-  invokeInTab("largeArray");
-  await waitForPaused(dbg);
-  const { element: popupEl, tokenEl } = await tryHovering(
-    dbg,
-    34,
-    10,
-    "previewPopup"
-  );
-
-  info("Wait for top level node to expand and child nodes to load");
-  await waitForElementWithSelector(
-    dbg,
-    ".preview-popup .node:first-of-type .arrow.expanded"
-  );
-  await waitUntil(
-    () => popupEl.querySelectorAll(".preview-popup .node").length > 1
-  );
-
-  const oiNodes = Array.from(popupEl.querySelectorAll(".preview-popup .node"));
-
-  const displayedPropertyNames = oiNodes.map(
-    oiNode => oiNode.querySelector(".object-label")?.textContent
-  );
-  Assert.deepEqual(displayedPropertyNames, [
-    null, // No property name is displayed for the root node
-    "[0…99]",
-    "[100…100]",
-    "length",
-    "<prototype>",
-  ]);
-  const node = oiNodes.find(
-    oiNode => oiNode.querySelector(".object-label")?.textContent === "length"
-  );
-  if (!node) {
-    ok(false, `The "length" property is not displayed in the popup`);
-  } else {
-    is(
-      node.querySelector(".objectBox").textContent,
-      "101",
-      `The "length" property has the expected value`
-    );
-  }
-  await closePreviewForToken(dbg, tokenEl, "popup");
-
-  await resume(dbg);
 }

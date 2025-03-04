@@ -26,9 +26,9 @@ macro_rules! lstm_matrix {
         pub struct $name<'data> {
             // Invariant: dims.product() == data.len()
             #[allow(missing_docs)]
-            dims: [u16; $generic],
+            pub(crate) dims: [u16; $generic],
             #[allow(missing_docs)]
-            data: ZeroVec<'data, f32>,
+            pub(crate) data: ZeroVec<'data, f32>,
         }
 
         impl<'data> $name<'data> {
@@ -51,14 +51,6 @@ macro_rules! lstm_matrix {
                 data: ZeroVec<'data, f32>,
             ) -> Self {
                 Self { dims, data }
-            }
-
-            #[cfg(feature = "lstm")]
-            pub(crate) fn as_matrix_zero(&self) -> crate::math_helper::MatrixZero<$generic> {
-                crate::math_helper::MatrixZero::from_parts_unchecked(
-                    &self.data,
-                    self.dims.map(|x| x as usize),
-                )
             }
         }
 
@@ -188,7 +180,7 @@ impl<'data> LstmDataFloat32<'data> {
     }
 
     #[cfg(any(feature = "serde", feature = "datagen"))]
-    /// Creates a LstmDataFloat32 with the given data. Fails if the matrix dimensions are inconsisent.
+    /// Creates a LstmDataFloat32 with the given data. Fails if the matrix dimensions are inconsistent.
     #[allow(clippy::too_many_arguments)] // constructor
     pub fn try_from_parts(
         model: ModelType,
@@ -357,10 +349,4 @@ pub enum LstmDataV1<'data> {
     // new variants should go BELOW existing ones
     // Serde serializes based on variant name and index in the enum
     // https://docs.rs/serde/latest/serde/trait.Serializer.html#tymethod.serialize_unit_variant
-}
-
-pub(crate) struct LstmDataV1Marker;
-
-impl DataMarker for LstmDataV1Marker {
-    type Yokeable = LstmDataV1<'static>;
 }

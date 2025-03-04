@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "gc/RelocationOverlay.h"
+#include "gc/Zone.h"
 #include "js/Id.h"
 #include "js/Value.h"
 #include "vm/StringType.h"
@@ -34,11 +35,6 @@ struct TaggedPtr<JS::Value> {
     if (!obj) {
       return JS::NullValue();
     }
-#ifdef ENABLE_RECORD_TUPLE
-    if (MaybeForwardedIsExtendedPrimitive(*obj)) {
-      return JS::ExtendedPrimitiveValue(*obj);
-    }
-#endif
     return JS::ObjectValue(*obj);
   }
   static JS::Value wrap(JSString* str) { return JS::StringValue(str); }
@@ -93,11 +89,16 @@ struct MightBeForwarded {
 
 template <typename T>
 inline bool IsForwarded(const T* t) {
-  if (!MightBeForwarded<T>::value) {
+  if constexpr (!MightBeForwarded<T>::value) {
     MOZ_ASSERT(!t->isForwarded());
     return false;
   }
 
+  return t->isForwarded();
+}
+
+template <>
+inline bool IsForwarded<Cell>(const Cell* t) {
   return t->isForwarded();
 }
 
@@ -183,9 +184,40 @@ inline void PreWriteBarrierDuringFlattening(JSString* str) {
 
 #ifdef JSGC_HASH_TABLE_CHECKS
 
+// Moving GC things whose pointers are used in hash table keys has the potential
+// to break hash tables in subtle and terrifying ways. For example, a key might
+// be reported as not present but iterating the table could still return it.
+//
+// Check that a table is correct following a moving GC, ensuring that nothing is
+// present in the table that points into the nursery or that has not been moved,
+// and that the hash table entries are discoverable.
+//
+// |checkEntryAndGetLookup| should check any GC thing pointers in the entry are
+// valid and return the lookup required to get this entry from the table.
+
+template <typename Table, typename Range, typename Lookup>
+void CheckTableEntryAfterMovingGC(const Table& table, const Range& r,
+                                  const Lookup& lookup) {
+  auto ptr = table.lookup(lookup);
+  MOZ_RELEASE_ASSERT(ptr.found() && &*ptr == &r.front());
+}
+
+template <typename Table, typename F>
+void CheckTableAfterMovingGC(const Table& table, F&& checkEntryAndGetLookup) {
+  for (auto r = table.all(); !r.empty(); r.popFront()) {
+    auto lookup = checkEntryAndGetLookup(r.front());
+    CheckTableEntryAfterMovingGC(table, r, lookup);
+  }
+}
+
 template <typename T>
 inline bool IsGCThingValidAfterMovingGC(T* t) {
-  return !IsInsideNursery(t) && !t->isForwarded();
+  if (!t->isTenured()) {
+    return false;
+  }
+
+  TenuredCell* cell = &t->asTenured();
+  return cell->arena()->allocated() && !cell->isForwarded();
 }
 
 template <typename T>
@@ -196,8 +228,24 @@ inline void CheckGCThingAfterMovingGC(T* t) {
 }
 
 template <typename T>
-inline void CheckGCThingAfterMovingGC(const WeakHeapPtr<T*>& t) {
-  CheckGCThingAfterMovingGC(t.unbarrieredGet());
+inline void CheckGCThingAfterMovingGC(T* t, JS::Zone* expectedZone) {
+  if (t) {
+    MOZ_RELEASE_ASSERT(IsGCThingValidAfterMovingGC(t));
+    JS::Zone* zone = t->zoneFromAnyThread();
+    MOZ_RELEASE_ASSERT(zone == expectedZone || zone->isAtomsZone());
+  }
+}
+
+template <typename T>
+inline void CheckGCThingAfterMovingGC(const WeakHeapPtr<T*>& t,
+                                      JS::Zone* expectedZone) {
+  CheckGCThingAfterMovingGC(t.unbarrieredGet(), expectedZone);
+}
+
+inline void CheckProtoAfterMovingGC(const TaggedProto& proto, JS::Zone* zone) {
+  if (proto.isObject()) {
+    CheckGCThingAfterMovingGC(proto.toObject(), zone);
+  }
 }
 
 #endif  // JSGC_HASH_TABLE_CHECKS

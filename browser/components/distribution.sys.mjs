@@ -53,7 +53,14 @@ DistributionCustomizer.prototype = {
         PREF_CACHED_FILE_APPVERSION,
         "unknown"
       );
-      if (knownForVersion == AppConstants.MOZ_APP_VERSION) {
+      // StartupCacheInfo isn't available in xpcshell tests.
+      if (
+        knownForVersion == AppConstants.MOZ_APP_VERSION &&
+        (Cu.isInAutomation ||
+          Cc["@mozilla.org/startupcacheinfo;1"].getService(
+            Ci.nsIStartupCacheInfo
+          ).FoundDiskCacheOnInit)
+      ) {
         return Services.prefs.getBoolPref(PREF_CACHED_FILE_EXISTENCE);
       }
     }
@@ -108,12 +115,13 @@ DistributionCustomizer.prototype = {
   async _removeDistributionBookmarks() {
     await lazy.PlacesUtils.bookmarks.fetch(
       { guidPrefix: this.BOOKMARK_GUID_PREFIX },
-      bookmark => lazy.PlacesUtils.bookmarks.remove(bookmark).catch()
+      bookmark =>
+        lazy.PlacesUtils.bookmarks.remove(bookmark).catch(console.error)
     );
     await lazy.PlacesUtils.bookmarks.fetch(
       { guidPrefix: this.FOLDER_GUID_PREFIX },
       folder => {
-        lazy.PlacesUtils.bookmarks.remove(folder).catch();
+        lazy.PlacesUtils.bookmarks.remove(folder).catch(console.error);
       }
     );
   },
@@ -240,22 +248,13 @@ DistributionCustomizer.prototype = {
 
           if (item.icon && item.iconData) {
             try {
-              let faviconURI = Services.io.newURI(item.icon);
-              lazy.PlacesUtils.favicons.replaceFaviconDataFromDataURL(
-                faviconURI,
-                item.iconData,
-                0,
-                Services.scriptSecurityManager.getSystemPrincipal()
-              );
-
-              lazy.PlacesUtils.favicons.setAndFetchFaviconForPage(
-                Services.io.newURI(item.link),
-                faviconURI,
-                false,
-                lazy.PlacesUtils.favicons.FAVICON_LOAD_NON_PRIVATE,
-                null,
-                Services.scriptSecurityManager.getSystemPrincipal()
-              );
+              lazy.PlacesUtils.favicons
+                .setFaviconForPage(
+                  Services.io.newURI(item.link),
+                  Services.io.newURI(item.icon),
+                  Services.io.newURI(item.iconData)
+                )
+                .catch(console.error);
             } catch (e) {
               console.error(e);
             }
@@ -604,6 +603,18 @@ DistributionCustomizer.prototype = {
             "toolbar-menubar",
             "autohide",
             "false"
+          );
+        }
+      } catch (e) {}
+      // If a theme was specified in the distribution, and it's a new profile,
+      // set the theme as default.
+      try {
+        const activeThemeID = Services.prefs.getCharPref(
+          "extensions.activeThemeID"
+        );
+        if (activeThemeID) {
+          lazy.AddonManager.getAddonByID(activeThemeID).then(addon =>
+            addon?.enable()
           );
         }
       } catch (e) {}

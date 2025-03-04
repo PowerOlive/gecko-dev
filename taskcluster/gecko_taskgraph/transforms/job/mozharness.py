@@ -77,7 +77,7 @@ mozharness_run_schema = Schema(
         Optional("job-script"): str,
         Required("requires-signed-builds"): bool,
         # Whether or not to use caches.
-        Optional("use-caches"): bool,
+        Optional("use-caches"): Any(bool, [str]),
         # If false, don't set MOZ_SIMPLE_PACKAGE_NAME
         # Only disableable on windows
         Required("use-simple-package"): bool,
@@ -289,7 +289,7 @@ def mozharness_on_generic_worker(config, job, taskdesc):
         system_python_dir = ""
         gecko_path = "$GECKO_PATH"
 
-    if run.get("use-system-python", True):
+    if run.get("use-python", "system") == "system":
         python_bindir = system_python_dir
     else:
         # $MOZ_PYTHON_HOME is going to be substituted in run-task, when we

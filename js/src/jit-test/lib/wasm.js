@@ -4,7 +4,6 @@ if (!wasmIsSupported())
 load(libdir + "asserts.js");
 
 function canRunHugeMemoryTests() {
-    let conf = getBuildConfiguration();
     // We're aiming for 64-bit desktop builds with no interesting analysis
     // running that might inflate memory consumption unreasonably.  It's OK if
     // they're debug builds, though.
@@ -16,12 +15,12 @@ function canRunHugeMemoryTests() {
     let blocked = ['rooting-analysis','simulator',
                    'android','wasi','asan','tsan','ubsan','dtrace','valgrind'];
     for ( let b of blocked ) {
-        if (conf[b]) {
+        if (getBuildConfiguration(b)) {
             print("Failing canRunHugeMemoryTests() because '" + b + "' is true");
             return false;
         }
     }
-    if (conf['pointer-byte-size'] != 8) {
+    if (getBuildConfiguration("pointer-byte-size") != 8) {
         print("Failing canRunHugeMemoryTests() because the build is not 64-bit");
         return false;
     }
@@ -43,13 +42,12 @@ if (largeArrayBufferSupported()) {
 }
 var MaxPagesIn32BitMemory = Math.floor(MaxBytesIn32BitMemory / PageSizeInBytes);
 
-function wasmEvalText(str, imports) {
-    let binary = wasmTextToBinary(str);
-    let valid = WebAssembly.validate(binary);
+function wasmEvalBinary(binary, imports, compileOptions) {
+    let valid = WebAssembly.validate(binary, compileOptions);
 
     let m;
     try {
-        m = new WebAssembly.Module(binary);
+        m = new WebAssembly.Module(binary, compileOptions);
         assertEq(valid, true, "failed WebAssembly.validate but still compiled successfully");
     } catch(e) {
         if (!e.toString().match(/out of memory/)) {
@@ -61,8 +59,11 @@ function wasmEvalText(str, imports) {
     return new WebAssembly.Instance(m, imports);
 }
 
-function wasmValidateText(str) {
-    let binary = wasmTextToBinary(str);
+function wasmEvalText(str, imports, compileOptions) {
+    return wasmEvalBinary(wasmTextToBinary(str), imports, compileOptions);
+}
+
+function wasmValidateBinary(binary) {
     let valid = WebAssembly.validate(binary);
     if (!valid) {
         new WebAssembly.Module(binary);
@@ -71,10 +72,17 @@ function wasmValidateText(str) {
     assertEq(valid, true, "wasm module was invalid");
 }
 
-function wasmFailValidateText(str, pattern) {
-    let binary = wasmTextToBinary(str);
+function wasmFailValidateBinary(binary, pattern) {
     assertEq(WebAssembly.validate(binary), false, "module passed WebAssembly.validate when it should not have");
-    assertErrorMessage(() => new WebAssembly.Module(binary), WebAssembly.CompileError, pattern, "module failed WebAssembly.validate but did not fail to compile as expected");
+    assertErrorMessage(() => new WebAssembly.Module(binary), WebAssembly.CompileError, pattern, "module failed WebAssembly.validate but did not fail to compile in the expected way");
+}
+
+function wasmValidateText(str) {
+    return wasmValidateBinary(wasmTextToBinary(str));
+}
+
+function wasmFailValidateText(str, pattern) {
+    return wasmFailValidateBinary(wasmTextToBinary(str), pattern);
 }
 
 // Expected compilation failure can happen in a couple of ways:
@@ -135,7 +143,7 @@ function _augmentSrc(src, assertions) {
             switch (type) {
                 case 'f32':
                     newSrc += `
-         i32.reinterpret/f32
+         i32.reinterpret_f32
          ${(function () {
              if (expected == 'nan:arithmetic') {
                expected = '0x7FC00000';
@@ -148,7 +156,7 @@ function _augmentSrc(src, assertions) {
                     break;
                 case 'f64':
                     newSrc += `
-         i64.reinterpret/f64
+         i64.reinterpret_f64
          ${(function () {
              if (expected == 'nan:arithmetic') {
                expected = '0x7FF8000000000000';
@@ -274,9 +282,12 @@ WasmHelpers._normalizeStack = (stack, preciseStacks) => {
         {re:/^jit call to int64(?: or v128)? wasm function$/,             sub:"i64>"},
         {re:/^out-of-line coercion for jit entry arguments \(in wasm\)$/, sub:"ool>"},
         {re:/^wasm-function\[(\d+)\] \(.*\)$/,                            sub:"$1"},
+        {re:/^(\w+) \(.*?> WebAssembly\.Module:\d+\)$/,                   sub:"$1"},
         {re:/^(fast|slow) exit trampoline (?:to native )?\(in wasm\)$/,   sub:"<"},
-        {re:/^call to(?: asm.js)? native (.*) \(in wasm\)$/,              sub:"$1"},
-        {re:/ \(in wasm\)$/,                                              sub:""}
+        {re:/^call to(?: asm.js)? native (.*?)(?: builtin)? \(in wasm\)$/, sub:"$1"},
+        {re:/^call to native (.*)$/,                                      sub:"#$1"},
+        {re:/^tier-up request \(in wasm\)$/,                              sub: ""},
+        {re:/ \(in wasm\)$/,                                              sub:""},
     ];
 
     let entryRegexps;
@@ -427,21 +438,19 @@ let WasmFuncrefValues = [
 // Valid values for structref/arrayref
 let WasmStructrefValues = [];
 let WasmArrayrefValues = [];
-if (wasmGcEnabled()) {
-    let { newStruct, newArray } = wasmEvalText(`
-      (module
-        (type $s (sub (struct)))
-        (type $a (sub (array i32)))
-        (func (export "newStruct") (result anyref)
-            struct.new $s)
-        (func (export "newArray") (result anyref)
-            i32.const 0
-            i32.const 0
-            array.new $a)
-      )`).exports;
-    WasmStructrefValues.push(newStruct());
-    WasmArrayrefValues.push(newArray());
-}
+let { newStruct, newArray } = wasmEvalText(`
+    (module
+    (type $s (sub (struct)))
+    (type $a (sub (array i32)))
+    (func (export "newStruct") (result anyref)
+        struct.new $s)
+    (func (export "newArray") (result anyref)
+        i32.const 0
+        i32.const 0
+        array.new $a)
+    )`).exports;
+WasmStructrefValues.push(newStruct());
+WasmArrayrefValues.push(newArray());
 
 let WasmGcObjectValues = WasmStructrefValues.concat(WasmArrayrefValues);
 
@@ -581,8 +590,23 @@ function assertSame(got, expected) {
     }
 }
 
+// assertEqResults([a,...],[b,...]) asserts that the two results from a wasm
+// call are the same. This will compare deeply inside the result array, and
+// relax a mismatch around single element arrays.
+//
+// This predicate is in this file because it is wasm-specific.
+function assertEqResults(got, expected) {
+    if (!Array.isArray(got)) {
+        got = [got];
+    }
+    if (!Array.isArray(expected)) {
+        expected = [expected];
+    }
+    assertSame(got, expected);
+}
+
 // TailCallIterations is selected to be large enough to trigger
 // "too much recursion", but not to be slow.
-var TailCallIterations = getBuildConfiguration().simulator ? 1000 : 100000;
+var TailCallIterations = getBuildConfiguration("simulator") ? 1000 : 100000;
 // TailCallBallast is selected to spill registers as parameters.
 var TailCallBallast = 30;

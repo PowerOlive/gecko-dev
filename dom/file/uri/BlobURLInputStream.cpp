@@ -12,6 +12,7 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/IPCBlobUtils.h"
+#include "mozilla/net/ContentRange.h"
 #include "nsStreamUtils.h"
 #include "nsMimeTypes.h"
 
@@ -383,11 +384,11 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
     return;
   }
 
-  Maybe<nsID> agentClusterId;
-  Maybe<ClientInfo> clientInfo = loadInfo->GetClientInfo();
-  if (clientInfo.isSome()) {
-    agentClusterId = clientInfo->AgentClusterId();
-  }
+  nsCOMPtr<nsICookieJarSettings> cookieJarSettings;
+  loadInfo->GetCookieJarSettings(getter_AddRefs(cookieJarSettings));
+
+  nsAutoString partKey;
+  cookieJarSettings->GetPartitionKey(partKey);
 
   if (XRE_IsParentProcess() || !BlobURLSchemeIsHTTPOrHTTPS(mBlobURLSpec)) {
     RefPtr<BlobImpl> blobImpl;
@@ -397,7 +398,7 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
     if (!BlobURLProtocolHandler::GetDataEntry(
             mBlobURLSpec, getter_AddRefs(blobImpl), loadingPrincipal,
             triggeringPrincipal, loadInfo->GetOriginAttributes(),
-            loadInfo->GetInnerWindowID(), agentClusterId,
+            loadInfo->GetInnerWindowID(), NS_ConvertUTF16toUTF8(partKey),
             true /* AlsoIfRevoked */)) {
       NS_WARNING("Failed to get data entry principal. URL revoked?");
       return;
@@ -428,10 +429,10 @@ void BlobURLInputStream::RetrieveBlobData(const MutexAutoLock& aProofOfLock) {
   cleanupOnEarlyExit.release();
 
   contentChild
-      ->SendBlobURLDataRequest(mBlobURLSpec, triggeringPrincipal,
-                               loadingPrincipal,
-                               loadInfo->GetOriginAttributes(),
-                               loadInfo->GetInnerWindowID(), agentClusterId)
+      ->SendBlobURLDataRequest(
+          mBlobURLSpec, WrapNotNull(triggeringPrincipal), loadingPrincipal,
+          loadInfo->GetOriginAttributes(), loadInfo->GetInnerWindowID(),
+          NS_ConvertUTF16toUTF8(partKey))
       ->Then(
           GetCurrentSerialEventTarget(), __func__,
           [self](const BlobURLDataRequestResult& aResult) {
@@ -488,9 +489,9 @@ nsresult BlobURLInputStream::StoreBlobImplStream(
   // If a Range header was in the request then fetch/XHR will have set a
   // ContentRange on the channel earlier so we may slice the blob now.
   blobImpl->GetType(blobContentType);
-  const Maybe<nsBaseChannel::ContentRange>& contentRange =
-      mChannel->GetContentRange();
-  if (contentRange.isSome()) {
+  const RefPtr<mozilla::net::ContentRange>& contentRange =
+      mChannel->ContentRange();
+  if (contentRange) {
     IgnoredErrorResult result;
     uint64_t start = contentRange->Start();
     uint64_t end = contentRange->End();

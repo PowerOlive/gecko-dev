@@ -17,8 +17,9 @@
 #include "ReorderQueue.h"
 #include "TimeUnits.h"
 #include "mozilla/Atomics.h"
-#include "mozilla/gfx/Types.h"
+#include "mozilla/DefineEnum.h"
 #include "mozilla/ProfilerUtils.h"
+#include "mozilla/gfx/Types.h"
 
 namespace mozilla {
 
@@ -31,7 +32,7 @@ class AppleVTDecoder final : public MediaDataDecoder,
 
   AppleVTDecoder(const VideoInfo& aConfig,
                  layers::ImageContainer* aImageContainer,
-                 CreateDecoderParams::OptionSet aOptions,
+                 const CreateDecoderParams::OptionSet& aOptions,
                  layers::KnowsCompositor* aKnowsCompositor,
                  Maybe<TrackingId> aTrackingId);
 
@@ -70,7 +71,13 @@ class AppleVTDecoder final : public MediaDataDecoder,
   nsCString GetCodecName() const override;
 
   ConversionRequired NeedsConversion() const override {
-    return ConversionRequired::kNeedAVCC;
+    if (mStreamType == StreamType::H264) {
+      return ConversionRequired::kNeedAVCC;
+    }
+    if (mStreamType == StreamType::HEVC) {
+      return ConversionRequired::kNeedHVCC;
+    }
+    return ConversionRequired::kNeedNone;
   }
 
   // Access from the taskqueue and the decoder's thread.
@@ -111,7 +118,13 @@ class AppleVTDecoder final : public MediaDataDecoder,
   CFDictionaryRef CreateDecoderSpecification();
   CFDictionaryRef CreateDecoderExtensions();
 
-  enum class StreamType { Unknown, H264, VP9 };
+  MOZ_DEFINE_ENUM_CLASS_WITH_TOSTRING_AT_CLASS_SCOPE(StreamType,
+                                                     (Unknown, H264, VP9, AV1,
+                                                      HEVC));
+
+  StreamType GetStreamType(const nsCString& aMimeType) const;
+  uint32_t GetMaxRefFrames(bool aIsLowLatency) const;
+
   const StreamType mStreamType;
   const RefPtr<TaskQueue> mTaskQueue;
   const uint32_t mMaxRefFrames;

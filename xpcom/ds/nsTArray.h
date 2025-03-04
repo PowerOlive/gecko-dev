@@ -34,7 +34,6 @@
 #include "nsAlgorithm.h"
 #include "nsDebug.h"
 #include "nsISupports.h"
-#include "nsQuickSort.h"
 #include "nsRegionFwd.h"
 #include "nsTArrayForwardDeclare.h"
 
@@ -370,13 +369,6 @@ struct nsTArray_SafeElementAtHelper<mozilla::OwningNonNull<E>, Derived>
     : public nsTArray_SafeElementAtSmartPtrHelper<mozilla::OwningNonNull<E>,
                                                   Derived> {};
 
-// Servo bindings.
-extern "C" void Gecko_EnsureTArrayCapacity(void* aArray, size_t aCapacity,
-                                           size_t aElementSize);
-extern "C" void Gecko_ClearPODTArray(void* aArray, size_t aElementSize,
-                                     size_t aElementAlign);
-
-//
 // This class serves as a base class for nsTArray.  It shouldn't be used
 // directly.  It holds common implementation code that does not depend on the
 // element type of the nsTArray.
@@ -393,11 +385,6 @@ class nsTArray_base {
   // calls ShiftData.
   template <class E, class XAlloc>
   friend class nsTArray_Impl;
-
-  friend void Gecko_EnsureTArrayCapacity(void* aArray, size_t aCapacity,
-                                         size_t aElemSize);
-  friend void Gecko_ClearPODTArray(void* aTArray, size_t aElementSize,
-                                   size_t aElementAlign);
 
  protected:
   typedef nsTArrayHeader Header;
@@ -660,30 +647,6 @@ class nsDefaultComparator {
  public:
   bool Equals(const A& aA, const B& aB) const { return aA == aB; }
   bool LessThan(const A& aA, const B& aB) const { return aA < aB; }
-};
-
-template <bool IsTriviallyCopyConstructible, bool IsSameType>
-struct AssignRangeAlgorithm {
-  template <class Item, class ElemType, class IndexType, class SizeType>
-  static void implementation(ElemType* aElements, IndexType aStart,
-                             SizeType aCount, const Item* aValues) {
-    ElemType* iter = aElements + aStart;
-    ElemType* end = iter + aCount;
-    for (; iter != end; ++iter, ++aValues) {
-      nsTArrayElementTraits<ElemType>::Construct(iter, *aValues);
-    }
-  }
-};
-
-template <>
-struct AssignRangeAlgorithm<true, true> {
-  template <class Item, class ElemType, class IndexType, class SizeType>
-  static void implementation(ElemType* aElements, IndexType aStart,
-                             SizeType aCount, const Item* aValues) {
-    if (aValues) {
-      memcpy(aElements + aStart, aValues, aCount * sizeof(ElemType));
-    }
-  }
 };
 
 //
@@ -967,10 +930,13 @@ struct CompareWrapper<T, U, false> {
 
   template <typename A, typename B>
   int Compare(A& aLeft, B& aRight) const {
+    if (LessThan(aLeft, aRight)) {
+      return -1;
+    }
     if (Equals(aLeft, aRight)) {
       return 0;
     }
-    return LessThan(aLeft, aRight) ? -1 : 1;
+    return 1;
   }
 
   template <typename A, typename B>
@@ -1063,7 +1029,7 @@ class nsTArray_Impl
 
     // This does not use SwapArrayElements because that's unnecessarily complex.
     this->MoveConstructNonAutoArray(aOther, sizeof(value_type),
-                                    MOZ_ALIGNOF(value_type));
+                                    alignof(value_type));
   }
 
   // The array's copy-constructor performs a 'deep' copy of the given array.
@@ -1108,7 +1074,7 @@ class nsTArray_Impl
   self_type& operator=(self_type&& aOther) {
     if (this != &aOther) {
       Clear();
-      this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+      this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
     }
     return *this;
   }
@@ -1154,7 +1120,7 @@ class nsTArray_Impl
   template <typename Allocator>
   self_type& operator=(nsTArray_Impl<E, Allocator>&& aOther) {
     Clear();
-    this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
     return *this;
   }
 
@@ -1473,7 +1439,7 @@ class nsTArray_Impl
   template <class Allocator>
   void Assign(nsTArray_Impl<E, Allocator>&& aOther) {
     Clear();
-    this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
   }
 
   // This method call the destructor on each element of the array, empties it,
@@ -1856,6 +1822,13 @@ class nsTArray_Impl
   void RemoveElementsAtUnsafe(index_type aStart, size_type aCount);
 
  public:
+  // Similar to the above, but it removes just one element. This does bounds
+  // checking only in debug builds.
+  void RemoveElementAtUnsafe(index_type aIndex) {
+    MOZ_ASSERT(aIndex < Length(), "Trying to remove an invalid element");
+    RemoveElementsAtUnsafe(aIndex, 1);
+  }
+
   // A variation on the RemoveElementsAt method defined above.
   void RemoveElementAt(index_type aIndex) { RemoveElementsAt(aIndex, 1); }
 
@@ -1941,8 +1914,7 @@ class nsTArray_Impl
 
   void Clear() {
     ClearAndRetainStorage();
-    base_type::ShrinkCapacityToZero(sizeof(value_type),
-                                    MOZ_ALIGNOF(value_type));
+    base_type::ShrinkCapacityToZero(sizeof(value_type), alignof(value_type));
   }
 
   // This method removes elements based on the return value of the
@@ -2008,7 +1980,7 @@ class nsTArray_Impl
     // AutoTArray upcast to nsTArray_Impl, under the conditions mentioned in the
     // overload for AutoTArray below.
     this->template SwapArrayElements<InfallibleAlloc>(
-        aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+        aOther, sizeof(value_type), alignof(value_type));
   }
 
   template <size_t N>
@@ -2019,7 +1991,7 @@ class nsTArray_Impl
     static_assert(!std::is_same_v<Alloc, FallibleAlloc> ||
                   sizeof(E) * N <= 1024);
     this->template SwapArrayElements<InfallibleAlloc>(
-        aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+        aOther, sizeof(value_type), alignof(value_type));
   }
 
   template <class Allocator>
@@ -2029,7 +2001,7 @@ class nsTArray_Impl
     // Allocator==InfallibleAlloc and aOther uses auto storage.
     return FallibleAlloc::Result(
         this->template SwapArrayElements<FallibleAlloc>(
-            aOther, sizeof(value_type), MOZ_ALIGNOF(value_type)));
+            aOther, sizeof(value_type), alignof(value_type)));
   }
 
  private:
@@ -2305,7 +2277,7 @@ class nsTArray_Impl
   template <typename ActualAlloc>
   value_type* InsertElementsAtInternal(index_type aIndex, size_type aCount) {
     if (!ActualAlloc::Successful(this->template InsertSlotsAt<ActualAlloc>(
-            aIndex, aCount, sizeof(value_type), MOZ_ALIGNOF(value_type)))) {
+            aIndex, aCount, sizeof(value_type), alignof(value_type)))) {
       return nullptr;
     }
 
@@ -2348,49 +2320,51 @@ class nsTArray_Impl
   }
 
   // This method may be called to minimize the memory used by this array.
-  void Compact() {
-    ShrinkCapacity(sizeof(value_type), MOZ_ALIGNOF(value_type));
-  }
+  void Compact() { ShrinkCapacity(sizeof(value_type), alignof(value_type)); }
 
   //
   // Sorting
   //
 
-  // This function is meant to be used with the NS_QuickSort function.  It
-  // maps the callback API expected by NS_QuickSort to the Comparator API
-  // used by nsTArray_Impl.  See nsTArray_Impl::Sort.
-  template <class Comparator>
-  static int Compare(const void* aE1, const void* aE2, void* aData) {
-    const Comparator* c = reinterpret_cast<const Comparator*>(aData);
-    const value_type* a = static_cast<const value_type*>(aE1);
-    const value_type* b = static_cast<const value_type*>(aE2);
-    return c->Compare(*a, *b);
-  }
-
   // This method sorts the elements of the array.  It uses the LessThan
-  // method defined on the given Comparator object to collate elements.
+  // method defined on the given Comparator object to collate elements or
+  // it wraps a tri-state comparison lambda into such a comparator.
+  // It uses std::sort. It expects value_type to be move assignable and
+  // constructible and uses those always, regardless of the chosen
+  // nsTArray_RelocationStrategy.
+  //
   // @param aComp The Comparator used to collate elements.
   template <class Comparator>
   void Sort(const Comparator& aComp) {
-    ::detail::CompareWrapper<Comparator, value_type> comp(aComp);
+    static_assert(std::is_move_assignable_v<value_type>);
+    static_assert(std::is_move_constructible_v<value_type>);
 
-    NS_QuickSort(Elements(), Length(), sizeof(value_type),
-                 Compare<decltype(comp)>, &comp);
+    ::detail::CompareWrapper<Comparator, value_type> comp(aComp);
+    std::sort(Elements(), Elements() + Length(),
+              [&comp](const auto& left, const auto& right) {
+                return comp.LessThan(left, right);
+              });
   }
 
   // A variation on the Sort method defined above that assumes that
-  // 'operator<' is defined for value_type.
+  // 'operator<' is defined for 'value_type'.
   void Sort() { Sort(nsDefaultComparator<value_type, value_type>()); }
 
   // This method sorts the elements of the array in a stable way (i.e. not
   // changing the relative order of elements considered equal by the
-  // Comparator).  It uses the LessThan
-  // method defined on the given Comparator object to collate elements.
+  // Comparator).  It uses the LessThan method defined on the given Comparator
+  // object to collate elements.
+  // It uses std::stable_sort. It expects value_type to be move assignable and
+  // constructible and uses those always, regardless of the chosen
+  // nsTArray_RelocationStrategy.
+  //
   // @param aComp The Comparator used to collate elements.
   template <class Comparator>
   void StableSort(const Comparator& aComp) {
-    const ::detail::CompareWrapper<Comparator, value_type> comp(aComp);
+    static_assert(std::is_move_assignable_v<value_type>);
+    static_assert(std::is_move_constructible_v<value_type>);
 
+    const ::detail::CompareWrapper<Comparator, value_type> comp(aComp);
     std::stable_sort(Elements(), Elements() + Length(),
                      [&comp](const auto& lhs, const auto& rhs) {
                        return comp.LessThan(lhs, rhs);
@@ -2398,7 +2372,7 @@ class nsTArray_Impl
   }
 
   // A variation on the StableSort method defined above that assumes that
-  // 'operator<' is defined for value_type.
+  // 'operator<' is defined for 'value_type'.
   void StableSort() {
     StableSort(nsDefaultComparator<value_type, value_type>());
   }
@@ -2433,10 +2407,7 @@ class nsTArray_Impl
   // @param aValues The array of elements to copy.
   template <class Item>
   void AssignRange(index_type aStart, size_type aCount, const Item* aValues) {
-    AssignRangeAlgorithm<
-        std::is_trivially_copy_constructible_v<Item>,
-        std::is_same_v<Item, value_type>>::implementation(Elements(), aStart,
-                                                          aCount, aValues);
+    std::uninitialized_copy(aValues, aValues + aCount, Elements() + aStart);
   }
 };
 
@@ -2492,7 +2463,7 @@ auto nsTArray_Impl<E, Alloc>::ReplaceElementsAtInternal(index_type aStart,
   }
   DestructRange(aStart, aCount);
   this->template ShiftData<ActualAlloc>(
-      aStart, aCount, aArrayLen, sizeof(value_type), MOZ_ALIGNOF(value_type));
+      aStart, aCount, aArrayLen, sizeof(value_type), alignof(value_type));
   AssignRange(aStart, aArrayLen, aArray);
   return Elements() + aStart;
 }
@@ -2517,7 +2488,7 @@ void nsTArray_Impl<E, Alloc>::RemoveElementsAtUnsafe(index_type aStart,
                                                      size_type aCount) {
   DestructRange(aStart, aCount);
   this->template ShiftData<InfallibleAlloc>(
-      aStart, aCount, 0, sizeof(value_type), MOZ_ALIGNOF(value_type));
+      aStart, aCount, 0, sizeof(value_type), alignof(value_type));
 }
 
 template <typename E, class Alloc>
@@ -2537,7 +2508,7 @@ void nsTArray_Impl<E, Alloc>::UnorderedRemoveElementsAt(index_type aStart,
   // function.
   DestructRange(aStart, aCount);
   this->template SwapFromEnd<InfallibleAlloc>(
-      aStart, aCount, sizeof(value_type), MOZ_ALIGNOF(value_type));
+      aStart, aCount, sizeof(value_type), alignof(value_type));
 }
 
 template <typename E, class Alloc>
@@ -2580,7 +2551,7 @@ auto nsTArray_Impl<E, Alloc>::InsertElementsAtInternal(index_type aIndex,
                                                        const Item& aItem)
     -> value_type* {
   if (!ActualAlloc::Successful(this->template InsertSlotsAt<ActualAlloc>(
-          aIndex, aCount, sizeof(value_type), MOZ_ALIGNOF(value_type)))) {
+          aIndex, aCount, sizeof(value_type), alignof(value_type)))) {
     return nullptr;
   }
 
@@ -2608,7 +2579,7 @@ auto nsTArray_Impl<E, Alloc>::InsertElementAtInternal(index_type aIndex)
     return nullptr;
   }
   this->template ShiftData<ActualAlloc>(aIndex, 0, 1, sizeof(value_type),
-                                        MOZ_ALIGNOF(value_type));
+                                        alignof(value_type));
   value_type* elem = Elements() + aIndex;
   elem_traits::Construct(elem);
   return elem;
@@ -2629,7 +2600,7 @@ auto nsTArray_Impl<E, Alloc>::InsertElementAtInternal(index_type aIndex,
     return nullptr;
   }
   this->template ShiftData<ActualAlloc>(aIndex, 0, 1, sizeof(value_type),
-                                        MOZ_ALIGNOF(value_type));
+                                        alignof(value_type));
   value_type* elem = Elements() + aIndex;
   elem_traits::Construct(elem, std::forward<Item>(aItem));
   return elem;
@@ -2660,8 +2631,8 @@ auto nsTArray_Impl<E, Alloc>::AppendElementsInternal(
   if (Length() == 0) {
     // XXX This might still be optimized. If aArray uses auto-storage but we
     // won't, we might better retain our storage if it's sufficiently large.
-    this->ShrinkCapacityToZero(sizeof(value_type), MOZ_ALIGNOF(value_type));
-    this->MoveInit(aArray, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->ShrinkCapacityToZero(sizeof(value_type), alignof(value_type));
+    this->MoveInit(aArray, sizeof(value_type), alignof(value_type));
     return Elements();
   }
 
@@ -2675,7 +2646,7 @@ auto nsTArray_Impl<E, Alloc>::AppendElementsInternal(
       Elements() + len, aArray.Elements(), otherLen, sizeof(value_type));
   this->IncrementLength(otherLen);
   aArray.template ShiftData<ActualAlloc>(0, otherLen, 0, sizeof(value_type),
-                                         MOZ_ALIGNOF(value_type));
+                                         alignof(value_type));
   return Elements() + len;
 }
 
@@ -2726,8 +2697,9 @@ inline void ImplCycleCollectionTraverse(
     nsTArray_Impl<E, Alloc>& aField, const char* aName, uint32_t aFlags = 0) {
   ::detail::SetCycleCollectionArrayFlag(aFlags);
   size_t length = aField.Length();
+  E* elements = aField.Elements();
   for (size_t i = 0; i < length; ++i) {
-    ImplCycleCollectionTraverse(aCallback, aField[i], aName, aFlags);
+    ImplCycleCollectionTraverse(aCallback, elements[i], aName, aFlags);
   }
 }
 
@@ -3047,18 +3019,18 @@ class MOZ_NON_MEMMOVABLE AutoTArray : public nsTArray<E> {
 
   AutoTArray(self_type&& aOther) : nsTArray<E>() {
     Init();
-    this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
   }
 
   explicit AutoTArray(base_type&& aOther) : mAlign() {
     Init();
-    this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
   }
 
   template <typename Allocator>
   explicit AutoTArray(nsTArray_Impl<value_type, Allocator>&& aOther) {
     Init();
-    this->MoveInit(aOther, sizeof(value_type), MOZ_ALIGNOF(value_type));
+    this->MoveInit(aOther, sizeof(value_type), alignof(value_type));
   }
 
   MOZ_IMPLICIT AutoTArray(std::initializer_list<E> aIL) : mAlign() {
@@ -3092,7 +3064,7 @@ class MOZ_NON_MEMMOVABLE AutoTArray : public nsTArray<E> {
   friend class nsTArray_base;
 
   void Init() {
-    static_assert(MOZ_ALIGNOF(value_type) <= 8,
+    static_assert(alignof(value_type) <= 8,
                   "can't handle alignments greater than 8, "
                   "see nsTArray_base::UsesAutoArrayBuffer()");
     // Temporary work around for VS2012 RC compiler crash
@@ -3102,7 +3074,7 @@ class MOZ_NON_MEMMOVABLE AutoTArray : public nsTArray<E> {
     (*phdr)->mCapacity = N;
     (*phdr)->mIsAutoArray = 1;
 
-    MOZ_ASSERT(base_type::GetAutoArrayBuffer(MOZ_ALIGNOF(value_type)) ==
+    MOZ_ASSERT(base_type::GetAutoArrayBuffer(alignof(value_type)) ==
                    reinterpret_cast<Header*>(&mAutoBuf),
                "GetAutoArrayBuffer needs to be fixed");
   }
@@ -3114,9 +3086,9 @@ class MOZ_NON_MEMMOVABLE AutoTArray : public nsTArray<E> {
   union {
     char mAutoBuf[sizeof(nsTArrayHeader) + N * sizeof(value_type)];
     // Do the max operation inline to ensure that it is a compile-time constant.
-    mozilla::AlignedElem<(MOZ_ALIGNOF(Header) > MOZ_ALIGNOF(value_type))
-                             ? MOZ_ALIGNOF(Header)
-                             : MOZ_ALIGNOF(value_type)>
+    mozilla::AlignedElem<(alignof(Header) > alignof(value_type))
+                             ? alignof(Header)
+                             : alignof(value_type)>
         mAlign;
   };
 };
@@ -3278,11 +3250,14 @@ class nsTArrayView {
   const Span<element_type> mSpan;
 };
 
-template <typename Range, typename = std::enable_if_t<std::is_same_v<
-                              typename std::iterator_traits<
-                                  typename Range::iterator>::iterator_category,
-                              std::random_access_iterator_tag>>>
-auto RangeSize(const Range& aRange) {
+// NOTE(emilio): If changing the name of this or so, make sure to change
+// specializations too.
+template <typename Range,
+          typename = std::enable_if_t<std::is_same_v<
+              typename std::iterator_traits<typename std::remove_reference_t<
+                  Range>::iterator>::iterator_category,
+              std::random_access_iterator_tag>>>
+size_t RangeSizeEstimate(const Range& aRange) {
   // See https://en.cppreference.com/w/cpp/iterator/begin, section 'User-defined
   // overloads'.
   using std::begin;
@@ -3297,12 +3272,14 @@ auto RangeSize(const Range& aRange) {
  * convertible from the range's value type.
  */
 template <typename Array, typename Range>
-auto ToTArray(const Range& aRange) {
+auto ToTArray(Range&& aRange) {
   using std::begin;
   using std::end;
 
   Array res;
-  res.SetCapacity(RangeSize(aRange));
+  if (auto estimate = RangeSizeEstimate(aRange)) {
+    res.SetCapacity(estimate);
+  }
   std::copy(begin(aRange), end(aRange), MakeBackInserter(res));
   return res;
 }
@@ -3311,21 +3288,22 @@ auto ToTArray(const Range& aRange) {
  * Materialize a range as a nsTArray of its (decayed) value type.
  */
 template <typename Range>
-auto ToArray(const Range& aRange) {
-  return ToTArray<nsTArray<std::decay_t<
-      typename std::iterator_traits<typename Range::iterator>::value_type>>>(
-      aRange);
+auto ToArray(Range&& aRange) {
+  return ToTArray<nsTArray<std::decay_t<typename std::iterator_traits<
+      typename std::remove_reference_t<Range>::iterator>::value_type>>>(
+      std::forward<Range>(aRange));
 }
 
 /**
  * Appends all elements from a range to an array.
  */
 template <typename Array, typename Range>
-void AppendToArray(Array& aArray, const Range& aRange) {
+void AppendToArray(Array& aArray, Range&& aRange) {
   using std::begin;
   using std::end;
-
-  aArray.SetCapacity(aArray.Length() + RangeSize(aRange));
+  if (auto estimate = RangeSizeEstimate(aRange)) {
+    aArray.SetCapacity(aArray.Length() + estimate);
+  }
   std::copy(begin(aRange), end(aRange), MakeBackInserter(aArray));
 }
 

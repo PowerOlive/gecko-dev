@@ -9,20 +9,33 @@
 #define nsDataChannel_h___
 
 #include "nsBaseChannel.h"
+#include "nsIDataChannel.h"
 
 class nsIInputStream;
 
-class nsDataChannel : public nsBaseChannel {
+class nsDataChannel : public nsBaseChannel,
+                      public nsIDataChannel,
+                      public nsIIdentChannel {
  public:
-  explicit nsDataChannel(nsIURI* uri) { SetURI(uri); }
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_DECL_NSIDATACHANNEL
+  NS_FORWARD_NSIREQUEST(nsBaseChannel::)
+  NS_FORWARD_NSICHANNEL(nsBaseChannel::)
+  NS_DECL_NSIIDENTCHANNEL
 
-  const nsACString& MimeType() const { return mMimeType; }
+  explicit nsDataChannel(nsIURI* uri) { SetURI(uri); };
+
+  nsresult Init();
 
  protected:
+  virtual ~nsDataChannel() = default;
   [[nodiscard]] virtual nsresult OpenContentStream(
       bool async, nsIInputStream** result, nsIChannel** channel) override;
+  virtual nsresult NotifyListeners();
+  uint64_t mChannelId = 0;
 
-  nsCString mMimeType;
+ private:
+  nsresult MaybeSendDataChannelOpenNotification();
 };
 
 #endif /* nsDataChannel_h___ */

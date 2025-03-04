@@ -6,9 +6,6 @@
 import { html } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
 
-// eslint-disable-next-line import/no-unassigned-import
-import "chrome://global/content/elements/moz-five-star.mjs";
-
 /**
  * Class for displaying the adjusted ratings for a given product.
  */
@@ -17,27 +14,23 @@ class AdjustedRating extends MozLitElement {
     rating: { type: Number, reflect: true },
   };
 
-  static get queries() {
-    return {
-      ratingEl: "moz-five-star",
-    };
-  }
-
   render() {
-    if (!this.rating) {
+    if (!this.rating && this.rating !== 0) {
       this.hidden = true;
       return null;
     }
+
+    this.hidden = false;
 
     return html`
       <shopping-card
         data-l10n-id="shopping-adjusted-rating-label"
         data-l10n-attrs="label"
+        rating=${this.rating}
       >
-        <moz-five-star slot="rating" rating="${this.rating}"></moz-five-star>
         <div slot="content">
           <span
-            data-l10n-id="shopping-adjusted-rating-unreliable-reviews"
+            data-l10n-id="shopping-adjusted-rating-based-reliable-reviews"
           ></span>
         </div>
       </shopping-card>

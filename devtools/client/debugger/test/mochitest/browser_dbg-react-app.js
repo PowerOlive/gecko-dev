@@ -5,8 +5,8 @@
 "use strict";
 
 add_task(async function () {
+  await pushPref("devtools.debugger.map-scopes-enabled", true);
   const dbg = await initDebugger("doc-react.html", "App.js");
-  dbg.actions.toggleMapScopes();
 
   await selectSource(dbg, "App.js");
   await addBreakpoint(dbg, "App.js", 11);
@@ -15,7 +15,7 @@ add_task(async function () {
   invokeInTab("clickButton");
   await waitForPaused(dbg);
 
-  await waitForState(dbg, state =>
+  await waitForState(dbg, () =>
     dbg.selectors.getSelectedScopeMappings(dbg.selectors.getCurrentThread())
   );
 
@@ -28,11 +28,12 @@ add_task(async function () {
     },
   ]);
 
-  info("Verify that the file is flagged as a React module");
+  info("Verify that the react file is flagged as a javascript module");
   const sourceTab = findElementWithSelector(dbg, ".source-tab.active");
+
   ok(
-    sourceTab.querySelector(".source-icon.react"),
-    "Source tab has a React icon"
+    sourceTab.querySelector(".source-icon.javascript"),
+    "Source tab for a react file has a Javascript icon"
   );
-  assertSourceIcon(dbg, "App.js", "react");
+  assertSourceIcon(dbg, "App.js", "javascript");
 });

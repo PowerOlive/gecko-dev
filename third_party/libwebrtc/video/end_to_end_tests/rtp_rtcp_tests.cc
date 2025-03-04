@@ -12,7 +12,6 @@
 
 #include "api/test/simulated_network.h"
 #include "call/fake_network_pipe.h"
-#include "call/simulated_network.h"
 #include "modules/include/module_common_types_public.h"
 #include "modules/rtp_rtcp/source/rtp_packet.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
@@ -21,6 +20,7 @@
 #include "rtc_base/task_queue_for_test.h"
 #include "test/call_test.h"
 #include "test/gtest.h"
+#include "test/network/simulated_network.h"
 #include "test/rtcp_packet_parser.h"
 #include "test/video_test_constants.h"
 
@@ -48,7 +48,7 @@ void RtpRtcpEndToEndTest::RespectsRtcpMode(RtcpMode rtcp_mode) {
           sent_rtcp_(0) {}
 
    private:
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       MutexLock lock(&mutex_);
       if (++sent_rtp_ % 3 == 0)
         return DROP_PACKET;
@@ -56,11 +56,11 @@ void RtpRtcpEndToEndTest::RespectsRtcpMode(RtcpMode rtcp_mode) {
       return SEND_PACKET;
     }
 
-    Action OnReceiveRtcp(const uint8_t* packet, size_t length) override {
+    Action OnReceiveRtcp(rtc::ArrayView<const uint8_t> packet) override {
       MutexLock lock(&mutex_);
       ++sent_rtcp_;
       test::RtcpPacketParser parser;
-      EXPECT_TRUE(parser.Parse(packet, length));
+      EXPECT_TRUE(parser.Parse(packet));
 
       EXPECT_EQ(0, parser.sender_report()->num_packets());
 
@@ -142,6 +142,7 @@ void RtpRtcpEndToEndTest::TestRtpStatePreservation(
 
    private:
     std::vector<VideoStream> CreateEncoderStreams(
+        const FieldTrialsView& /*field_trials*/,
         int frame_width,
         int frame_height,
         const VideoEncoderConfig& encoder_config) override {
@@ -211,9 +212,9 @@ void RtpRtcpEndToEndTest::TestRtpStatePreservation(
       }
     }
 
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       RtpPacket rtp_packet;
-      EXPECT_TRUE(rtp_packet.Parse(packet, length));
+      EXPECT_TRUE(rtp_packet.Parse(packet));
       const uint32_t ssrc = rtp_packet.Ssrc();
       const int64_t sequence_number =
           seq_numbers_unwrapper_.Unwrap(rtp_packet.SequenceNumber());
@@ -261,9 +262,9 @@ void RtpRtcpEndToEndTest::TestRtpStatePreservation(
       return SEND_PACKET;
     }
 
-    Action OnSendRtcp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtcp(rtc::ArrayView<const uint8_t> packet) override {
       test::RtcpPacketParser rtcp_parser;
-      rtcp_parser.Parse(packet, length);
+      rtcp_parser.Parse(packet);
       if (rtcp_parser.sender_report()->num_packets() > 0) {
         uint32_t ssrc = rtcp_parser.sender_report()->sender_ssrc();
         uint32_t rtcp_timestamp = rtcp_parser.sender_report()->rtp_timestamp();
@@ -336,9 +337,10 @@ void RtpRtcpEndToEndTest::TestRtpStatePreservation(
         rtcp::RapidResyncRequest force_send_sr_back_request;
         rtc::Buffer packet = force_send_sr_back_request.Build();
         static_cast<webrtc::Transport*>(receive_transport_.get())
-            ->SendRtcp(packet.data(), packet.size());
+            ->SendRtcp(packet);
       }
       CreateFrameGeneratorCapturer(30, 1280, 720);
+      StartVideoSources();
     });
 
     observer.ResetExpectedSsrcs(1);
@@ -404,11 +406,11 @@ TEST_F(RtpRtcpEndToEndTest, DISABLED_TestFlexfecRtpStatePreservation) {
     }
 
    private:
-    Action OnSendRtp(const uint8_t* packet, size_t length) override {
+    Action OnSendRtp(rtc::ArrayView<const uint8_t> packet) override {
       MutexLock lock(&mutex_);
 
       RtpPacket rtp_packet;
-      EXPECT_TRUE(rtp_packet.Parse(packet, length));
+      EXPECT_TRUE(rtp_packet.Parse(packet));
       const uint16_t sequence_number = rtp_packet.SequenceNumber();
       const uint32_t timestamp = rtp_packet.Timestamp();
       const uint32_t ssrc = rtp_packet.Ssrc();
@@ -454,9 +456,9 @@ TEST_F(RtpRtcpEndToEndTest, DISABLED_TestFlexfecRtpStatePreservation) {
       return SEND_PACKET;
     }
 
-    absl::optional<uint16_t> last_observed_sequence_number_
+    std::optional<uint16_t> last_observed_sequence_number_
         RTC_GUARDED_BY(mutex_);
-    absl::optional<uint32_t> last_observed_timestamp_ RTC_GUARDED_BY(mutex_);
+    std::optional<uint32_t> last_observed_timestamp_ RTC_GUARDED_BY(mutex_);
     size_t num_flexfec_packets_sent_ RTC_GUARDED_BY(mutex_);
     Mutex mutex_;
   } observer;
@@ -466,7 +468,9 @@ TEST_F(RtpRtcpEndToEndTest, DISABLED_TestFlexfecRtpStatePreservation) {
   static constexpr int kFrameRate = 15;
 
   test::FunctionVideoEncoderFactory encoder_factory(
-      []() { return VP8Encoder::Create(); });
+      [](const Environment& env, const SdpVideoFormat& format) {
+        return CreateVp8Encoder(env);
+      });
 
   SendTask(task_queue(), [&]() {
     CreateCalls();

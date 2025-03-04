@@ -2,21 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { PureComponent } from "react";
-import { div, span } from "react-dom-factories";
-import PropTypes from "prop-types";
+import React, { PureComponent } from "devtools/client/shared/vendor/react";
+import { div, span } from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
 
-import { connect } from "../../../utils/connect";
-import actions from "../../../actions";
+import { connect } from "devtools/client/shared/vendor/react-redux";
+import actions from "../../../actions/index";
 
 import {
   getTruncatedFileName,
   getDisplayPath,
-  getSourceQueryString,
   getFileURL,
 } from "../../../utils/source";
 import { createLocation } from "../../../utils/location";
-import { getFirstSourceActorForGeneratedSource } from "../../../selectors";
+import { getFirstSourceActorForGeneratedSource } from "../../../selectors/index";
 
 import SourceIcon from "../../shared/SourceIcon";
 
@@ -40,7 +39,6 @@ class BreakpointHeading extends PureComponent {
     const { sources, source, selectSource } = this.props;
 
     const path = getDisplayPath(source, sources);
-    const query = getSourceQueryString(source);
     return div(
       {
         className: "breakpoint-heading",
@@ -67,7 +65,7 @@ class BreakpointHeading extends PureComponent {
         {
           className: "filename",
         },
-        getTruncatedFileName(source, query),
+        getTruncatedFileName(source),
         path && span(null, `../${path}/..`)
       )
     );

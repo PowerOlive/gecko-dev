@@ -98,7 +98,7 @@ AudioSink::~AudioSink() {
 }
 
 nsresult AudioSink::InitializeAudioStream(
-    const PlaybackParams& aParams, const RefPtr<AudioDeviceInfo>& aAudioDevice,
+    const RefPtr<AudioDeviceInfo>& aAudioDevice,
     AudioSink::InitializationType aInitializationType) {
   if (aInitializationType == AudioSink::InitializationType::UNMUTING) {
     // Consider the stream to be audible immediately, before initialization
@@ -133,18 +133,18 @@ nsresult AudioSink::InitializeAudioStream(
     return rv;
   }
 
+  return NS_OK;
+}
+
+RefPtr<MediaSink::EndedPromise> AudioSink::Start(
+    const PlaybackParams& aParams, const media::TimeUnit& aStartTime) {
+  MOZ_ASSERT(mOwnerThread->IsCurrentThreadIn());
+
   // Set playback params before calling Start() so they can take effect
   // as soon as the 1st DataCallback of the AudioStream fires.
   mAudioStream->SetVolume(aParams.mVolume);
   mAudioStream->SetPlaybackRate(aParams.mPlaybackRate);
   mAudioStream->SetPreservesPitch(aParams.mPreservesPitch);
-
-  return NS_OK;
-}
-
-RefPtr<MediaSink::EndedPromise> AudioSink::Start(
-    const media::TimeUnit& aStartTime) {
-  MOZ_ASSERT(mOwnerThread->IsCurrentThreadIn());
 
   mAudioQueueListener = mAudioQueue.PushEvent().Connect(
       mOwnerThread, this, &AudioSink::OnAudioPushed);
@@ -196,7 +196,7 @@ TimeUnit AudioSink::UnplayedDuration() const {
 void AudioSink::ReenqueueUnplayedAudioDataIfNeeded() {
   // This is OK: the AudioStream has been shut down. ShutDown guarantees that
   // the audio callback thread won't call back again.
-  mProcessedSPSCQueue->ResetThreadIds();
+  mProcessedSPSCQueue->ResetConsumerThreadId();
 
   // construct an AudioData
   int sampleInRingbuffer = mProcessedSPSCQueue->AvailableRead();
@@ -355,7 +355,7 @@ uint32_t AudioSink::PopFrames(AudioDataValue* aBuffer, uint32_t aFrames,
   // happen when not using cubeb remoting, and often when changing audio device
   // at the system level.
   if (aAudioThreadChanged) {
-    mProcessedSPSCQueue->ResetThreadIds();
+    mProcessedSPSCQueue->ResetConsumerThreadId();
   }
 
   TRACE_COMMENT("AudioSink::PopFrames", "%u frames (ringbuffer: %u/%u)",

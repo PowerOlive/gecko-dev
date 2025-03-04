@@ -12,6 +12,7 @@
 #define MODULES_DESKTOP_CAPTURE_WIN_WGC_CAPTURE_SESSION_H_
 
 #include <d3d11.h>
+#include <shellscalingapi.h>
 #include <windows.graphics.capture.h>
 #include <windows.graphics.h>
 #include <wrl/client.h>
@@ -29,7 +30,9 @@ namespace webrtc {
 
 class WgcCaptureSession final {
  public:
+  // `source_id` is used to retreive the HMONITOR for the captured window.
   WgcCaptureSession(
+      intptr_t source_id,
       Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device,
       Microsoft::WRL::ComPtr<
           ABI::Windows::Graphics::Capture::IGraphicsCaptureItem> item,
@@ -44,17 +47,20 @@ class WgcCaptureSession final {
   HRESULT StartCapture(const DesktopCaptureOptions& options);
 
   // Returns a frame from the local frame queue, if any are present.
-  bool GetFrame(std::unique_ptr<DesktopFrame>* output_frame);
+  bool GetFrame(std::unique_ptr<DesktopFrame>* output_frame,
+                bool source_should_be_capturable);
 
   bool IsCaptureStarted() const {
     RTC_DCHECK_RUN_ON(&sequence_checker_);
     return is_capture_started_;
   }
 
-  // We only keep 1 buffer in the internal frame pool to reduce the latency as
-  // much as possible.
+  // We keep 2 buffers in the frame pool since it results in a good compromise
+  // between latency/capture-rate and the rate at which
+  // Direct3D11CaptureFramePool.TryGetNextFrame returns NULL and we have to fall
+  // back to providing a copy from our external queue instead.
   // We make this public for tests.
-  static constexpr int kNumBuffers = 1;
+  static constexpr int kNumBuffers = 2;
 
  private:
   // Initializes `mapped_texture_` with the properties of the `src_texture`,
@@ -80,6 +86,8 @@ class WgcCaptureSession final {
   HRESULT ProcessFrame();
 
   void RemoveEventHandler();
+
+  bool FrameContentCanBeCompared();
 
   bool allow_zero_hertz() const { return allow_zero_hertz_; }
 
@@ -140,6 +148,12 @@ class WgcCaptureSession final {
   // captured or an empty region. Will always be empty if `allow_zero_hertz_` is
   // false.
   DesktopRegion damage_region_;
+
+  // Captures the device scale factor of the monitor where the frame is captured
+  // from. This value is the same as the scale from windows settings. Valid
+  // values are some distinct numbers in the range of [100,500], for example,
+  // 100, 150, 250, etc.
+  DEVICE_SCALE_FACTOR device_scale_factor_ = DEVICE_SCALE_FACTOR_INVALID;
 
   SequenceChecker sequence_checker_;
 };

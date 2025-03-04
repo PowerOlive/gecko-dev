@@ -750,7 +750,7 @@ const TEST_DATA = [
     expected: [
       {
         name: "color",
-        value: "blue \\9 no_need",
+        value: "blue \\9 no\\_need",
         priority: "",
         offsets: [0, 23],
         declarationText: "color: blue \\9 no\\_need",
@@ -1205,13 +1205,6 @@ const TEST_DATA = [
         offsets: [7, 18],
         declarationText: "color: red;",
       },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [121, 138],
-        declarationText: "background: gold;",
-      },
     ],
   },
 
@@ -1259,13 +1252,6 @@ const TEST_DATA = [
         offsets: [7, 18],
         declarationText: "color: red;",
       },
-      {
-        name: "border-color",
-        value: "cyan",
-        priority: "",
-        offsets: [114, 132],
-        declarationText: "border-color: cyan",
-      },
     ],
   },
 
@@ -1290,20 +1276,6 @@ const TEST_DATA = [
         offsets: [7, 18],
         declarationText: "color: red;",
       },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [70, 87],
-        declarationText: "background: gold;",
-      },
-      {
-        name: "border-color",
-        value: "cyan",
-        priority: "",
-        offsets: [138, 156],
-        declarationText: "border-color: cyan",
-      },
     ],
   },
 
@@ -1324,13 +1296,6 @@ const TEST_DATA = [
         priority: "",
         offsets: [7, 18],
         declarationText: "color: red;",
-      },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [88, 105],
-        declarationText: "background: gold;",
       },
     ],
   },
@@ -1354,13 +1319,6 @@ const TEST_DATA = [
         offsets: [7, 18],
         declarationText: "color: red;",
       },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [105, 122],
-        declarationText: "background: gold;",
-      },
     ],
   },
 
@@ -1380,13 +1338,6 @@ const TEST_DATA = [
         priority: "",
         offsets: [7, 18],
         declarationText: "color: red;",
-      },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [87, 104],
-        declarationText: "background: gold;",
       },
     ],
   },
@@ -1408,13 +1359,6 @@ const TEST_DATA = [
         priority: "",
         offsets: [7, 18],
         declarationText: "color: red;",
-      },
-      {
-        name: "background",
-        value: "gold",
-        priority: "",
-        offsets: [93, 110],
-        declarationText: "background: gold;",
       },
     ],
   },
@@ -1609,18 +1553,27 @@ function assertOutput(input, actual, expected) {
         "Check that the output item has the expected name, " +
           "value and priority"
       );
-      Assert.equal(expected[i].name, actual[i].name);
-      Assert.equal(expected[i].value, actual[i].value);
-      Assert.equal(expected[i].priority, actual[i].priority);
-      deepEqual(expected[i].offsets, actual[i].offsets);
+      Assert.equal(actual[i].name, expected[i].name, "Expected name");
+      Assert.equal(actual[i].value, expected[i].value, "Expected value");
+      Assert.equal(
+        actual[i].priority,
+        expected[i].priority,
+        "Expected priority"
+      );
+      deepEqual(actual[i].offsets, expected[i].offsets, "Expected offsets");
       if ("commentOffsets" in expected[i]) {
-        deepEqual(expected[i].commentOffsets, actual[i].commentOffsets);
+        deepEqual(
+          actual[i].commentOffsets,
+          expected[i].commentOffsets,
+          "Expected commentOffsets"
+        );
       }
 
       if (expected[i].declarationText) {
         Assert.equal(
           input.substring(expected[i].offsets[0], expected[i].offsets[1]),
-          expected[i].declarationText
+          expected[i].declarationText,
+          "Expected declarationText"
         );
       }
     }

@@ -31,10 +31,15 @@ class Document;
 class Selection;
 class StaticRange;
 
+enum class AllowRangeCrossShadowBoundary : bool { No, Yes };
+
 class AbstractRange : public nsISupports,
                       public nsWrapperCache,
                       // For linking together selection-associated ranges.
                       public mozilla::LinkedListElement<AbstractRange> {
+  using AllowRangeCrossShadowBoundary =
+      mozilla::dom::AllowRangeCrossShadowBoundary;
+
  protected:
   explicit AbstractRange(nsINode* aNode, bool aIsDynamicRange);
   virtual ~AbstractRange();
@@ -51,18 +56,33 @@ class AbstractRange : public nsISupports,
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(AbstractRange)
 
+  /**
+   * All of the MayCrossShadowBoundary* methods are used to get the boundary
+   * endpoints that cross shadow boundaries. They would return
+   * the same value as the non-MayCrossShadowBoundary* methods if the range
+   * boundaries don't cross shadow boundaries.
+   */
   const RangeBoundary& StartRef() const { return mStart; }
+  const RangeBoundary& MayCrossShadowBoundaryStartRef() const;
+
   const RangeBoundary& EndRef() const { return mEnd; }
+  const RangeBoundary& MayCrossShadowBoundaryEndRef() const;
 
   nsIContent* GetChildAtStartOffset() const {
     return mStart.GetChildAtOffset();
   }
+  nsIContent* GetMayCrossShadowBoundaryChildAtStartOffset() const;
+
   nsIContent* GetChildAtEndOffset() const { return mEnd.GetChildAtOffset(); }
+  nsIContent* GetMayCrossShadowBoundaryChildAtEndOffset() const;
+
   bool IsPositioned() const { return mIsPositioned; }
   /**
    * https://dom.spec.whatwg.org/#concept-tree-inclusive-ancestor
    */
-  nsINode* GetClosestCommonInclusiveAncestor() const;
+  nsINode* GetClosestCommonInclusiveAncestor(
+      AllowRangeCrossShadowBoundary aAllowCrossShadowBoundary =
+          AllowRangeCrossShadowBoundary::No) const;
 
   // WebIDL
 
@@ -74,11 +94,34 @@ class AbstractRange : public nsISupports,
   // object from C++ and needs to check whether it's positioned, should call
   // `IsPositioned()` directly.
 
-  nsINode* GetStartContainer() const { return mStart.Container(); }
-  nsINode* GetEndContainer() const { return mEnd.Container(); }
+  nsINode* GetStartContainer() const { return mStart.GetContainer(); }
+  nsINode* GetMayCrossShadowBoundaryStartContainer() const;
+
+  nsINode* GetEndContainer() const { return mEnd.GetContainer(); }
+  nsINode* GetMayCrossShadowBoundaryEndContainer() const;
+
+  /**
+   * Return GetStartContainer() and GetEndContainer() if this is positioned.
+   */
+  [[nodiscard]] bool IsPositionedAndSameContainer() const {
+    return MOZ_LIKELY(mIsPositioned) &&
+           mStart.GetContainer() == mEnd.GetContainer();
+  }
+  /**
+   * Return GetMayCrossShadowBoundaryStartContainer() and
+   * GetMayCrossShadowBoundaryEndContainer() if this is positioned.
+   */
+  [[nodiscard]] bool IsPositionedAndSameContainerMayCrossShadowBoundary()
+      const {
+    return MOZ_LIKELY(mIsPositioned) &&
+           GetMayCrossShadowBoundaryStartContainer() ==
+               GetMayCrossShadowBoundaryEndContainer();
+  }
+
+  bool MayCrossShadowBoundary() const;
 
   Document* GetComposedDocOfContainers() const {
-    return mStart.Container() ? mStart.Container()->GetComposedDoc() : nullptr;
+    return mStart.GetComposedDoc();
   }
 
   // FYI: Returns 0 if it's not positioned.
@@ -86,16 +129,21 @@ class AbstractRange : public nsISupports,
     return static_cast<uint32_t>(
         *mStart.Offset(RangeBoundary::OffsetFilter::kValidOrInvalidOffsets));
   }
+  uint32_t MayCrossShadowBoundaryStartOffset() const;
 
   // FYI: Returns 0 if it's not positioned.
   uint32_t EndOffset() const {
     return static_cast<uint32_t>(
         *mEnd.Offset(RangeBoundary::OffsetFilter::kValidOrInvalidOffsets));
   }
+  uint32_t MayCrossShadowBoundaryEndOffset() const;
+
   bool Collapsed() const {
-    return !mIsPositioned || (mStart.Container() == mEnd.Container() &&
+    return !mIsPositioned || (mStart.GetContainer() == mEnd.GetContainer() &&
                               StartOffset() == EndOffset());
   }
+
+  bool AreNormalRangeAndCrossShadowBoundaryRangeCollapsed() const;
 
   nsINode* GetParentObject() const;
   virtual JSObject* WrapObject(JSContext* aCx,
@@ -132,6 +180,11 @@ class AbstractRange : public nsISupports,
    */
   bool IsInSelection(const mozilla::dom::Selection& aSelection) const;
 
+  /**
+   * Return true if aRoot is a UA shadow root.
+   */
+  static bool IsRootUAWidget(const nsINode* aRoot);
+
  protected:
   template <typename SPT, typename SRT, typename EPT, typename ERT,
             typename RangeType>
@@ -166,8 +219,7 @@ class AbstractRange : public nsISupports,
   /**
    * https://dom.spec.whatwg.org/#concept-tree-inclusive-ancestor
    */
-  void UnregisterClosestCommonInclusiveAncestor(nsINode* aNode,
-                                                bool aIsUnlinking);
+  void UnregisterClosestCommonInclusiveAncestor(bool aIsUnlinking = false);
 
   void UpdateCommonAncestorIfNecessary();
 

@@ -9,6 +9,9 @@
 
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/SessionHistoryEntry.h"
+#include "mozilla/dom/UserNavigationInvolvement.h"
+
+#include "nsILoadInfo.h"
 
 // Helper Classes
 #include "mozilla/Maybe.h"
@@ -24,6 +27,7 @@ class nsIURI;
 class nsIDocShell;
 class nsIChannel;
 class nsIReferrerInfo;
+struct HTTPSFirstDowngradeData;
 namespace mozilla {
 class OriginAttributes;
 template <typename, class>
@@ -113,6 +117,14 @@ class nsDocShellLoadState final {
 
   void SetTriggeringSandboxFlags(uint32_t aTriggeringSandboxFlags);
 
+  uint64_t TriggeringWindowId() const;
+
+  void SetTriggeringWindowId(uint64_t aTriggeringWindowId);
+
+  bool TriggeringStorageAccess() const;
+
+  void SetTriggeringStorageAccess(bool aTriggeringStorageAccess);
+
   nsIContentSecurityPolicy* Csp() const;
 
   void SetCsp(nsIContentSecurityPolicy* aCsp);
@@ -136,13 +148,22 @@ class nsDocShellLoadState final {
 
   void SetForceAllowDataURI(bool aForceAllowDataURI);
 
-  bool IsExemptFromHTTPSOnlyMode() const;
+  bool IsExemptFromHTTPSFirstMode() const;
 
-  void SetIsExemptFromHTTPSOnlyMode(bool aIsExemptFromHTTPSOnlyMode);
+  void SetIsExemptFromHTTPSFirstMode(bool aIsExemptFromHTTPSFirstMode);
+
+  RefPtr<HTTPSFirstDowngradeData> GetHttpsFirstDowngradeData() const;
+
+  void SetHttpsFirstDowngradeData(
+      RefPtr<HTTPSFirstDowngradeData> const& aHttpsFirstTelemetryData);
 
   bool OriginalFrameSrc() const;
 
   void SetOriginalFrameSrc(bool aOriginalFrameSrc);
+
+  bool ShouldCheckForRecursion() const;
+
+  void SetShouldCheckForRecursion(bool aShouldCheckForRecursion);
 
   bool IsFormSubmission() const;
 
@@ -151,6 +172,11 @@ class nsDocShellLoadState final {
   uint32_t LoadType() const;
 
   void SetLoadType(uint32_t aLoadType);
+
+  mozilla::dom::UserNavigationInvolvement UserNavigationInvolvement() const;
+
+  void SetUserNavigationInvolvement(
+      mozilla::dom::UserNavigationInvolvement aUserNavigationInvolvement);
 
   nsISHEntry* SHEntry() const;
 
@@ -244,6 +270,10 @@ class nsDocShellLoadState final {
 
   void SetHasValidUserGestureActivation(bool HasValidUserGestureActivation);
 
+  void SetTextDirectiveUserActivation(bool aTextDirectiveUserActivation);
+
+  bool GetTextDirectiveUserActivation();
+
   const nsCString& TypeHint() const;
 
   void SetTypeHint(const nsCString& aTypeHint);
@@ -315,8 +345,23 @@ class nsDocShellLoadState final {
     return mRemoteTypeOverride;
   }
 
-  void SetRemoteTypeOverride(const nsCString& aRemoteTypeOverride) {
-    mRemoteTypeOverride = mozilla::Some(aRemoteTypeOverride);
+  void SetRemoteTypeOverride(const nsCString& aRemoteTypeOverride);
+
+  void SetSchemelessInput(nsILoadInfo::SchemelessInputType aSchemelessInput) {
+    mSchemelessInput = aSchemelessInput;
+  }
+
+  nsILoadInfo::SchemelessInputType GetSchemelessInput() {
+    return mSchemelessInput;
+  }
+
+  void SetHttpsUpgradeTelemetry(
+      nsILoadInfo::HTTPSUpgradeTelemetryType aHttpsUpgradeTelemetry) {
+    mHttpsUpgradeTelemetry = aHttpsUpgradeTelemetry;
+  }
+
+  nsILoadInfo::HTTPSUpgradeTelemetryType GetHttpsUpgradeTelemetry() {
+    return mHttpsUpgradeTelemetry;
   }
 
   // Determine the remote type of the process which should be considered
@@ -349,10 +394,11 @@ class nsDocShellLoadState final {
   void CalculateLoadURIFlags();
 
   // Compute the load flags to be used by creating channel.  aUriModified and
-  // aIsXFOError are expected to be Nothing when called from Parent process.
+  // aIsEmbeddingBlockedError are expected to be Nothing when called from parent
+  // process.
   nsLoadFlags CalculateChannelLoadFlags(
-      mozilla::dom::BrowsingContext* aBrowsingContext,
-      mozilla::Maybe<bool> aUriModified, mozilla::Maybe<bool> aIsXFOError);
+      mozilla::dom::BrowsingContext* aBrowsingContext, bool aUriModified,
+      mozilla::Maybe<bool> aIsEmbeddingBlockedError);
 
   mozilla::dom::DocShellLoadStateInit Serialize(
       mozilla::ipc::IProtocol* aActor);
@@ -413,6 +459,12 @@ class nsDocShellLoadState final {
   // SandboxFlags of the document that started the load.
   uint32_t mTriggeringSandboxFlags;
 
+  // The window ID and current "has storage access" value of the entity
+  // triggering the load. This allows the identification of self-initiated
+  // same-origin navigations that should propogate unpartitioned storage access.
+  uint64_t mTriggeringWindowId;
+  bool mTriggeringStorageAccess;
+
   // The CSP of the load, that is, the CSP of the entity responsible for causing
   // the load to occur. Most likely this is the CSP of the document that started
   // the load. In case the entity starting the load did not use a CSP, then mCsp
@@ -462,20 +514,33 @@ class nsDocShellLoadState final {
 
   // If this attribute is true, then the top-level navigaion
   // will be exempt from HTTPS-Only-Mode upgrades.
-  bool mIsExemptFromHTTPSOnlyMode;
+  bool mIsExemptFromHTTPSFirstMode;
+
+  // If set, this load is a HTTPS-First downgrade, and the downgrade data will
+  // be submitted to telemetry later if the load succeeds.
+  RefPtr<HTTPSFirstDowngradeData> mHttpsFirstDowngradeData;
 
   // If this attribute is true, this load corresponds to a frame
   // element loading its original src (or srcdoc) attribute.
   bool mOriginalFrameSrc;
 
+  // If this attribute is true, this load corresponds to a frame, object, or
+  // embed element that needs a recursion check when loading it's src (or data).
+  // Unlike mOriginalFrameSrc, this attribute will always be set regardless
+  // whether we've loaded the src already.
+  bool mShouldCheckForRecursion;
+
   // If this attribute is true, then the load was initiated by a
-  // form submission. This is important to know for the CSP directive
-  // navigate-to.
+  // form submission.
   bool mIsFormSubmission;
 
   // Contains a load type as specified by the nsDocShellLoadTypes::load*
   // constants
   uint32_t mLoadType;
+
+  // https://html.spec.whatwg.org/#user-navigation-involvement
+  mozilla::dom::UserNavigationInvolvement mUserNavigationInvolvement =
+      mozilla::dom::UserNavigationInvolvement::None;
 
   // Active Session History entry (if loading from SH)
   nsCOMPtr<nsISHEntry> mSHEntry;
@@ -520,6 +585,11 @@ class nsDocShellLoadState final {
 
   // Is this load triggered by a user gesture?
   bool mHasValidUserGestureActivation;
+
+  // True if a text directive can be scrolled to. This is true either if the
+  // load is triggered by a user, or the document has an unconsumed activation
+  // (eg. client redirect).
+  bool mTextDirectiveUserActivation = false;
 
   // Whether this load can steal the focus from the source browsing context.
   bool mAllowFocusMove;
@@ -580,6 +650,14 @@ class nsDocShellLoadState final {
 
   // Remote type of the process which originally requested the load.
   nsCString mTriggeringRemoteType;
+
+  // if the address had an intentional protocol
+  nsILoadInfo::SchemelessInputType mSchemelessInput =
+      nsILoadInfo::SchemelessInputTypeUnset;
+
+  // Solely for the use of collecting Telemetry for HTTPS upgrades.
+  nsILoadInfo::HTTPSUpgradeTelemetryType mHttpsUpgradeTelemetry =
+      nsILoadInfo::NOT_INITIALIZED;
 };
 
 #endif /* nsDocShellLoadState_h__ */

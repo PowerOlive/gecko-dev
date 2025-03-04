@@ -15,12 +15,12 @@
 using namespace js;
 using namespace js::jit;
 
-#if defined(ENABLE_WASM_TAIL_CALLS) && !defined(JS_CODEGEN_NONE)
+#ifndef JS_CODEGEN_NONE
 
-// Check if wasmMarkSlowCall produces the byte sequence that can
+// Check if wasmMarkCallAsSlow produces the byte sequence that can
 // wasmCheckSlowCallsite detect.
 BEGIN_TEST(testWasmCheckSlowCallMarkerHit) {
-  js::LifoAlloc lifo(4096);
+  js::LifoAlloc lifo(4096, js::MallocArena);
   TempAllocator alloc(&lifo);
   JitContext jc(cx);
   StackMacroAssembler masm(cx, alloc);
@@ -30,12 +30,13 @@ BEGIN_TEST(testWasmCheckSlowCallMarkerHit) {
 
   Label check, fail, end;
   masm.call(&check);
-  masm.wasmMarkSlowCall();
+  masm.wasmMarkCallAsSlow();
   masm.jump(&end);
 
   masm.bind(&check);
 #  ifdef JS_USE_LINK_REGISTER
-#    if !defined(JS_CODEGEN_LOONG64) && !defined(JS_CODEGEN_MIPS64)
+#    if !defined(JS_CODEGEN_LOONG64) && !defined(JS_CODEGEN_MIPS64) && \
+        !defined(JS_CODEGEN_RISCV64)
   static constexpr Register ra = lr;
 #    endif
 #  else
@@ -57,7 +58,7 @@ END_TEST(testWasmCheckSlowCallMarkerHit)
 
 // Check if wasmCheckSlowCallsite does not detect non-marked slow calls.
 BEGIN_TEST(testWasmCheckSlowCallMarkerMiss) {
-  js::LifoAlloc lifo(4096);
+  js::LifoAlloc lifo(4096, js::MallocArena);
   TempAllocator alloc(&lifo);
   JitContext jc(cx);
   StackMacroAssembler masm(cx, alloc);
@@ -72,7 +73,8 @@ BEGIN_TEST(testWasmCheckSlowCallMarkerMiss) {
 
   masm.bind(&check);
 #  ifdef JS_USE_LINK_REGISTER
-#    if !defined(JS_CODEGEN_LOONG64) && !defined(JS_CODEGEN_MIPS64)
+#    if !defined(JS_CODEGEN_LOONG64) && !defined(JS_CODEGEN_MIPS64) && \
+        !defined(JS_CODEGEN_RISCV64)
   static constexpr Register ra = lr;
 #    endif
 #  else
@@ -92,4 +94,4 @@ BEGIN_TEST(testWasmCheckSlowCallMarkerMiss) {
 }
 END_TEST(testWasmCheckSlowCallMarkerMiss)
 
-#endif  // ENABLE_WASM_TAIL_CALLS
+#endif

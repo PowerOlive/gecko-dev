@@ -11,6 +11,7 @@ const {
 } = require("resource://devtools/client/shared/vendor/react.js");
 const PropTypes = require("resource://devtools/client/shared/vendor/react-prop-types.js");
 const dom = require("resource://devtools/client/shared/vendor/react-dom-factories.js");
+const ToolboxProvider = require("resource://devtools/client/framework/store-provider.js");
 const Message = createFactory(
   require("resource://devtools/client/webconsole/components/Output/Message.js")
 );
@@ -33,8 +34,8 @@ const {
 } = require("resource://devtools/client/shared/unicode-url.js");
 loader.lazyRequireGetter(
   this,
-  "BLOCKED_REASON_MESSAGES",
-  "resource://devtools/client/netmonitor/src/constants.js",
+  "getBlockedReasonString",
+  "resource://devtools/client/netmonitor/src/utils/l10n.js",
   true
 );
 
@@ -88,6 +89,7 @@ function NetworkEventMessage({
     isXHR,
     timeStamp,
     blockedReason,
+    blockingExtension,
     httpVersion,
     status,
     statusText,
@@ -135,7 +137,7 @@ function NetworkEventMessage({
   if (blockedReason) {
     statusInfo = dom.span(
       { className: "status-info" },
-      BLOCKED_REASON_MESSAGES[blockedReason]
+      getBlockedReasonString(blockedReason, blockingExtension)
     );
     topLevelClasses.push("network-message-blocked");
   }
@@ -198,23 +200,28 @@ function NetworkEventMessage({
       {
         className: "network-info network-monitor",
       },
-      createElement(TabboxPanel, {
-        connector,
-        activeTabId: networkMessageActiveTabId,
-        request: networkMessageUpdate,
-        sourceMapURLService: serviceContainer.sourceMapURLService,
-        openLink: serviceContainer.openLink,
-        selectTab: tabId => {
-          dispatch(actions.selectNetworkMessageTab(tabId));
-        },
-        openNetworkDetails: enabled => {
-          if (!enabled) {
-            dispatch(actions.messageClose(id));
-          }
-        },
-        hideToggleButton: true,
-        showMessagesView: false,
-      })
+      createElement(
+        ToolboxProvider,
+        { store: serviceContainer.getToolboxStore() },
+        createElement(TabboxPanel, {
+          connector,
+          activeTabId: networkMessageActiveTabId,
+          request: networkMessageUpdate,
+          sourceMapURLService: serviceContainer.sourceMapURLService,
+          openLink: serviceContainer.openLink,
+          selectTab: tabId => {
+            dispatch(actions.selectNetworkMessageTab(tabId));
+          },
+          openNetworkDetails: enabled => {
+            if (!enabled) {
+              dispatch(actions.messageClose(id));
+            }
+          },
+          hideToggleButton: true,
+          showMessagesView: false,
+          targetSearchResult: null,
+        })
+      )
     );
 
   const request = { url, method };

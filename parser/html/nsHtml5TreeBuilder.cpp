@@ -30,32 +30,6 @@
 
 #define nsHtml5TreeBuilder_cpp__
 
-#include "jArray.h"
-#include "mozilla/ImportScanner.h"
-#include "mozilla/Likely.h"
-#include "nsAHtml5TreeBuilderState.h"
-#include "nsAtom.h"
-#include "nsContentUtils.h"
-#include "nsGkAtoms.h"
-#include "nsHtml5ArrayCopy.h"
-#include "nsHtml5AtomTable.h"
-#include "nsHtml5DocumentMode.h"
-#include "nsHtml5Highlighter.h"
-#include "nsHtml5OplessBuilder.h"
-#include "nsHtml5Parser.h"
-#include "nsHtml5PlainTextUtils.h"
-#include "nsHtml5StackNode.h"
-#include "nsHtml5StateSnapshot.h"
-#include "nsHtml5StreamParser.h"
-#include "nsHtml5String.h"
-#include "nsHtml5TreeOperation.h"
-#include "nsHtml5TreeOpExecutor.h"
-#include "nsHtml5ViewSourceUtils.h"
-#include "nsIContent.h"
-#include "nsIContentHandle.h"
-#include "nsNameSpaceManager.h"
-#include "nsTraceRefcnt.h"
-
 #include "nsHtml5AttributeName.h"
 #include "nsHtml5ElementName.h"
 #include "nsHtml5Tokenizer.h"
@@ -125,7 +99,19 @@ static const char* const QUIRKY_PUBLIC_IDS_DATA[] = {
     "-//webtechs//dtd mozilla html 2.0//",
     "-//webtechs//dtd mozilla html//"};
 staticJArray<const char*, int32_t> nsHtml5TreeBuilder::QUIRKY_PUBLIC_IDS = {
-    QUIRKY_PUBLIC_IDS_DATA, MOZ_ARRAY_LENGTH(QUIRKY_PUBLIC_IDS_DATA)};
+    QUIRKY_PUBLIC_IDS_DATA, std::size(QUIRKY_PUBLIC_IDS_DATA)};
+void nsHtml5TreeBuilder::setKeepBuffer(bool keepBuffer) {
+  this->keepBuffer = keepBuffer;
+}
+
+bool nsHtml5TreeBuilder::dropBufferIfLongerThan(int32_t length) {
+  if (charBuffer.length > length) {
+    charBuffer = nullptr;
+    return true;
+  }
+  return false;
+}
+
 void nsHtml5TreeBuilder::startTokenization(nsHtml5Tokenizer* self) {
   tokenizer = self;
   stackNodes = jArray<nsHtml5StackNode*, int32_t>::newJArray(64);
@@ -144,7 +130,9 @@ void nsHtml5TreeBuilder::startTokenization(nsHtml5Tokenizer* self) {
   headPointer = nullptr;
   start(fragment);
   charBufferLen = 0;
-  charBuffer = nullptr;
+  if (!keepBuffer) {
+    charBuffer = nullptr;
+  }
   framesetOk = true;
   if (fragment) {
     nsIContentHandle* elt;
@@ -678,7 +666,9 @@ void nsHtml5TreeBuilder::endTokenization() {
     stackNodesIdx = 0;
     stackNodes = nullptr;
   }
-  charBuffer = nullptr;
+  if (!keepBuffer) {
+    charBuffer = nullptr;
+  }
   end();
 }
 
@@ -1785,6 +1775,18 @@ starttagloop:
             attributes = nullptr;
             NS_HTML5_BREAK(starttagloop);
           }
+          case HR: {
+            if (isCurrent(nsGkAtoms::option)) {
+              pop();
+            }
+            if (isCurrent(nsGkAtoms::optgroup)) {
+              pop();
+            }
+            appendVoidElementToCurrent(elementName, attributes);
+            selfClosing = false;
+            attributes = nullptr;
+            NS_HTML5_BREAK(starttagloop);
+          }
           default: {
             errStrayStartTag(name);
             NS_HTML5_BREAK(starttagloop);
@@ -2105,6 +2107,28 @@ bool nsHtml5TreeBuilder::isSpecialParentInForeign(nsHtml5StackNode* stackNode) {
   return (kNameSpaceID_XHTML == ns) || (stackNode->isHtmlIntegrationPoint()) ||
          ((kNameSpaceID_MathML == ns) &&
           (stackNode->getGroup() == MI_MO_MN_MS_MTEXT));
+}
+
+nsIContentHandle* nsHtml5TreeBuilder::getDeclarativeShadowRoot(
+    nsIContentHandle* currentNode, nsIContentHandle* templateNode,
+    nsHtml5HtmlAttributes* attributes) {
+  if (!isAllowDeclarativeShadowRoots()) {
+    return nullptr;
+  }
+  nsHtml5String shadowRootMode =
+      attributes->getValue(nsHtml5AttributeName::ATTR_SHADOWROOTMODE);
+  if (!shadowRootMode) {
+    return nullptr;
+  }
+  bool shadowRootIsClonable =
+      attributes->contains(nsHtml5AttributeName::ATTR_SHADOWROOTCLONABLE);
+  bool shadowRootIsSerializable =
+      attributes->contains(nsHtml5AttributeName::ATTR_SHADOWROOTSERIALIZABLE);
+  bool shadowRootDelegatesFocus =
+      attributes->contains(nsHtml5AttributeName::ATTR_SHADOWROOTDELEGATESFOCUS);
+  return getShadowRootFromHost(currentNode, templateNode, shadowRootMode,
+                               shadowRootIsClonable, shadowRootIsSerializable,
+                               shadowRootDelegatesFocus);
 }
 
 nsHtml5String nsHtml5TreeBuilder::extractCharsetFromContent(
@@ -4232,9 +4256,18 @@ void nsHtml5TreeBuilder::appendToCurrentNodeAndPushElement(
   nsIContentHandle* elt =
       createElement(kNameSpaceID_XHTML, elementName->getName(), attributes,
                     currentNode, htmlCreator(elementName->getHtmlCreator()));
-  appendElement(elt, currentNode);
   if (nsHtml5ElementName::ELT_TEMPLATE == elementName) {
-    elt = getDocumentFragmentForTemplate(elt);
+    nsIContentHandle* root =
+        getDeclarativeShadowRoot(currentNode, elt, attributes);
+    if (root) {
+      setDocumentFragmentForTemplate(elt, root);
+      elt = root;
+    } else {
+      appendElement(elt, currentNode);
+      elt = getDocumentFragmentForTemplate(elt);
+    }
+  } else {
+    appendElement(elt, currentNode);
   }
   nsHtml5StackNode* node = createStackNode(elementName, elt);
   push(node);
@@ -4335,6 +4368,18 @@ void nsHtml5TreeBuilder::appendToCurrentNodeAndPushElementMayFoster(
   }
   nsHtml5StackNode* node = createStackNode(elementName, elt);
   push(node);
+}
+
+void nsHtml5TreeBuilder::appendVoidElementToCurrent(
+    nsHtml5ElementName* elementName, nsHtml5HtmlAttributes* attributes) {
+  nsAtom* popName = elementName->getName();
+  nsIContentHandle* currentNode = nodeFromStackWithBlinkCompat(currentPtr);
+  nsIContentHandle* elt =
+      createElement(kNameSpaceID_XHTML, popName, attributes, currentNode,
+                    htmlCreator(elementName->getHtmlCreator()));
+  appendElement(elt, currentNode);
+  elementPushed(kNameSpaceID_XHTML, popName, elt);
+  elementPopped(kNameSpaceID_XHTML, popName, elt);
 }
 
 void nsHtml5TreeBuilder::appendVoidElementToCurrentMayFoster(
@@ -4484,6 +4529,14 @@ void nsHtml5TreeBuilder::setIsSrcdocDocument(bool isSrcdocDocument) {
   this->setForceNoQuirks(isSrcdocDocument);
 }
 
+bool nsHtml5TreeBuilder::isAllowDeclarativeShadowRoots() {
+  return allowDeclarativeShadowRoots;
+}
+
+void nsHtml5TreeBuilder::setAllowDeclarativeShadowRoots(bool allow) {
+  allowDeclarativeShadowRoots = allow;
+}
+
 void nsHtml5TreeBuilder::flushCharacters() {
   if (charBufferLen > 0) {
     if ((mode == IN_TABLE || mode == IN_TABLE_BODY || mode == IN_ROW) &&
@@ -4615,7 +4668,7 @@ bool nsHtml5TreeBuilder::snapshotMatches(nsAHtml5TreeBuilderState* snapshot) {
 }
 
 void nsHtml5TreeBuilder::loadState(nsAHtml5TreeBuilderState* snapshot) {
-  mCurrentHtmlScriptIsAsyncOrDefer = false;
+  mCurrentHtmlScriptCannotDocumentWriteOrBlock = false;
   jArray<nsHtml5StackNode*, int32_t> stackCopy = snapshot->getStack();
   int32_t stackLen = snapshot->getStackLength();
   jArray<nsHtml5StackNode*, int32_t> listCopy =

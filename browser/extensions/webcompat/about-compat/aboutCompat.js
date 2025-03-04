@@ -14,7 +14,7 @@ const portToAddon = (function () {
   function connect() {
     port = browser.runtime.connect({ name: "AboutCompatTab" });
     port.onMessage.addListener(onMessageFromAddon);
-    port.onDisconnect.addListener(e => {
+    port.onDisconnect.addListener(() => {
       port = undefined;
     });
   }
@@ -84,10 +84,6 @@ async function onMessageFromAddon(msg) {
     redrawTable($("#interventions"), msg.interventionsChanged, alsoShowHidden);
   }
 
-  if ("overridesChanged" in msg) {
-    redrawTable($("#overrides"), msg.overridesChanged, alsoShowHidden);
-  }
-
   if ("shimsChanged" in msg) {
     updateShimTables(msg.shimsChanged, alsoShowHidden);
   }
@@ -109,9 +105,8 @@ function redraw() {
   if (!availablePatches) {
     return;
   }
-  const { overrides, interventions, shims } = availablePatches;
+  const { interventions, shims } = availablePatches;
   const alsoShowHidden = location.hash === "#all";
-  redrawTable($("#overrides"), overrides, alsoShowHidden);
   redrawTable($("#interventions"), interventions, alsoShowHidden);
   updateShimTables(shims, alsoShowHidden);
 }

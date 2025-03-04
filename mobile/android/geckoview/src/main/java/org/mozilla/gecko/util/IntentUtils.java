@@ -6,7 +6,6 @@
 
 package org.mozilla.gecko.util;
 
-import android.annotation.TargetApi;
 import android.content.Intent;
 import android.net.Uri;
 import java.net.URISyntaxException;
@@ -45,10 +44,8 @@ public class IntentUtils {
    * @return The corresponding normalized Uri.
    */
   public static Uri normalizeUri(final String aUri) {
-    final Uri normUri =
-        normalizeUriScheme(
-            aUri.indexOf(':') >= 0 ? Uri.parse(aUri) : new Uri.Builder().scheme(aUri).build());
-    return normUri;
+    return normalizeUriScheme(
+        aUri.indexOf(':') >= 0 ? Uri.parse(aUri) : new Uri.Builder().scheme(aUri).build());
   }
 
   public static boolean isUriSafeForScheme(final String aUri) {
@@ -77,6 +74,10 @@ public class IntentUtils {
     if (("intent".equals(scheme) || "android-app".equals(scheme))) {
       // Bug 1356893 - Rject intents with file data schemes.
       return getSafeIntent(aUri) != null;
+    }
+
+    if ("fido".equals(scheme)) {
+      return false;
     }
 
     return true;
@@ -113,7 +114,6 @@ public class IntentUtils {
   }
 
   // We create a separate method to better encapsulate the @TargetApi use.
-  @TargetApi(15)
   private static void nullIntentSelector(final Intent intent) {
     intent.setSelector(null);
   }

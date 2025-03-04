@@ -31,6 +31,7 @@ namespace js {
 
 class CompactPropMap;
 class FatInlineAtom;
+class ThinInlineAtom;
 class NormalAtom;
 class NormalPropMap;
 class DictionaryPropMap;
@@ -102,16 +103,24 @@ namespace gc {
 #define FOR_EACH_NURSERY_STRING_ALLOCKIND(D) \
     D(FAT_INLINE_STRING,   String,        JSFatInlineString, JSFatInlineString, true,   true,  true) \
     D(STRING,              String,        JSString,          JSString,          true,   true,  true)
+
+#define FOR_EACH_BUFFER_ALLOCKIND(D) \
+ /* AllocKind              TraceKind     TypeName               SizedType                  BGFinal Nursery Compact */ \
+  D(BUFFER16,              SmallBuffer,  js::gc::SmallBuffer,   js::gc::SmallBufferN<16>,  true,   false,  true) \
+  D(BUFFER32,              SmallBuffer,  js::gc::SmallBuffer,   js::gc::SmallBufferN<32>,  true,   false,  true) \
+  D(BUFFER64,              SmallBuffer,  js::gc::SmallBuffer,   js::gc::SmallBufferN<64>,  true,   false,  true) \
+  D(BUFFER128,             SmallBuffer,  js::gc::SmallBuffer,   js::gc::SmallBufferN<128>, true,   false,  true)
 // clang-format on
 
-#define FOR_EACH_NONOBJECT_ALLOCKIND(D)      \
-  FOR_EACH_NONOBJECT_NONNURSERY_ALLOCKIND(D) \
-  FOR_EACH_NONOBJECT_NURSERY_ALLOCKIND(D)    \
+#define FOR_EACH_NONOBJECT_NONBUFFER_ALLOCKIND(D) \
+  FOR_EACH_NONOBJECT_NONNURSERY_ALLOCKIND(D)      \
+  FOR_EACH_NONOBJECT_NURSERY_ALLOCKIND(D)         \
   FOR_EACH_NURSERY_STRING_ALLOCKIND(D)
 
 #define FOR_EACH_ALLOCKIND(D)  \
   FOR_EACH_OBJECT_ALLOCKIND(D) \
-  FOR_EACH_NONOBJECT_ALLOCKIND(D)
+  FOR_EACH_BUFFER_ALLOCKIND(D) \
+  FOR_EACH_NONOBJECT_NONBUFFER_ALLOCKIND(D)
 
 #define DEFINE_ALLOC_KIND(allocKind, _1, _2, _3, _4, _5, _6) allocKind,
 enum class AllocKind : uint8_t {
@@ -121,13 +130,22 @@ enum class AllocKind : uint8_t {
     OBJECT_LIMIT,
     OBJECT_LAST = OBJECT_LIMIT - 1,
 
-    FOR_EACH_NONOBJECT_ALLOCKIND(DEFINE_ALLOC_KIND)
+    FOR_EACH_BUFFER_ALLOCKIND(DEFINE_ALLOC_KIND)
+
+    BUFFER_LIMIT,
+    BUFFER_LAST = BUFFER_LIMIT - 1,
+
+    FOR_EACH_NONOBJECT_NONBUFFER_ALLOCKIND(DEFINE_ALLOC_KIND)
 
     LIMIT,
     LAST = LIMIT - 1,
 
+    INVALID = LIMIT,
+
     FIRST = 0,
-    OBJECT_FIRST = FUNCTION // Hardcoded to first object kind.
+    OBJECT_FIRST = FUNCTION, // Hardcoded to first object kind.
+
+    BUFFER_FIRST = BUFFER16
   // clang-format on
 };
 #undef DEFINE_ALLOC_KIND
@@ -164,6 +182,10 @@ constexpr bool IsObjectAllocKind(AllocKind kind) {
   return kind >= AllocKind::OBJECT_FIRST && kind <= AllocKind::OBJECT_LAST;
 }
 
+constexpr bool IsBufferAllocKind(AllocKind kind) {
+  return kind > AllocKind::OBJECT_LAST && kind <= AllocKind::BUFFER_LAST;
+}
+
 constexpr bool IsShapeAllocKind(AllocKind kind) {
   return kind == AllocKind::SHAPE;
 }
@@ -194,13 +216,14 @@ constexpr auto SomeAllocKinds(AllocKind first = AllocKind::FIRST,
 // with each index corresponding to a particular alloc kind.
 template <typename ValueType>
 using AllAllocKindArray =
-    mozilla::EnumeratedArray<AllocKind, AllocKind::LIMIT, ValueType>;
+    mozilla::EnumeratedArray<AllocKind, ValueType, size_t(AllocKind::LIMIT)>;
 
 // ObjectAllocKindArray<ValueType> gives an enumerated array of ValueTypes,
 // with each index corresponding to a particular object alloc kind.
 template <typename ValueType>
 using ObjectAllocKindArray =
-    mozilla::EnumeratedArray<AllocKind, AllocKind::OBJECT_LIMIT, ValueType>;
+    mozilla::EnumeratedArray<AllocKind, ValueType,
+                             size_t(AllocKind::OBJECT_LIMIT)>;
 
 /*
  * Map from C++ type to alloc kind for non-object types. JSObject does not have
@@ -219,7 +242,7 @@ struct MapTypeToAllocKind {};
   struct MapTypeToAllocKind<type> {                                      \
     static const AllocKind kind = AllocKind::allocKind;                  \
   };
-FOR_EACH_NONOBJECT_ALLOCKIND(EXPAND_MAPTYPETOALLOCKIND)
+FOR_EACH_NONOBJECT_NONBUFFER_ALLOCKIND(EXPAND_MAPTYPETOALLOCKIND)
 #undef EXPAND_MAPTYPETOALLOCKIND
 
 template <>
@@ -237,6 +260,10 @@ struct MapTypeToAllocKind<JSLinearString> {
 template <>
 struct MapTypeToAllocKind<JSThinInlineString> {
   static const AllocKind kind = AllocKind::STRING;
+};
+template <>
+struct MapTypeToAllocKind<js::ThinInlineAtom> {
+  static const AllocKind kind = AllocKind::ATOM;
 };
 
 template <>

@@ -28,7 +28,7 @@ function calleeToString(node) {
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/reject-globalThis-modification.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/reject-globalThis-modification.html",
     },
     messages: {
       rejectModifyGlobalThis:
@@ -42,7 +42,7 @@ module.exports = {
 
   create(context) {
     return {
-      AssignmentExpression(node, parents) {
+      AssignmentExpression(node) {
         let target = node.left;
         while (target.type === "MemberExpression") {
           target = target.object;

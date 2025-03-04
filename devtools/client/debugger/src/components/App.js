@@ -2,25 +2,34 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
-import React, { Component } from "react";
-import { div } from "react-dom-factories";
-import PropTypes from "prop-types";
-import { connect } from "../utils/connect";
+import React, { Component } from "devtools/client/shared/vendor/react";
+import {
+  button,
+  div,
+  main,
+  span,
+} from "devtools/client/shared/vendor/react-dom-factories";
+import PropTypes from "devtools/client/shared/vendor/react-prop-types";
+import { connect } from "devtools/client/shared/vendor/react-redux";
 import { prefs } from "../utils/prefs";
 import { primaryPaneTabs } from "../constants";
-import actions from "../actions";
+import actions from "../actions/index";
+import AccessibleImage from "./shared/AccessibleImage";
 
 import {
-  getSelectedSource,
+  getSelectedLocation,
   getPaneCollapse,
   getActiveSearch,
   getQuickOpenEnabled,
   getOrientation,
-} from "../selectors";
-const KeyShortcuts = require("devtools/client/shared/key-shortcuts");
+  getIsCurrentThreadPaused,
+  isMapScopesEnabled,
+  getSourceMapErrorForSourceActor,
+} from "../selectors/index";
+const KeyShortcuts = require("resource://devtools/client/shared/key-shortcuts.js");
 
-const SplitBox = require("devtools/client/shared/components/splitter/SplitBox");
-const AppErrorBoundary = require("devtools/client/shared/components/AppErrorBoundary");
+const SplitBox = require("resource://devtools/client/shared/components/splitter/SplitBox.js");
+const AppErrorBoundary = require("resource://devtools/client/shared/components/AppErrorBoundary.js");
 
 const shortcuts = new KeyShortcuts({ window });
 
@@ -29,15 +38,10 @@ const verticalLayoutBreakpoint = window.matchMedia(
   "(min-width: 10px) and (max-width: 799px)"
 );
 
-import "./variables.css";
-import "./App.css";
-import "./shared/menu.css";
-
-import A11yIntention from "./A11yIntention";
 import { ShortcutsModal } from "./ShortcutsModal";
-import PrimaryPanes from "./PrimaryPanes";
-import Editor from "./Editor";
-import SecondaryPanes from "./SecondaryPanes";
+import PrimaryPanes from "./PrimaryPanes/index";
+import Editor from "./Editor/index";
+import SecondaryPanes from "./SecondaryPanes/index";
 import WelcomeBox from "./WelcomeBox";
 import EditorTabs from "./Editor/Tabs";
 import EditorFooter from "./Editor/Footer";
@@ -63,12 +67,13 @@ class App extends Component {
       openQuickOpen: PropTypes.func.isRequired,
       orientation: PropTypes.oneOf(["horizontal", "vertical"]).isRequired,
       quickOpenEnabled: PropTypes.bool.isRequired,
-      selectedSource: PropTypes.object,
+      selectedLocation: PropTypes.object,
       setActiveSearch: PropTypes.func.isRequired,
       setOrientation: PropTypes.func.isRequired,
       setPrimaryPaneTab: PropTypes.func.isRequired,
       startPanelCollapsed: PropTypes.bool.isRequired,
       toolboxDoc: PropTypes.object.isRequired,
+      showOriginalVariableMappingWarning: PropTypes.bool,
     };
   }
 
@@ -204,11 +209,46 @@ class App extends Component {
     }
   }
 
+  closeSourceMapError = () => {
+    this.setState({ hiddenSourceMapError: this.props.sourceMapError });
+  };
+
+  renderEditorNotificationBar() {
+    if (
+      this.props.sourceMapError &&
+      this.state.hiddenSourceMapError != this.props.sourceMapError
+    ) {
+      return div(
+        { className: "editor-notification-footer", "aria-role": "status" },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "sourcemap" })
+        ),
+        `Source Map Error: ${this.props.sourceMapError}`,
+        button({ className: "close-button", onClick: this.closeSourceMapError })
+      );
+    }
+    if (this.props.showOriginalVariableMappingWarning) {
+      return div(
+        { className: "editor-notification-footer", "aria-role": "status" },
+        span(
+          { className: "info icon" },
+          React.createElement(AccessibleImage, { className: "sourcemap" })
+        ),
+        L10N.getFormatStr(
+          "editorNotificationFooter.noOriginalScopes",
+          L10N.getStr("scopes.showOriginalScopes")
+        )
+      );
+    }
+    return null;
+  }
+
   renderEditorPane = () => {
     const { startPanelCollapsed, endPanelCollapsed } = this.props;
     const { endPanelSize, startPanelSize } = this.state;
     const horizontal = this.isHorizontal();
-    return div(
+    return main(
       {
         className: "editor-pane",
       },
@@ -217,20 +257,21 @@ class App extends Component {
           className: "editor-container",
         },
         React.createElement(EditorTabs, {
-          startPanelCollapsed: startPanelCollapsed,
-          endPanelCollapsed: endPanelCollapsed,
-          horizontal: horizontal,
+          startPanelCollapsed,
+          endPanelCollapsed,
+          horizontal,
         }),
         React.createElement(Editor, {
-          startPanelSize: startPanelSize,
-          endPanelSize: endPanelSize,
+          startPanelSize,
+          endPanelSize,
         }),
-        !this.props.selectedSource
+        !this.props.selectedLocation
           ? React.createElement(WelcomeBox, {
               horizontal,
               toggleShortcutsModal: () => this.toggleShortcutsModal(),
             })
           : null,
+        this.renderEditorNotificationBar(),
         React.createElement(EditorFooter, {
           horizontal,
         })
@@ -279,8 +320,9 @@ class App extends Component {
         splitterSize: 1,
         onResizeEnd: num => {
           prefs.startPanelSize = num;
+          this.triggerEditorPaneResize();
         },
-        startPanelCollapsed: startPanelCollapsed,
+        startPanelCollapsed,
         startPanel: React.createElement(PrimaryPanes, {
           horizontal,
         }),
@@ -290,7 +332,7 @@ class App extends Component {
       endPanel: React.createElement(SecondaryPanes, {
         horizontal,
       }),
-      endPanelCollapsed: endPanelCollapsed,
+      endPanelCollapsed,
     });
   };
 
@@ -306,20 +348,16 @@ class App extends Component {
           componentName: "Debugger",
           panel: L10N.getStr("ToolboxDebugger.label"),
         },
-        React.createElement(
-          A11yIntention,
-          {},
-          this.renderLayout(),
-          quickOpenEnabled === true &&
-            React.createElement(QuickOpenModal, {
-              shortcutsModalEnabled: this.state.shortcutsModalEnabled,
-              toggleShortcutsModal: () => this.toggleShortcutsModal(),
-            }),
-          React.createElement(ShortcutsModal, {
-            enabled: this.state.shortcutsModalEnabled,
-            handleClose: () => this.toggleShortcutsModal(),
-          })
-        )
+        this.renderLayout(),
+        quickOpenEnabled === true &&
+          React.createElement(QuickOpenModal, {
+            shortcutsModalEnabled: this.state.shortcutsModalEnabled,
+            toggleShortcutsModal: () => this.toggleShortcutsModal(),
+          }),
+        React.createElement(ShortcutsModal, {
+          enabled: this.state.shortcutsModalEnabled,
+          handleClose: () => this.toggleShortcutsModal(),
+        })
       )
     );
   }
@@ -332,14 +370,30 @@ App.childContextTypes = {
   fluentBundles: PropTypes.array,
 };
 
-const mapStateToProps = state => ({
-  selectedSource: getSelectedSource(state),
-  startPanelCollapsed: getPaneCollapse(state, "start"),
-  endPanelCollapsed: getPaneCollapse(state, "end"),
-  activeSearch: getActiveSearch(state),
-  quickOpenEnabled: getQuickOpenEnabled(state),
-  orientation: getOrientation(state),
-});
+const mapStateToProps = state => {
+  const selectedLocation = getSelectedLocation(state);
+  const mapScopeEnabled = isMapScopesEnabled(state);
+  const isPaused = getIsCurrentThreadPaused(state);
+
+  const showOriginalVariableMappingWarning =
+    isPaused &&
+    selectedLocation?.source.isOriginal &&
+    !selectedLocation?.source.isPrettyPrinted &&
+    !mapScopeEnabled;
+
+  return {
+    showOriginalVariableMappingWarning,
+    selectedLocation,
+    startPanelCollapsed: getPaneCollapse(state, "start"),
+    endPanelCollapsed: getPaneCollapse(state, "end"),
+    activeSearch: getActiveSearch(state),
+    quickOpenEnabled: getQuickOpenEnabled(state),
+    orientation: getOrientation(state),
+    sourceMapError: selectedLocation?.sourceActor
+      ? getSourceMapErrorForSourceActor(state, selectedLocation.sourceActor.id)
+      : null,
+  };
+};
 
 export default connect(mapStateToProps, {
   setActiveSearch: actions.setActiveSearch,

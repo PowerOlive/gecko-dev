@@ -186,7 +186,8 @@ class RetAddrEntry {
 //
 // Note: The arrays are arranged in order of descending alignment requires so
 // that padding is not required.
-class alignas(uintptr_t) BaselineScript final : public TrailingArray {
+class alignas(uintptr_t) BaselineScript final
+    : public TrailingArray<BaselineScript> {
  private:
   // Code pointer containing the actual method.
   HeapPtr<JitCode*> method_ = nullptr;
@@ -330,6 +331,8 @@ class alignas(uintptr_t) BaselineScript final : public TrailingArray {
 
   uint8_t* nativeCodeForOSREntry(uint32_t pcOffset);
 
+  static uint8_t* OSREntryForFrame(BaselineFrame* frame);
+
   void copyRetAddrEntries(const RetAddrEntry* entries);
   void copyOSREntries(const OSREntry* entries);
   void copyDebugTrapEntries(const DebugTrapEntry* entries);
@@ -423,6 +426,11 @@ struct alignas(uintptr_t) BaselineBailoutInfo {
   jsbytecode* tryPC = nullptr;
   jsbytecode* faultPC = nullptr;
 
+  // We use this to transfer exception information out from
+  // buildExpressionStack, since it would be too risky to throw from
+  // there.
+  jsid tempId = PropertyKey::Void();
+
   // Number of baseline frames to push on the stack.
   uint32_t numFrames = 0;
 
@@ -433,6 +441,8 @@ struct alignas(uintptr_t) BaselineBailoutInfo {
   BaselineBailoutInfo(const BaselineBailoutInfo&) = default;
 
   void operator=(const BaselineBailoutInfo&) = delete;
+
+  void trace(JSTracer* aTrc);
 };
 
 enum class BailoutReason {
@@ -446,8 +456,17 @@ enum class BailoutReason {
     BaselineBailoutInfo** bailoutInfo,
     const ExceptionBailoutInfo* exceptionInfo, BailoutReason reason);
 
+enum class BaselineOption : uint8_t {
+  ForceDebugInstrumentation = 1 << 0,
+  ForceMainThreadCompilation = 1 << 1,
+};
+
+using BaselineOptions = EnumFlags<BaselineOption>;
+
+bool DispatchOffThreadBaselineBatch(JSContext* cx);
+
 MethodStatus BaselineCompile(JSContext* cx, JSScript* script,
-                             bool forceDebugInstrumentation = false);
+                             BaselineOptions options);
 
 // Class storing the generated Baseline Interpreter code for the runtime.
 class BaselineInterpreter {

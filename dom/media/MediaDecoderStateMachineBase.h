@@ -85,7 +85,8 @@ class MediaDecoderStateMachineBase {
   RefPtr<ShutdownPromise> BeginShutdown();
 
   // Seeks to the decoder to aTarget asynchronously.
-  RefPtr<MediaDecoder::SeekPromise> InvokeSeek(const SeekTarget& aTarget);
+  virtual RefPtr<MediaDecoder::SeekPromise> InvokeSeek(
+      const SeekTarget& aTarget);
 
   virtual size_t SizeOfVideoQueue() const = 0;
   virtual size_t SizeOfAudioQueue() const = 0;
@@ -169,6 +170,14 @@ class MediaDecoderStateMachineBase {
 
   virtual bool IsCDMProxySupported(CDMProxy* aProxy) = 0;
 
+  virtual bool IsExternalEngineStateMachine() const { return false; }
+
+  bool IsLiveStream() const;
+
+#ifdef DEBUG
+  bool HasNotifiedPlaybackError() const { return mHasNotifiedPlaybackError; }
+#endif
+
  protected:
   virtual ~MediaDecoderStateMachineBase() = default;
 
@@ -177,7 +186,6 @@ class MediaDecoderStateMachineBase {
   const MediaInfo& Info() const { return mInfo.ref(); }
 
   virtual void SetPlaybackRate(double aPlaybackRate) = 0;
-  virtual void SetIsLiveStream(bool aIsLiveStream) = 0;
   virtual void SetCanPlayThrough(bool aCanPlayThrough) = 0;
   virtual void SetFragmentEndTime(const media::TimeUnit& aFragmentEndTime) = 0;
 
@@ -195,7 +203,9 @@ class MediaDecoderStateMachineBase {
 
   virtual RefPtr<MediaDecoder::SeekPromise> Seek(const SeekTarget& aTarget) = 0;
 
-  void DecodeError(const MediaResult& aError);
+  virtual void DecodeError(const MediaResult& aError);
+
+  void SetIsLiveStream(bool aIsLiveStream);
 
   // Functions used by assertions to ensure we're calling things
   // on the appropriate threads.
@@ -205,6 +215,12 @@ class MediaDecoderStateMachineBase {
   bool IsRequestingVideoData() const { return mVideoDataRequest.Exists(); }
   bool IsWaitingAudioData() const { return mAudioWaitRequest.Exists(); }
   bool IsWaitingVideoData() const { return mVideoWaitRequest.Exists(); }
+  bool IsTrackingAudioData() const {
+    return mAudioDataRequest.Exists() || mAudioWaitRequest.Exists();
+  }
+  bool IsTrackingVideoData() const {
+    return mVideoDataRequest.Exists() || mVideoWaitRequest.Exists();
+  }
 
   void* const mDecoderID;
   const RefPtr<AbstractThread> mAbstractMainThread;
@@ -299,8 +315,15 @@ class MediaDecoderStateMachineBase {
   MozPromiseRequestHolder<WaitForDataPromise> mAudioWaitRequest;
   MozPromiseRequestHolder<WaitForDataPromise> mVideoWaitRequest;
 
+  // True if playback is live stream.
+  Atomic<bool> mIsLiveStream;
+
  private:
   WatchManager<MediaDecoderStateMachineBase> mWatchManager;
+
+#ifdef DEBUG
+  bool mHasNotifiedPlaybackError = false;
+#endif
 };
 
 }  // namespace mozilla

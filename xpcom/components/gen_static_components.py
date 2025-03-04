@@ -64,6 +64,7 @@ class ProcessSelector:
     ALLOW_IN_SOCKET_PROCESS = 1 << 4
     ALLOW_IN_RDD_PROCESS = 1 << 5
     ALLOW_IN_UTILITY_PROCESS = 1 << 6
+    ALLOW_IN_GMPLUGIN_PROCESS = 1 << 7
     ALLOW_IN_GPU_AND_MAIN_PROCESS = ALLOW_IN_GPU_PROCESS | MAIN_PROCESS_ONLY
     ALLOW_IN_GPU_AND_SOCKET_PROCESS = ALLOW_IN_GPU_PROCESS | ALLOW_IN_SOCKET_PROCESS
     ALLOW_IN_GPU_AND_VR_PROCESS = ALLOW_IN_GPU_PROCESS | ALLOW_IN_VR_PROCESS
@@ -93,6 +94,14 @@ class ProcessSelector:
         | ALLOW_IN_SOCKET_PROCESS
         | ALLOW_IN_UTILITY_PROCESS
     )
+    ALLOW_IN_GPU_RDD_VR_SOCKET_UTILITY_AND_GMPLUGIN_PROCESS = (
+        ALLOW_IN_GPU_PROCESS
+        | ALLOW_IN_RDD_PROCESS
+        | ALLOW_IN_VR_PROCESS
+        | ALLOW_IN_SOCKET_PROCESS
+        | ALLOW_IN_UTILITY_PROCESS
+        | ALLOW_IN_GMPLUGIN_PROCESS
+    )
 
 
 # Maps ProcessSelector constants to the name of the corresponding
@@ -114,6 +123,7 @@ PROCESSES = {
     ProcessSelector.ALLOW_IN_GPU_RDD_SOCKET_AND_UTILITY_PROCESS: "ALLOW_IN_GPU_RDD_SOCKET_AND_UTILITY_PROCESS",  # NOQA: E501
     ProcessSelector.ALLOW_IN_GPU_RDD_VR_AND_SOCKET_PROCESS: "ALLOW_IN_GPU_RDD_VR_AND_SOCKET_PROCESS",  # NOQA: E501
     ProcessSelector.ALLOW_IN_GPU_RDD_VR_SOCKET_AND_UTILITY_PROCESS: "ALLOW_IN_GPU_RDD_VR_SOCKET_AND_UTILITY_PROCESS",  # NOQA: E501
+    ProcessSelector.ALLOW_IN_GPU_RDD_VR_SOCKET_UTILITY_AND_GMPLUGIN_PROCESS: "ALLOW_IN_GPU_RDD_VR_SOCKET_UTILITY_AND_GMPLUGIN_PROCESS",  # NOQA: E501
 }
 
 
@@ -281,7 +291,6 @@ class ModuleEntry(object):
         self.legacy_constructor = data.get("legacy_constructor", None)
         self.init_method = data.get("init_method", [])
 
-        self.jsm = data.get("jsm", None)
         self.esModule = data.get("esModule", None)
 
         self.external = data.get(
@@ -306,17 +315,7 @@ class ModuleEntry(object):
                 % (str(self.cid), ", ".join(map(repr, self.contract_ids)), str_)
             )
 
-        if self.jsm:
-            if not self.constructor:
-                error("JavaScript components must specify a constructor")
-
-            for prop in ("init_method", "legacy_constructor", "headers"):
-                if getattr(self, prop):
-                    error(
-                        "JavaScript components may not specify a '%s' "
-                        "property" % prop
-                    )
-        elif self.esModule:
+        if self.esModule:
             if not self.constructor:
                 error("JavaScript components must specify a constructor")
 
@@ -418,15 +417,7 @@ class ModuleEntry(object):
             )
             return res
 
-        if self.jsm:
-            res += (
-                "      nsCOMPtr<nsISupports> inst;\n"
-                "      MOZ_TRY(ConstructJSMComponent(nsLiteralCString(%s),\n"
-                "                                    %s,\n"
-                "                                    getter_AddRefs(inst)));"
-                "\n" % (json.dumps(self.jsm), json.dumps(self.constructor))
-            )
-        elif self.esModule:
+        if self.esModule:
             res += (
                 "      nsCOMPtr<nsISupports> inst;\n"
                 "      MOZ_TRY(ConstructESModuleComponent(nsLiteralCString(%s),\n"
@@ -864,7 +855,6 @@ def gen_substs(manifests):
     js_services = {}
     protocol_handlers = {}
 
-    jsms = set()
     esModules = set()
 
     types = set()
@@ -887,9 +877,6 @@ def gen_substs(manifests):
         if mod.type and not mod.headers:
             types.add(mod.type)
 
-        if mod.jsm:
-            jsms.add(mod.jsm)
-
         if mod.esModule:
             esModules.add(mod.esModule)
 
@@ -910,14 +897,18 @@ def gen_substs(manifests):
 
     cid_phf = PerfectHash(modules, PHF_SIZE, key=lambda module: module.cid.bytes)
 
-    contract_phf = PerfectHash(contracts, PHF_SIZE, key=lambda entry: entry.contract)
+    contract_phf = PerfectHash(
+        contracts, PHF_SIZE, key=lambda entry: entry.contract.encode()
+    )
 
     js_services_phf = PerfectHash(
-        list(js_services.values()), PHF_SIZE, key=lambda entry: entry.js_name
+        list(js_services.values()), PHF_SIZE, key=lambda entry: entry.js_name.encode()
     )
 
     protocol_handlers_phf = PerfectHash(
-        list(protocol_handlers.values()), TINY_PHF_SIZE, key=lambda entry: entry.scheme
+        list(protocol_handlers.values()),
+        TINY_PHF_SIZE,
+        key=lambda entry: entry.scheme.encode(),
     )
 
     js_services_json = {}
@@ -935,15 +926,12 @@ def gen_substs(manifests):
     substs["contract_count"] = len(contracts)
     substs["protocol_handler_count"] = len(protocol_handlers)
 
-    substs["default_protocol_handler_idx"] = protocol_handlers_phf.get_index("default")
+    substs["default_protocol_handler_idx"] = protocol_handlers_phf.get_index(b"default")
 
     gen_module_funcs(substs, module_funcs)
 
     gen_includes(substs, headers)
 
-    substs["component_jsms"] = (
-        "\n".join(" %s," % strings.entry_to_cxx(jsm) for jsm in sorted(jsms)) + "\n"
-    )
     substs["component_esmodules"] = (
         "\n".join(
             " %s," % strings.entry_to_cxx(esModule) for esModule in sorted(esModules)
@@ -1011,7 +999,9 @@ def gen_substs(manifests):
         key_length="aKey.Length()",
     )
 
-    substs["js_services_json"] = json.dumps(js_services_json, sort_keys=True, indent=4)
+    substs["js_services_json"] = (
+        json.dumps(js_services_json, sort_keys=True, indent=2) + "\n"
+    )
 
     # Do this only after everything else has been emitted so we're sure the
     # string table is complete.

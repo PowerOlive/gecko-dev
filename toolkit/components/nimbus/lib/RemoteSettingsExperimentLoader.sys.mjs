@@ -8,16 +8,17 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   _ExperimentFeature: "resource://nimbus/ExperimentAPI.sys.mjs",
+  ASRouterTargeting:
+    // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
+    "resource:///modules/asrouter/ASRouterTargeting.sys.mjs",
   CleanupManager: "resource://normandy/lib/CleanupManager.sys.mjs",
   ExperimentManager: "resource://nimbus/lib/ExperimentManager.sys.mjs",
   JsonSchema: "resource://gre/modules/JsonSchema.sys.mjs",
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
   TargetingContext: "resource://messaging-system/targeting/Targeting.sys.mjs",
-});
-
-XPCOMUtils.defineLazyModuleGetters(lazy, {
-  ASRouterTargeting: "resource://activity-stream/lib/ASRouterTargeting.jsm",
+  recordTargetingContext:
+    "resource://nimbus/lib/TargetingContextRecorder.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "log", () => {
@@ -36,7 +37,8 @@ XPCOMUtils.defineLazyServiceGetter(
 
 const COLLECTION_ID_PREF = "messaging-system.rsexperimentloader.collection_id";
 const COLLECTION_ID_FALLBACK = "nimbus-desktop-experiments";
-const ENABLED_PREF = "messaging-system.rsexperimentloader.enabled";
+const TARGETING_CONTEXT_TELEMETRY_ENABLED_PREF =
+  "nimbus.telemetry.targetingContextEnabled";
 
 const TIMER_NAME = "rs-experiment-loader-timer";
 const TIMER_LAST_UPDATE_PREF = `app.update.lastUpdateTime.${TIMER_NAME}`;
@@ -47,6 +49,21 @@ const NIMBUS_VALIDATION_PREF = "nimbus.validation.enabled";
 const NIMBUS_APPID_PREF = "nimbus.appId";
 
 const STUDIES_ENABLED_CHANGED = "nimbus:studies-enabled-changed";
+
+const SECURE_EXPERIMENTS_COLLECTION_ID = "nimbus-secure-experiments";
+
+const EXPERIMENTS_COLLECTION = "experiments";
+const SECURE_EXPERIMENTS_COLLECTION = "secureExperiments";
+
+const RS_COLLECTION_OPTIONS = {
+  [EXPERIMENTS_COLLECTION]: {
+    disallowedFeatureIds: ["prefFlips"],
+  },
+
+  [SECURE_EXPERIMENTS_COLLECTION]: {
+    allowedFeatureIds: ["prefFlips"],
+  },
+};
 
 XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
@@ -66,40 +83,66 @@ XPCOMUtils.defineLazyPreferenceGetter(
   NIMBUS_APPID_PREF,
   "firefox-desktop"
 );
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "TARGETING_CONTEXT_TELEMETRY_ENABLED",
+  TARGETING_CONTEXT_TELEMETRY_ENABLED_PREF
+);
 
 const SCHEMAS = {
   get NimbusExperiment() {
     return fetch("resource://nimbus/schemas/NimbusExperiment.schema.json", {
       credentials: "omit",
-    })
-      .then(rsp => rsp.json())
-      .then(json => json.definitions.NimbusExperiment);
+    }).then(rsp => rsp.json());
   },
 };
 
+export const RecipeStatus = Object.freeze({
+  TARGETING_MATCH: "TARGETING_MATCH",
+  TARGETING_MISMATCH: "TARGETING_MISMATCH",
+  INVALID: "INVALID",
+
+  isValid(status) {
+    return (
+      status === RecipeStatus.TARGETING_MATCH ||
+      status === RecipeStatus.TARGETING_MISMATCH
+    );
+  },
+});
+
 export class _RemoteSettingsExperimentLoader {
+  static LOCK_ID = "remote-settings-experiment-loader:update";
+
   constructor() {
     // Has the timer been set?
-    this._initialized = false;
+    this._enabled = false;
     // Are we in the middle of updating recipes already?
     this._updating = false;
+    // Have we updated recipes at least once?
+    this._hasUpdatedOnce = false;
+    // deferred promise object that resolves after recipes are updated
+    this._updatingDeferred = Promise.withResolvers();
 
     // Make it possible to override for testing
     this.manager = lazy.ExperimentManager;
 
-    ChromeUtils.defineLazyGetter(this, "remoteSettingsClient", () => {
-      return lazy.RemoteSettings(lazy.COLLECTION_ID);
-    });
+    this.remoteSettingsClients = {};
+    ChromeUtils.defineLazyGetter(
+      this.remoteSettingsClients,
+      EXPERIMENTS_COLLECTION,
+      () => {
+        return lazy.RemoteSettings(lazy.COLLECTION_ID);
+      }
+    );
+    ChromeUtils.defineLazyGetter(
+      this.remoteSettingsClients,
+      SECURE_EXPERIMENTS_COLLECTION,
+      () => {
+        return lazy.RemoteSettings(SECURE_EXPERIMENTS_COLLECTION_ID);
+      }
+    );
 
     Services.obs.addObserver(this, STUDIES_ENABLED_CHANGED);
-
-    XPCOMUtils.defineLazyPreferenceGetter(
-      this,
-      "enabled",
-      ENABLED_PREF,
-      false,
-      this.onEnabledPrefChange.bind(this)
-    );
 
     XPCOMUtils.defineLazyPreferenceGetter(
       this,
@@ -130,70 +173,100 @@ export class _RemoteSettingsExperimentLoader {
    * @return {Promise}                  which resolves after initialization and recipes
    *                                    are updated.
    */
-  async init(options = {}) {
+  async enable(options = {}) {
     const { forceSync = false } = options;
 
-    if (this._initialized || !this.enabled || !this.studiesEnabled) {
+    if (this._enabled) {
+      return;
+    }
+
+    if (!this.studiesEnabled) {
+      lazy.log.debug(
+        "Not enabling RemoteSettingsExperimentLoader: studies disabled"
+      );
       return;
     }
 
     this.setTimer();
-    lazy.CleanupManager.addCleanupHandler(() => this.uninit());
-    this._initialized = true;
+    lazy.CleanupManager.addCleanupHandler(() => this.disable());
+    this._enabled = true;
 
-    await this.updateRecipes(undefined, { forceSync });
+    await this.updateRecipes("enabled", { forceSync });
   }
 
-  uninit() {
-    if (!this._initialized) {
+  disable() {
+    if (!this._enabled) {
       return;
     }
     lazy.timerManager.unregisterTimer(TIMER_NAME);
-    this._initialized = false;
+    this._enabled = false;
+    this._updating = false;
+    this._hasUpdatedOnce = false;
+  }
+
+  /**
+   * Run a function while holding the update lock.
+   *
+   * This will prevent recipe updates from starting until after the callback finishes.
+   *
+   * @param {Function} fn The callback to call
+   * @param {object} options Options to pass to the WebLocks request API.
+   *
+   * @returns {any} The return value of fn.
+   */
+  async withUpdateLock(fn, options) {
+    return await locks.request(this.LOCK_ID, options, fn);
+  }
+
+  /**
+   * Get all recipes from remote settings and update enrollments.
+   *
+   * If the RemoteSettingsExperimentLoader is already updating or disabled, this
+   * function will not trigger an update.
+   *
+   * The actual update implementation is behind a WebLock. You can request the
+   * lock `RemoteSettingsExperimentLoader.LOCK_ID` in order to pause updates.
+   *
+   * @param {string} trigger
+   *                 The name of the event that triggered the update.
+   * @param {object} options
+   *                 Additional options. See `#updateImpl` docs for available
+   *                 options.
+   */
+  async updateRecipes(trigger, options) {
+    if (this._updating || !this._enabled) {
+      return;
+    }
+
+    this._updating = true;
+    await this.withUpdateLock(() => this.#updateImpl(trigger, options));
     this._updating = false;
   }
 
   /**
-   * Get all recipes from remote settings
-   * @param {string} trigger   What caused the update to occur?
-   * @param {Object} options            additional options.
-   * @param {bool}   options.forceSync  force Remote Settings to sync recipe collection
-   *                                    before updating recipes; throw if sync fails.
-   * @return {Promise}                  which resolves after recipes are updated.
+   * Get all recipes from Remote Settings and update enrollments.
+   *
+   * @param {string} trigger
+   *                 The name of the event that triggered the update.
+   * @param {object} options
+   * @param {boolean} options.forceSync
+   *                  Force a Remote Settings client to sync records before
+   *                  updating. Otherwise locally cached records will be used.
    */
-  async updateRecipes(trigger, options = {}) {
-    if (this._updating || !this._initialized) {
-      return;
-    }
+  async #updateImpl(trigger, { forceSync = false } = {}) {
+    this.manager.optInRecipes = [];
 
-    const { forceSync = false } = options;
+    // The targeting context metrics do not work in artifact builds.
+    // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936317
+    // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936319
+    if (lazy.TARGETING_CONTEXT_TELEMETRY_ENABLED) {
+      lazy.recordTargetingContext();
+    }
 
     // Since this method is async, the enabled pref could change between await
     // points. We don't want to half validate experiments, so we cache this to
     // keep it consistent throughout updating.
     const validationEnabled = this.validationEnabled;
-
-    this._updating = true;
-
-    lazy.log.debug(
-      "Updating recipes" + (trigger ? ` with trigger ${trigger}` : "")
-    );
-
-    let recipes;
-    let loadingError = false;
-
-    try {
-      recipes = await this.remoteSettingsClient.get({
-        forceSync,
-        // Throw instead of returning an empty list.
-        emptyListFallback: false,
-      });
-      lazy.log.debug(`Got ${recipes.length} recipes from Remote Settings`);
-    } catch (e) {
-      lazy.log.debug("Error getting recipes from remote settings.");
-      loadingError = true;
-      console.error(e);
-    }
 
     let recipeValidator;
 
@@ -203,6 +276,39 @@ export class _RemoteSettingsExperimentLoader {
       );
     }
 
+    lazy.log.debug(`Updating recipes with trigger "${trigger ?? ""}"`);
+
+    const recipes = [];
+    let loadingError = false;
+
+    const experiments = await this.getRecipesFromCollection({
+      forceSync,
+      client: this.remoteSettingsClients[EXPERIMENTS_COLLECTION],
+      ...RS_COLLECTION_OPTIONS[EXPERIMENTS_COLLECTION],
+    });
+
+    if (experiments !== null) {
+      recipes.push(...experiments);
+    } else {
+      loadingError = true;
+    }
+
+    const secureExperiments = await this.getRecipesFromCollection({
+      forceSync,
+      client: this.remoteSettingsClients[SECURE_EXPERIMENTS_COLLECTION],
+      ...RS_COLLECTION_OPTIONS[SECURE_EXPERIMENTS_COLLECTION],
+    });
+
+    if (secureExperiments !== null) {
+      recipes.push(...secureExperiments);
+    } else {
+      loadingError = true;
+    }
+
+    recipes.sort(
+      (a, b) => new Date(a.publishedDate ?? 0) - new Date(b.publishedDate ?? 0)
+    );
+
     const enrollmentsCtx = new EnrollmentsContext(
       this.manager,
       recipeValidator,
@@ -211,8 +317,13 @@ export class _RemoteSettingsExperimentLoader {
 
     if (recipes && !loadingError) {
       for (const recipe of recipes) {
-        if (await enrollmentsCtx.checkRecipe(recipe)) {
-          await this.manager.onRecipe(recipe, "rs-loader");
+        const status = await enrollmentsCtx.checkRecipe(recipe);
+        if (RecipeStatus.isValid(status)) {
+          await this.manager.onRecipe(
+            recipe,
+            "rs-loader",
+            status === RecipeStatus.TARGETING_MATCH
+          );
         }
       }
 
@@ -229,7 +340,75 @@ export class _RemoteSettingsExperimentLoader {
 
     Services.obs.notifyObservers(null, "nimbus:enrollments-updated");
 
-    this._updating = false;
+    this._hasUpdatedOnce = true;
+    this._updatingDeferred.resolve();
+
+    this.recordIsReady();
+  }
+
+  /**
+   * Return the recipes from a given collection.
+   *
+   * @param {object} options
+   * @param {RemoteSettings} options.client
+   *        The RemoteSettings client that will be used to fetch recipes.
+   * @param {boolean} options.forceSync
+   *        Force the RemoteSettings client to sync the collection before retrieving recipes.
+   * @param {string[] | null} options.allowedFeatureIds
+   *        If non-null, any recipe that uses a feature ID not in this list will
+   *        be rejected.
+   * @param {string[]} options.disallowedFeatureIds
+   *        If a recipe uses any features in this list, it will be rejected.
+   *
+   * @returns {object[] | null}
+   *          Recipes from the collection, filtered to match the allowed and
+   *          disallowed feature IDs, or null if there was an error syncing the
+   *          collection.
+   */
+  async getRecipesFromCollection({
+    client,
+    forceSync = false,
+    allowedFeatureIds = null,
+    disallowedFeatureIds = [],
+  } = {}) {
+    let recipes;
+    try {
+      recipes = await client.get({
+        forceSync,
+        emptyListFallback: false, // Throw instead of returning an empty list.
+      });
+      lazy.log.debug(
+        `Got ${recipes.length} recipes from ${client.collectionName}`
+      );
+    } catch (e) {
+      lazy.log.debug(
+        `Error getting recipes from Remote Settings collection ${client.collectionName}: ${e}`
+      );
+
+      return null;
+    }
+
+    return recipes.filter(recipe => {
+      for (const featureId of recipe.featureIds) {
+        if (allowedFeatureIds !== null) {
+          if (!allowedFeatureIds.includes(featureId)) {
+            lazy.log.warn(
+              `Recipe ${recipe.slug} not returned from collection ${client.collectionName} because it contains feature ${featureId}, which is disallowed for that collection.`
+            );
+            return false;
+          }
+        }
+
+        if (disallowedFeatureIds.includes(featureId)) {
+          lazy.log.warn(
+            `Recipe ${recipe.slug} not returned from collection ${client.collectionName} because it contains feature ${featureId}, which is disallowed for that collection.`
+          );
+          return false;
+        }
+      }
+
+      return true;
+    });
   }
 
   async optInToExperiment({
@@ -290,7 +469,10 @@ export class _RemoteSettingsExperimentLoader {
       }
     );
 
-    if (!(await enrollmentsCtx.checkRecipe(recipe))) {
+    // If a recipe is either targeting mismatch or invalid, ouput or throw the
+    // specific error message.
+    const result = await enrollmentsCtx.checkRecipe(recipe);
+    if (result !== RecipeStatus.TARGETING_MATCH) {
       const results = enrollmentsCtx.getResults();
 
       if (results.recipeMismatches.length) {
@@ -330,22 +512,23 @@ export class _RemoteSettingsExperimentLoader {
   }
 
   /**
-   * Handles feature status based on feature pref and STUDIES_OPT_OUT_PREF.
-   * Changing any of them to false will turn off any recipe fetching and
+   * Handles feature status based on STUDIES_OPT_OUT_PREF.
+   *
+   * Changing this pref to false will turn off any recipe fetching and
    * processing.
    */
   onEnabledPrefChange() {
-    if (this._initialized && !(this.enabled && this.studiesEnabled)) {
-      this.uninit();
-    } else if (!this._initialized && this.enabled && this.studiesEnabled) {
+    if (this._enabled && !this.studiesEnabled) {
+      this.disable();
+    } else if (!this._enabled && this.studiesEnabled) {
       // If the feature pref is turned on then turn on recipe processing.
       // If the opt in pref is turned on then turn on recipe processing only if
       // the feature pref is also enabled.
-      this.init();
+      this.enable();
     }
   }
 
-  observe(aSubect, aTopic, aData) {
+  observe(aSubect, aTopic) {
     if (aTopic === STUDIES_ENABLED_CHANGED) {
       this.onEnabledPrefChange();
     }
@@ -355,8 +538,13 @@ export class _RemoteSettingsExperimentLoader {
    * Sets a timer to update recipes every this.intervalInSeconds
    */
   setTimer() {
+    if (!this._enabled) {
+      // Don't enable the timer if we're disabled and the interval pref changes.
+      return;
+    }
     if (this.intervalInSeconds === 0) {
       // Used in tests where we want to turn this mechanism off
+      lazy.timerManager.unregisterTimer(TIMER_NAME);
       return;
     }
     // The callbacks will be called soon after the timer is registered
@@ -366,6 +554,28 @@ export class _RemoteSettingsExperimentLoader {
       this.intervalInSeconds
     );
     lazy.log.debug("Registered update timer");
+  }
+
+  recordIsReady() {
+    const eventCount =
+      lazy.NimbusFeatures.nimbusIsReady.getVariable("eventCount") ?? 1;
+    for (let i = 0; i < eventCount; i++) {
+      Glean.nimbusEvents.isReady.record();
+    }
+  }
+
+  /**
+   * Resolves when the RemoteSettingsExperimentLoader has updated at least once
+   * and is not in the middle of an update.
+   *
+   * If studies are disabled, then this will always resolve immediately.
+   */
+  finishedUpdating() {
+    if (!this.studiesEnabled) {
+      return Promise.resolve();
+    }
+
+    return this._updatingDeferred.promise;
   }
 }
 
@@ -416,7 +626,7 @@ export class EnrollmentsContext {
       // This is *not* the same as `lazy.APP_ID` which is used to
       // distinguish between desktop Firefox and the desktop background
       // updater.
-      return false;
+      return RecipeStatus.INVALID;
     }
 
     const validateFeatureSchemas =
@@ -426,7 +636,7 @@ export class EnrollmentsContext {
       let validation = this.recipeValidator.validate(recipe);
       if (!validation.valid) {
         console.error(
-          `Could not validate experiment recipe ${recipe.id}: ${JSON.stringify(
+          `Could not validate experiment recipe ${recipe.slug}: ${JSON.stringify(
             validation.errors,
             null,
             2
@@ -435,7 +645,7 @@ export class EnrollmentsContext {
         if (recipe.slug) {
           this.invalidRecipes.push(recipe.slug);
         }
-        return false;
+        return RecipeStatus.INVALID;
       }
     }
 
@@ -458,7 +668,7 @@ export class EnrollmentsContext {
 
       if (!feature.applications.includes(lazy.APP_ID)) {
         lazy.log.debug(
-          `${recipe.id} uses feature ${featureId} which is not enabled for this application (${lazy.APP_ID}) -- skipping`
+          `${recipe.slug} uses feature ${featureId} which is not enabled for this application (${lazy.APP_ID}) -- skipping`
         );
         haveAllFeatures = false;
         break;
@@ -466,7 +676,7 @@ export class EnrollmentsContext {
     }
 
     if (!haveAllFeatures) {
-      return false;
+      return RecipeStatus.INVALID;
     }
 
     if (this.shouldCheckTargeting) {
@@ -474,11 +684,11 @@ export class EnrollmentsContext {
 
       if (match) {
         const type = recipe.isRollout ? "rollout" : "experiment";
-        lazy.log.debug(`[${type}] ${recipe.id} matched targeting`);
+        lazy.log.debug(`[${type}] ${recipe.slug} matched targeting`);
       } else {
-        lazy.log.debug(`${recipe.id} did not match due to targeting`);
+        lazy.log.debug(`${recipe.slug} did not match due to targeting`);
         this.recipeMismatches.push(recipe.slug);
-        return false;
+        return RecipeStatus.TARGETING_MISMATCH;
       }
     }
 
@@ -494,9 +704,9 @@ export class EnrollmentsContext {
       ) {
         this.missingLocale.push(recipe.slug);
         lazy.log.debug(
-          `${recipe.id} is localized but missing locale ${this.locale}`
+          `${recipe.slug} is localized but missing locale ${this.locale}`
         );
-        return false;
+        return RecipeStatus.INVALID;
       }
     }
 
@@ -511,11 +721,11 @@ export class EnrollmentsContext {
       if (result.missingL10nIds.length) {
         this.missingL10nIds.set(recipe.slug, result.missingL10nIds);
       }
-      lazy.log.debug(`${recipe.id} did not validate`);
-      return false;
+      lazy.log.debug(`${recipe.slug} did not validate`);
+      return RecipeStatus.INVALID;
     }
 
-    return true;
+    return RecipeStatus.TARGETING_MATCH;
   }
 
   async evaluateJexl(jexlString, customContext) {
@@ -560,7 +770,9 @@ export class EnrollmentsContext {
    */
   async checkTargeting(recipe) {
     if (!recipe.targeting) {
-      lazy.log.debug("No targeting for recipe, so it matches automatically");
+      lazy.log.debug(
+        `No targeting for recipe ${recipe.slug}, so it matches automatically`
+      );
       return true;
     }
 

@@ -33,14 +33,14 @@ function getPendingCrashReportDir() {
  * Synchronously deletes all entries inside the pending
  * crash report directory.
  */
-function clearPendingCrashReports() {
+async function clearPendingCrashReports() {
   let dir = getPendingCrashReportDir();
   let entries = dir.directoryEntries;
 
   while (entries.hasMoreElements()) {
     let entry = entries.nextFile;
     if (entry.isFile()) {
-      entry.remove(false);
+      await entry.remove(false);
     }
   }
 }
@@ -98,7 +98,7 @@ function createPendingCrashReports(howMany, accessDate) {
   };
 
   let uuidGenerator = Services.uuid;
-  // Some annotations are always present in the .extra file and CrashSubmit.jsm
+  // Some annotations are always present in the .extra file and CrashSubmit.sys.mjs
   // expects there to be a ServerURL entry, so we'll add them here.
   let extraFileContents = JSON.stringify({
     ServerURL: SERVER_URL,
@@ -237,7 +237,7 @@ add_setup(async function () {
     await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
   Assert.ok(!notification, "There should not be a notification");
 
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
   await SpecialPowers.popPrefEnv();
 
   await SpecialPowers.pushPrefEnv({
@@ -245,8 +245,8 @@ add_setup(async function () {
   });
   UnsubmittedCrashHandler.init();
 
-  registerCleanupFunction(function () {
-    clearPendingCrashReports();
+  registerCleanupFunction(async function () {
+    await clearPendingCrashReports();
     Services.env.set("MOZ_CRASHREPORTER_URL", oldServerURL);
   });
 });
@@ -257,7 +257,7 @@ add_setup(async function () {
  */
 add_task(async function test_no_pending_no_notification() {
   // Make absolutely sure there are no pending crash reports first...
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
   let notification =
     await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
   Assert.equal(
@@ -278,7 +278,7 @@ add_task(async function test_one_pending() {
     await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
   Assert.ok(notification, "There should be a notification");
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -306,7 +306,7 @@ add_task(async function test_other_ignored() {
   Assert.ok(notification, "There should be a notification");
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -320,7 +320,7 @@ add_task(async function test_several_pending() {
   Assert.ok(notification, "There should be a notification");
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -347,7 +347,7 @@ add_task(async function test_several_pending() {
   Assert.ok(notification, "There should be a notification");
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -384,6 +384,8 @@ add_task(async function test_can_submit() {
   );
   // ...which should be the first button.
   let submit = buttons[0];
+  let submissionBefore = Glean.crashSubmission.success.testGetValue();
+
   let promiseReports = waitForSubmittedReports(reportIDs, extraCheck);
   info("Sending crash report");
   submit.click();
@@ -395,7 +397,12 @@ add_task(async function test_can_submit() {
   info("Waiting on reports to be received.");
   await promiseReports;
   info("Received!");
-  clearPendingCrashReports();
+
+  Assert.equal(
+    submissionBefore + 1,
+    Glean.crashSubmission.success.testGetValue()
+  );
+  await clearPendingCrashReports();
 });
 
 /**
@@ -415,6 +422,8 @@ add_task(async function test_can_submit_several() {
   // ...which should be the first button.
   let submit = buttons[0];
 
+  let submissionBefore = Glean.crashSubmission.success.testGetValue();
+
   let promiseReports = waitForSubmittedReports(reportIDs);
   info("Sending crash reports");
   submit.click();
@@ -426,7 +435,12 @@ add_task(async function test_can_submit_several() {
   info("Waiting on reports to be received.");
   await promiseReports;
   info("Received!");
-  clearPendingCrashReports();
+
+  Assert.equal(
+    submissionBefore + 3,
+    Glean.crashSubmission.success.testGetValue()
+  );
+  await clearPendingCrashReports();
 });
 
 /**
@@ -453,6 +467,7 @@ add_task(async function test_can_submit_always() {
   );
   // ...which should be the second button.
   let sendAll = buttons[1];
+  let submissionBefore = Glean.crashSubmission.success.testGetValue();
 
   let promiseReports = waitForSubmittedReports(reportIDs);
   info("Sending crash reports");
@@ -465,6 +480,10 @@ add_task(async function test_can_submit_always() {
   info("Waiting on reports to be received.");
   await promiseReports;
   info("Received!");
+  Assert.equal(
+    submissionBefore + 1,
+    Glean.crashSubmission.success.testGetValue()
+  );
 
   // Make sure the pref was set
   Assert.equal(
@@ -484,10 +503,15 @@ add_task(async function test_can_submit_always() {
     Assert.equal(extra.get("Throttleable"), "1");
   });
 
+  Assert.equal(
+    submissionBefore + 2,
+    Glean.crashSubmission.success.testGetValue()
+  );
+
   // And revert back to default now.
   Services.prefs.clearUserPref(pref);
 
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -501,6 +525,7 @@ add_task(async function test_can_auto_submit() {
   });
 
   let reportIDs = await createPendingCrashReports(3);
+  let submissionBefore = Glean.crashSubmission.success.testGetValue();
   let promiseReports = waitForSubmittedReports(reportIDs);
   let notification =
     await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
@@ -508,8 +533,12 @@ add_task(async function test_can_auto_submit() {
   info("Waiting on reports to be received.");
   await promiseReports;
   info("Received!");
+  Assert.equal(
+    submissionBefore + 3,
+    Glean.crashSubmission.success.testGetValue()
+  );
 
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
   await SpecialPowers.popPrefEnv();
 });
 
@@ -535,7 +564,7 @@ add_task(async function test_can_ignore() {
     await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
   Assert.equal(notification, null, "There should be no notification");
 
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -555,7 +584,7 @@ add_task(async function test_last_shown_date() {
 
   UnsubmittedCrashHandler.prefs.clearUserPref("lastShownDate");
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -583,7 +612,7 @@ add_task(async function test_shutdown_while_showing() {
   UnsubmittedCrashHandler.init();
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -616,7 +645,7 @@ add_task(async function test_shutdown_while_not_showing() {
   );
   UnsubmittedCrashHandler.init();
 
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -667,7 +696,7 @@ add_task(async function test_dont_decrement_chances_on_same_day() {
   Assert.equal(initChances, chances, "We should not have decremented chances.");
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -724,7 +753,7 @@ add_task(async function test_decrement_chances_on_other_day() {
   UnsubmittedCrashHandler.prefs.clearUserPref("chancesUntilSuppress");
 
   gNotificationBox.removeNotification(notification, true);
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**
@@ -764,7 +793,7 @@ add_task(async function test_can_suppress_after_chances() {
   UnsubmittedCrashHandler.prefs.clearUserPref("chancesUntilSuppress");
   UnsubmittedCrashHandler.prefs.clearUserPref("suppressUntilDate");
   UnsubmittedCrashHandler.prefs.clearUserPref("lastShownDate");
-  clearPendingCrashReports();
+  await clearPendingCrashReports();
 });
 
 /**

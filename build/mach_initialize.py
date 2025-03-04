@@ -6,19 +6,8 @@ import math
 import os
 import shutil
 import sys
+from importlib.abc import MetaPathFinder
 from pathlib import Path
-
-if sys.version_info[0] < 3:
-    import __builtin__ as builtins
-
-    class MetaPathFinder(object):
-        pass
-
-
-else:
-    from importlib.abc import MetaPathFinder
-
-from types import ModuleType
 
 STATE_DIR_FIRST_RUN = """
 Mach and the build system store shared state in a common directory
@@ -83,12 +72,11 @@ CATEGORIES = {
 }
 
 
-def _activate_python_environment(topsrcdir, get_state_dir):
+def _activate_python_environment(topsrcdir, get_state_dir, quiet):
     from mach.site import MachSiteManager
 
     mach_environment = MachSiteManager.from_environment(
-        topsrcdir,
-        get_state_dir,
+        topsrcdir, get_state_dir, quiet=quiet
     )
     mach_environment.activate()
 
@@ -146,14 +134,14 @@ def initialize(topsrcdir, args=()):
         shutil.rmtree(deleted_dir, ignore_errors=True)
 
     # We need the "mach" module to access the logic to parse virtualenv
-    # requirements. Since that depends on "packaging" (and, transitively,
-    # "pyparsing"), we add those to the path too.
+    # requirements. Since that depends on "packaging", we add it to the path too.
+    # We need filelock for solving a virtualenv race condition
     sys.path[0:0] = [
         os.path.join(topsrcdir, module)
         for module in (
             os.path.join("python", "mach"),
             os.path.join("third_party", "python", "packaging"),
-            os.path.join("third_party", "python", "pyparsing"),
+            os.path.join("third_party", "python", "filelock"),
         )
     ]
 
@@ -163,9 +151,20 @@ def initialize(topsrcdir, args=()):
 
     check_for_spaces(topsrcdir)
 
+    # See bug 1874208:
+    # Status messages from site.py break usages of `./mach environment`.
+    # We pass `quiet` only for it to work around this, so that all other
+    # commands can still write status messages.
+    if args and args[0] == "environment":
+        quiet = True
+    else:
+        quiet = False
+
     # normpath state_dir to normalize msys-style slashes.
     _activate_python_environment(
-        topsrcdir, lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir))
+        topsrcdir,
+        lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir)),
+        quiet=quiet,
     )
     _maybe_activate_mozillabuild_environment()
 
@@ -176,30 +175,6 @@ def initialize(topsrcdir, args=()):
         load_commands_from_spec,
     )
     from mach.main import get_argument_parser
-
-    parser = get_argument_parser(
-        action=DetermineCommandVenvAction,
-        topsrcdir=topsrcdir,
-    )
-    namespace = parser.parse_args()
-
-    command_name = getattr(namespace, "command_name", None)
-    site_name = getattr(namespace, "site_name", "common")
-    command_site_manager = None
-
-    # the 'clobber' command needs to run in the 'mach' venv, so we
-    # don't want to activate any other virtualenv for it.
-    if command_name != "clobber":
-        from mach.site import CommandSiteManager
-
-        command_site_manager = CommandSiteManager.from_environment(
-            topsrcdir,
-            lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir)),
-            site_name,
-            get_virtualenv_base_dir(topsrcdir),
-        )
-
-        command_site_manager.activate()
 
     # Set a reasonable limit to the number of open files.
     #
@@ -324,7 +299,7 @@ def initialize(topsrcdir, args=()):
     if "MACH_MAIN_PID" not in os.environ:
         setenv("MACH_MAIN_PID", str(os.getpid()))
 
-    driver = mach.main.Mach(os.getcwd(), command_site_manager)
+    driver = mach.main.Mach(os.getcwd())
     driver.populate_context_handler = populate_context
 
     if not driver.settings_paths:
@@ -332,6 +307,54 @@ def initialize(topsrcdir, args=()):
         driver.settings_paths.append(state_dir)
     # always load local repository configuration
     driver.settings_paths.append(topsrcdir)
+    driver.load_settings()
+
+    aliases = driver.settings.alias
+
+    parser = get_argument_parser(
+        action=DetermineCommandVenvAction,
+        topsrcdir=topsrcdir,
+    )
+    from argparse import Namespace
+
+    from mach.main import (
+        SUGGESTED_COMMANDS_MESSAGE,
+        UNKNOWN_COMMAND_ERROR,
+        UnknownCommandError,
+    )
+
+    namespace_in = Namespace()
+    setattr(namespace_in, "mach_command_aliases", aliases)
+
+    try:
+        namespace = parser.parse_args(args, namespace_in)
+    except UnknownCommandError as e:
+        suggestion_message = (
+            SUGGESTED_COMMANDS_MESSAGE % (e.verb, ", ".join(e.suggested_commands))
+            if e.suggested_commands
+            else ""
+        )
+        print(UNKNOWN_COMMAND_ERROR % (e.verb, e.command, suggestion_message))
+        sys.exit(1)
+
+    command_name = getattr(namespace, "command_name", None)
+    site_name = getattr(namespace, "site_name", "common")
+    command_site_manager = None
+
+    # the 'clobber' command needs to run in the 'mach' venv, so we
+    # don't want to activate any other virtualenv for it.
+    if command_name != "clobber":
+        from mach.site import CommandSiteManager
+
+        command_site_manager = CommandSiteManager.from_environment(
+            topsrcdir,
+            lambda: os.path.normpath(get_state_dir(True, topsrcdir=topsrcdir)),
+            site_name,
+            get_virtualenv_base_dir(topsrcdir),
+            quiet=quiet,
+        )
+
+        command_site_manager.activate()
 
     for category, meta in CATEGORIES.items():
         driver.define_category(category, meta["short"], meta["long"], meta["priority"])
@@ -385,6 +408,7 @@ def initialize(topsrcdir, args=()):
             for command_name in command_names_to_load
         }
 
+    driver.command_site_manager = command_site_manager
     load_commands_from_spec(command_modules_to_load, topsrcdir, missing_ok=missing_ok)
 
     return driver
@@ -406,9 +430,13 @@ def _finalize_telemetry_glean(telemetry, is_bootstrap, success):
         get_vscode_running,
     )
 
+    moz_automation = any(e in os.environ for e in ("MOZ_AUTOMATION", "TASK_ID"))
+
     mach_metrics = telemetry.metrics(MACH_METRICS_PATH)
     mach_metrics.mach.duration.stop()
     mach_metrics.mach.success.set(success)
+    mach_metrics.mach.moz_automation.set(moz_automation)
+
     system_metrics = mach_metrics.mach.system
     cpu_brand = get_cpu_brand()
     if cpu_brand:
@@ -462,76 +490,6 @@ def _create_state_dir():
 
     os.makedirs(state_dir, mode=0o770, exist_ok=True)
     return state_dir
-
-
-# Hook import such that .pyc/.pyo files without a corresponding .py file in
-# the source directory are essentially ignored. See further below for details
-# and caveats.
-# Objdirs outside the source directory are ignored because in most cases, if
-# a .pyc/.pyo file exists there, a .py file will be next to it anyways.
-class ImportHook(object):
-    def __init__(self, original_import):
-        self._original_import = original_import
-        # Assume the source directory is the parent directory of the one
-        # containing this file.
-        self._source_dir = (
-            os.path.normcase(
-                os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-            )
-            + os.sep
-        )
-        self._modules = set()
-
-    def __call__(self, name, globals=None, locals=None, fromlist=None, level=-1):
-        if sys.version_info[0] >= 3 and level < 0:
-            level = 0
-
-        # name might be a relative import. Instead of figuring out what that
-        # resolves to, which is complex, just rely on the real import.
-        # Since we don't know the full module name, we can't check sys.modules,
-        # so we need to keep track of which modules we've already seen to avoid
-        # to stat() them again when they are imported multiple times.
-        module = self._original_import(name, globals, locals, fromlist, level)
-
-        # Some tests replace modules in sys.modules with non-module instances.
-        if not isinstance(module, ModuleType):
-            return module
-
-        resolved_name = module.__name__
-        if resolved_name in self._modules:
-            return module
-        self._modules.add(resolved_name)
-
-        # Builtin modules don't have a __file__ attribute.
-        if not getattr(module, "__file__", None):
-            return module
-
-        # Note: module.__file__ is not always absolute.
-        path = os.path.normcase(os.path.abspath(module.__file__))
-        # Note: we could avoid normcase and abspath above for non pyc/pyo
-        # files, but those are actually rare, so it doesn't really matter.
-        if not path.endswith((".pyc", ".pyo")):
-            return module
-
-        # Ignore modules outside our source directory
-        if not path.startswith(self._source_dir):
-            return module
-
-        # If there is no .py corresponding to the .pyc/.pyo module we're
-        # loading, remove the .pyc/.pyo file, and reload the module.
-        # Since we already loaded the .pyc/.pyo module, if it had side
-        # effects, they will have happened already, and loading the module
-        # with the same name, from another directory may have the same side
-        # effects (or different ones). We assume it's not a problem for the
-        # python modules under our source directory (either because it
-        # doesn't happen or because it doesn't matter).
-        if not os.path.exists(module.__file__[:-1]):
-            if os.path.exists(module.__file__):
-                os.remove(module.__file__)
-            del sys.modules[module.__name__]
-            module = self(name, globals, locals, fromlist, level)
-
-        return module
 
 
 # Hook import such that .pyc/.pyo files without a corresponding .py file in
@@ -595,8 +553,4 @@ def hook(finder):
     return finder
 
 
-# Install our hook. This can be deleted when the Python 3 migration is complete.
-if sys.version_info[0] < 3:
-    builtins.__import__ = ImportHook(builtins.__import__)
-else:
-    sys.meta_path = [hook(c) for c in sys.meta_path]
+sys.meta_path = [hook(c) for c in sys.meta_path]

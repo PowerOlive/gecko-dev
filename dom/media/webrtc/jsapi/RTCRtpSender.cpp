@@ -63,7 +63,7 @@
 #include "mozilla/dom/Nullable.h"
 #include "mozilla/dom/RTCRtpParametersBinding.h"
 #include "mozilla/dom/RTCStatsReportBinding.h"
-#include "mozilla/glean/GleanMetrics.h"
+#include "mozilla/glean/DomMediaWebrtcMetrics.h"
 #include "js/RootingAPI.h"
 #include "jsep/JsepTransceiver.h"
 #include "RTCStatsReport.h"
@@ -81,7 +81,7 @@ LazyLogModule gSenderLog("RTCRtpSender");
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(RTCRtpSender)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(RTCRtpSender)
-  // We do not do anything here, we wait for BreakCycles to be called
+  tmp->Unlink();
   NS_IMPL_CYCLE_COLLECTION_UNLINK_PRESERVED_WRAPPER
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(RTCRtpSender)
@@ -122,7 +122,9 @@ RTCRtpSender::RTCRtpSender(nsPIDOMWindowInner* aWindow, PeerConnectionImpl* aPc,
       INIT_CANONICAL(mVideoCodecMode, webrtc::VideoCodecMode::kRealtimeVideo),
       INIT_CANONICAL(mCname, std::string()),
       INIT_CANONICAL(mTransmitting, false),
-      INIT_CANONICAL(mFrameTransformerProxy, nullptr) {
+      INIT_CANONICAL(mFrameTransformerProxy, nullptr),
+      INIT_CANONICAL(mVideoDegradationPreference,
+                     webrtc::DegradationPreference::DISABLED) {
   mPipeline = MediaPipelineTransmit::Create(
       mPc->GetHandle(), aTransportHandler, aCallThread, aStsThread,
       aConduit->type() == MediaSessionConduit::VIDEO, aConduit);
@@ -157,6 +159,8 @@ RTCRtpSender::RTCRtpSender(nsPIDOMWindowInner* aWindow, PeerConnectionImpl* aPc,
     UpdateRestorableEncodings(mParameters.mEncodings);
     MaybeGetJsepRids();
   }
+
+  mParameters.mCodecs.Construct();
 
   if (mDtmf) {
     mWatchManager.Watch(mTransmitting, &RTCRtpSender::UpdateDtmfSender);
@@ -217,6 +221,17 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
     track->GetId(trackName);
   }
 
+  std::string mid = mTransceiver->GetMidAscii();
+  std::map<uint32_t, std::string> videoSsrcToRidMap;
+  const auto encodings = mVideoCodec.Ref().andThen(
+      [](const auto& aCodec) { return SomeRef(aCodec.mEncodings); });
+  if (encodings && !encodings->empty() && encodings->front().rid != "") {
+    for (size_t i = 0; i < std::min(mSsrcs.Ref().size(), encodings->size());
+         ++i) {
+      videoSsrcToRidMap.insert({mSsrcs.Ref()[i], (*encodings)[i].rid});
+    }
+  }
+
   {
     // Add bandwidth estimation stats
     promises.AppendElement(InvokeAsync(
@@ -244,7 +259,9 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
   }
 
   promises.AppendElement(InvokeAsync(
-      mPipeline->mCallThread, __func__, [pipeline = mPipeline, trackName] {
+      mPipeline->mCallThread, __func__,
+      [pipeline = mPipeline, trackName, mid = std::move(mid),
+       videoSsrcToRidMap = std::move(videoSsrcToRidMap)] {
         auto report = MakeUnique<dom::RTCStatsCollection>();
         auto asAudio = pipeline->mConduit->AsAudioSessionConduit();
         auto asVideo = pipeline->mConduit->AsVideoSessionConduit();
@@ -269,7 +286,7 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                     RTCStatsTimestamp::FromNtp(
                         pipeline->GetTimestampMaker(),
                         webrtc::Timestamp::Micros(
-                            aRtcpData.report_block_timestamp_utc_us()) +
+                            aRtcpData.report_block_timestamp_utc().us()) +
                             webrtc::TimeDelta::Seconds(webrtc::kNtpJan1970))
                         .ToDom());
                 aRemote.mId.Construct(remoteId);
@@ -280,14 +297,13 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                     kind);  // mediaType is the old name for kind.
                 aRemote.mLocalId.Construct(localId);
                 if (base_seq) {
-                  if (aRtcpData.report_block()
-                          .extended_highest_sequence_number < *base_seq) {
+                  if (aRtcpData.extended_highest_sequence_number() <
+                      *base_seq) {
                     aRemote.mPacketsReceived.Construct(0);
                   } else {
                     aRemote.mPacketsReceived.Construct(
-                        aRtcpData.report_block()
-                            .extended_highest_sequence_number -
-                        aRtcpData.report_block().packets_lost - *base_seq + 1);
+                        aRtcpData.extended_highest_sequence_number() -
+                        aRtcpData.cumulative_lost() - *base_seq + 1);
                   }
                 }
               };
@@ -304,6 +320,9 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                     kind);  // mediaType is the old name for kind.
                 if (remoteId.Length()) {
                   aLocal.mRemoteId.Construct(remoteId);
+                }
+                if (!mid.empty()) {
+                  aLocal.mMid.Construct(NS_ConvertUTF8toUTF16(mid).get());
                 }
               };
 
@@ -340,8 +359,8 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
               if (const auto remoteSsrc = aConduit->GetRemoteSSRC();
                   remoteSsrc) {
                 for (auto& data : audioStats->report_block_datas) {
-                  if (data.report_block().source_ssrc == ssrc &&
-                      data.report_block().sender_ssrc == *remoteSsrc) {
+                  if (data.source_ssrc() == ssrc &&
+                      data.sender_ssrc() == *remoteSsrc) {
                     reportBlockData.emplace(data);
                     break;
                   }
@@ -363,7 +382,7 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
               }
               remote.mFractionLost.Construct(audioStats->fraction_lost);
               remote.mTotalRoundTripTime.Construct(
-                  double(aReportBlockData.sum_rtt_ms()) / 1000);
+                  double(aReportBlockData.sum_rtts().ms()) / 1000);
               remote.mRoundTripTimeMeasurements.Construct(
                   aReportBlockData.num_rtts());
               if (!report->mRemoteInboundRtpStreamStats.AppendElement(
@@ -435,7 +454,8 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                   }
                 });
 
-            if (streamStats->rtp_stats.first_packet_time_ms == -1) {
+            if (streamStats->rtp_stats.first_packet_time ==
+                webrtc::Timestamp::PlusInfinity()) {
               return;
             }
 
@@ -447,20 +467,19 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
                   *streamStats->report_block_data;
               RTCRemoteInboundRtpStreamStats remote;
               remote.mJitter.Construct(
-                  static_cast<double>(rtcpReportData.report_block().jitter) /
+                  static_cast<double>(rtcpReportData.jitter()) /
                   webrtc::kVideoPayloadTypeFrequency);
-              remote.mPacketsLost.Construct(
-                  rtcpReportData.report_block().packets_lost);
+              remote.mPacketsLost.Construct(rtcpReportData.cumulative_lost());
               if (rtcpReportData.has_rtt()) {
                 remote.mRoundTripTime.Construct(
-                    static_cast<double>(rtcpReportData.last_rtt_ms()) / 1000.0);
+                    static_cast<double>(rtcpReportData.last_rtt().ms()) /
+                    1000.0);
               }
               constructCommonRemoteInboundRtpStats(remote, rtcpReportData);
               remote.mTotalRoundTripTime.Construct(
-                  streamStats->report_block_data->sum_rtt_ms() / 1000.0);
+                  streamStats->report_block_data->sum_rtts().ms() / 1000.0);
               remote.mFractionLost.Construct(
-                  static_cast<float>(
-                      rtcpReportData.report_block().fraction_lost) /
+                  static_cast<float>(rtcpReportData.fraction_lost_raw()) /
                   (1 << 8));
               remote.mRoundTripTimeMeasurements.Construct(
                   streamStats->report_block_data->num_rtts());
@@ -474,6 +493,10 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
             // present)
             RTCOutboundRtpStreamStats local;
             constructCommonOutboundRtpStats(local);
+            if (auto it = videoSsrcToRidMap.find(ssrc);
+                it != videoSsrcToRidMap.end() && it->second != "") {
+              local.mRid.Construct(NS_ConvertUTF8toUTF16(it->second).get());
+            }
             local.mPacketsSent.Construct(
                 streamStats->rtp_stats.transmitted.packets);
             local.mBytesSent.Construct(
@@ -524,11 +547,10 @@ nsTArray<RefPtr<dom::RTCStatsPromise>> RTCRtpSender::GetStatsInternal(
             videoSourceStats.mFramesPerSecond.Construct(
                 videoStats->input_frame_rate);
             auto resolution = aConduit->GetLastResolution();
-            resolution.apply(
-                [&](const VideoSessionConduit::Resolution& aResolution) {
-                  videoSourceStats.mWidth.Construct(aResolution.width);
-                  videoSourceStats.mHeight.Construct(aResolution.height);
-                });
+            resolution.apply([&](const auto& aResolution) {
+              videoSourceStats.mWidth.Construct(aResolution.width);
+              videoSourceStats.mHeight.Construct(aResolution.height);
+            });
             if (!report->mVideoSourceStats.AppendElement(
                     std::move(videoSourceStats), fallible)) {
               mozalloc_handle_oom(0);
@@ -598,18 +620,21 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
   // If sender.[[LastReturnedParameters]] is null, return a promise rejected
   // with a newly created InvalidStateError.
   if (!mLastReturnedParameters.isSome()) {
-    nsCString error(
-        "Cannot call setParameters without first calling getParameters");
+    nsCString error;
+    if (mLastTransactionId.isSome() && paramsCopy.mTransactionId.WasPassed() &&
+        *mLastTransactionId == paramsCopy.mTransactionId.Value()) {
+      error =
+          "Event loop was relinquished between getParameters and setParameters "
+          "calls";
+    } else {
+      error = "Cannot call setParameters without first calling getParameters";
+    }
+
     if (mAllowOldSetParameters) {
       if (!mHaveWarnedBecauseNoGetParameters) {
         mHaveWarnedBecauseNoGetParameters = true;
         mozilla::glean::rtcrtpsender_setparameters::warn_no_getparameters
             .AddToNumerator(1);
-#ifdef EARLY_BETA_OR_EARLIER
-        mozilla::glean::rtcrtpsender_setparameters::blame_no_getparameters
-            .Get(GetEffectiveTLDPlus1())
-            .Add(1);
-#endif
       }
       WarnAboutBadSetParameters(error);
     } else {
@@ -675,11 +700,6 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
       mHaveWarnedBecauseEncodingCountChange = true;
       mozilla::glean::rtcrtpsender_setparameters::warn_length_changed
           .AddToNumerator(1);
-#ifdef EARLY_BETA_OR_EARLIER
-      mozilla::glean::rtcrtpsender_setparameters::blame_length_changed
-          .Get(GetEffectiveTLDPlus1())
-          .Add(1);
-#endif
     }
     WarnAboutBadSetParameters(error);
   } else {
@@ -717,41 +737,25 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
       mHaveWarnedBecauseNoTransactionId = true;
       mozilla::glean::rtcrtpsender_setparameters::warn_no_transactionid
           .AddToNumerator(1);
-#ifdef EARLY_BETA_OR_EARLIER
-      mozilla::glean::rtcrtpsender_setparameters::blame_no_transactionid
-          .Get(GetEffectiveTLDPlus1())
-          .Add(1);
-#endif
     }
     WarnAboutBadSetParameters(error);
-  } else if (oldParams->mTransactionId != paramsCopy.mTransactionId) {
+  } else if (oldParams->mTransactionId.WasPassed() &&
+             oldParams->mTransactionId != paramsCopy.mTransactionId) {
     // Any parameter in parameters is marked as a Read-only parameter (such as
     // RID) and has a value that is different from the corresponding parameter
     // value in sender.[[LastReturnedParameters]]. Note that this also applies
     // to transactionId.
+    // Don't throw this error if letting the "stale getParameters" case slide.
     nsCString error(
         "Cannot change transaction id: call getParameters, modify the result, "
         "and then call setParameters");
-    if (!mAllowOldSetParameters) {
-      if (!mHaveFailedBecauseStaleTransactionId) {
-        mHaveFailedBecauseStaleTransactionId = true;
-        mozilla::glean::rtcrtpsender_setparameters::fail_stale_transactionid
-            .AddToNumerator(1);
-      }
-      p->MaybeRejectWithInvalidModificationError(error);
-      return p.forget();
-    }
-    if (!mHaveWarnedBecauseStaleTransactionId) {
-      mHaveWarnedBecauseStaleTransactionId = true;
-      mozilla::glean::rtcrtpsender_setparameters::warn_stale_transactionid
+    if (!mHaveFailedBecauseStaleTransactionId) {
+      mHaveFailedBecauseStaleTransactionId = true;
+      mozilla::glean::rtcrtpsender_setparameters::fail_stale_transactionid
           .AddToNumerator(1);
-#ifdef EARLY_BETA_OR_EARLIER
-      mozilla::glean::rtcrtpsender_setparameters::blame_stale_transactionid
-          .Get(GetEffectiveTLDPlus1())
-          .Add(1);
-#endif
     }
-    WarnAboutBadSetParameters(error);
+    p->MaybeRejectWithInvalidModificationError(error);
+    return p.forget();
   }
 
   // This could conceivably happen if we are allowing the old setParameters
@@ -774,10 +778,18 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
     paramsCopy.mEncodings = oldParams->mEncodings;
   }
 
+  if (!(oldParams->mCodecs == paramsCopy.mCodecs)) {
+    nsCString error("RTCRtpParameters.codecs is a read-only parameter");
+    if (!mAllowOldSetParameters) {
+      p->MaybeRejectWithInvalidModificationError(error);
+      return p.forget();
+    }
+    WarnAboutBadSetParameters(error);
+  }
+
   // TODO: Verify remaining read-only parameters
   // headerExtensions (bug 1765851)
   // rtcp (bug 1765852)
-  // codecs (bug 1534687)
 
   // CheckAndRectifyEncodings handles the following steps:
   // If transceiver kind is "audio", remove the scaleResolutionDownBy member
@@ -828,6 +840,28 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
   uint32_t serialNumber = ++mNumSetParametersCalls;
   MaybeUpdateConduit();
 
+  // If we have a degradation value passed convert it from a
+  // dom::RTCDegradationPreference to a webrtc::DegradationPreference and set
+  // mVideoDegradationPreference which will trigger the onconfigure change in
+  // the videoConduit.
+  if (paramsCopy.mDegradationPreference.WasPassed()) {
+    const auto degradationPreference = [&] {
+      switch (paramsCopy.mDegradationPreference.Value()) {
+        case mozilla::dom::RTCDegradationPreference::Balanced:
+          return webrtc::DegradationPreference::BALANCED;
+        case mozilla::dom::RTCDegradationPreference::Maintain_framerate:
+          return webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+        case mozilla::dom::RTCDegradationPreference::Maintain_resolution:
+          return webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+      }
+      MOZ_CRASH("Unexpected RTCDegradationPreference");
+    };
+    mVideoDegradationPreference = degradationPreference();
+  } else {
+    // Default to disabled when unset to allow for correct degradation
+    mVideoDegradationPreference = webrtc::DegradationPreference::DISABLED;
+  }
+
   // If the media stack is successfully configured with parameters,
   // queue a task to run the following steps:
   GetMainThreadSerialEventTarget()->Dispatch(NS_NewRunnableFunction(
@@ -836,8 +870,15 @@ already_AddRefed<Promise> RTCRtpSender::SetParameters(
         // Set sender.[[LastReturnedParameters]] to null.
         mLastReturnedParameters = Nothing();
         // Set sender.[[SendEncodings]] to parameters.encodings.
-        mParameters = paramsCopy;
+        mParameters.mEncodings = paramsCopy.mEncodings;
         UpdateRestorableEncodings(mParameters.mEncodings);
+        // If we had a valid degradation preference passed in store it in
+        // mParameters so we can return it if needed via GetParameters calls.
+        mParameters.mDegradationPreference.Reset();
+        if (paramsCopy.mDegradationPreference.WasPassed()) {
+          mParameters.mDegradationPreference.Construct(
+              paramsCopy.mDegradationPreference.Value());
+        }
         // Only clear mPendingParameters if it matches; there could have been
         // back-to-back calls to setParameters, and we only want to clear this
         // if no subsequent setParameters is pending.
@@ -967,9 +1008,6 @@ void RTCRtpSender::GetParameters(RTCRtpSendParameters& aParameters) {
   // TODO(bug 1765851): We do not support this yet
   // aParameters.mHeaderExtensions.Construct();
 
-  // codecs is set to the value of the [[SendCodecs]] internal slot
-  // TODO(bug 1534687): We do not support this yet
-
   // rtcp.cname is set to the CNAME of the associated RTCPeerConnection.
   // rtcp.reducedSize is set to true if reduced-size RTCP has been negotiated
   // for sending, and false otherwise.
@@ -977,11 +1015,20 @@ void RTCRtpSender::GetParameters(RTCRtpSendParameters& aParameters) {
   aParameters.mRtcp.Construct();
   aParameters.mRtcp.Value().mCname.Construct();
   aParameters.mRtcp.Value().mReducedSize.Construct(false);
+  if (mParameters.mDegradationPreference.WasPassed()) {
+    aParameters.mDegradationPreference.Construct(
+        mParameters.mDegradationPreference.Value());
+  }
   aParameters.mHeaderExtensions.Construct();
-  aParameters.mCodecs.Construct();
+  if (mParameters.mCodecs.WasPassed()) {
+    aParameters.mCodecs.Construct(mParameters.mCodecs.Value());
+  }
 
   // Set sender.[[LastReturnedParameters]] to result.
   mLastReturnedParameters = Some(aParameters);
+
+  // Used to help with warning strings
+  mLastTransactionId = Some(aParameters.mTransactionId.Value());
 
   // Queue a task that sets sender.[[LastReturnedParameters]] to null.
   GetMainThreadSerialEventTarget()->Dispatch(NS_NewRunnableFunction(
@@ -993,12 +1040,10 @@ void RTCRtpSender::GetParameters(RTCRtpSendParameters& aParameters) {
 bool operator==(const RTCRtpEncodingParameters& a1,
                 const RTCRtpEncodingParameters& a2) {
   // webidl does not generate types that are equality comparable
-  return a1.mActive == a2.mActive && a1.mFec == a2.mFec &&
-         a1.mMaxBitrate == a2.mMaxBitrate &&
+  return a1.mActive == a2.mActive && a1.mMaxBitrate == a2.mMaxBitrate &&
          a1.mMaxFramerate == a2.mMaxFramerate && a1.mPriority == a2.mPriority &&
-         a1.mRid == a2.mRid && a1.mRtx == a2.mRtx &&
-         a1.mScaleResolutionDownBy == a2.mScaleResolutionDownBy &&
-         a1.mSsrc == a2.mSsrc;
+         a1.mRid == a2.mRid &&
+         a1.mScaleResolutionDownBy == a2.mScaleResolutionDownBy;
 }
 
 // static
@@ -1334,6 +1379,12 @@ void RTCRtpSender::BreakCycles() {
   mDtmf = nullptr;
 }
 
+void RTCRtpSender::Unlink() {
+  if (mTransceiver) {
+    mTransceiver->Unlink();
+  }
+}
+
 void RTCRtpSender::UpdateTransport() {
   MOZ_ASSERT(NS_IsMainThread());
   if (!mHaveSetupTransport) {
@@ -1381,6 +1432,35 @@ void RTCRtpSender::MaybeUpdateConduit() {
   }
 }
 
+void RTCRtpSender::UpdateParametersCodecs() {
+  mParameters.mCodecs.Reset();
+  mParameters.mCodecs.Construct();
+
+  if (GetJsepTransceiver().mSendTrack.GetNegotiatedDetails()) {
+    const JsepTrackNegotiatedDetails details(
+        *GetJsepTransceiver().mSendTrack.GetNegotiatedDetails());
+    if (details.GetEncodingCount()) {
+      for (const auto& jsepCodec : details.GetEncoding(0).GetCodecs()) {
+        RTCRtpCodecParameters codec;
+        RTCRtpTransceiver::ToDomRtpCodecParameters(*jsepCodec, &codec);
+        Unused << mParameters.mCodecs.Value().AppendElement(codec, fallible);
+        if (jsepCodec->Type() == SdpMediaSection::kVideo) {
+          const JsepVideoCodecDescription& videoJsepCodec =
+              static_cast<JsepVideoCodecDescription&>(*jsepCodec);
+          // In our JSEP implementation, RTX is an addon to an existing codec,
+          // not a codec object in its own right. webrtc-pc treats RTX as a
+          // separate codec, however.
+          if (videoJsepCodec.mRtxEnabled) {
+            RTCRtpCodecParameters rtx;
+            RTCRtpTransceiver::ToDomRtpCodecParametersRtx(videoJsepCodec, &rtx);
+            Unused << mParameters.mCodecs.Value().AppendElement(rtx, fallible);
+          }
+        }
+      }
+    }
+  }
+}
+
 void RTCRtpSender::SyncFromJsep(const JsepTransceiver& aJsepTransceiver) {
   if (!mSimulcastEnvelopeSet) {
     // JSEP is establishing the simulcast envelope for the first time, right now
@@ -1406,6 +1486,7 @@ void RTCRtpSender::SyncFromJsep(const JsepTransceiver& aJsepTransceiver) {
       MOZ_ASSERT(mParameters.mEncodings.Length());
     }
   }
+  UpdateParametersCodecs();
 
   MaybeUpdateConduit();
 }
@@ -1512,7 +1593,6 @@ Maybe<RTCRtpSender::VideoConfig> RTCRtpSender::GetNewVideoConfig() {
 
       case dom::MediaSourceEnum::Microphone:
       case dom::MediaSourceEnum::AudioCapture:
-      case dom::MediaSourceEnum::EndGuard_:
         MOZ_ASSERT(false);
         break;
     }
@@ -1549,6 +1629,37 @@ Maybe<RTCRtpSender::VideoConfig> RTCRtpSender::GetNewVideoConfig() {
         break;
       }
     }
+  }
+
+  if (!mHaveLoggedUlpfecInfo) {
+    bool ulpfecNegotiated = false;
+    for (const auto& codec : configs) {
+      if (nsCRT::strcasestr(codec.mName.c_str(), "ulpfec")) {
+        ulpfecNegotiated = true;
+      }
+    }
+    mozilla::glean::codec_stats::ulpfec_negotiated
+        .Get(ulpfecNegotiated ? "negotiated"_ns : "not_negotiated"_ns)
+        .Add(1);
+    mHaveLoggedUlpfecInfo = true;
+  }
+
+  // Log codec information we are tracking
+  if (!mHaveLoggedOtherFec &&
+      !GetJsepTransceiver().mSendTrack.GetFecCodecName().empty()) {
+    mozilla::glean::codec_stats::other_fec_signaled
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetFecCodecName().c_str()))
+        .Add(1);
+    mHaveLoggedOtherFec = true;
+  }
+  if (!mHaveLoggedVideoPreferredCodec &&
+      !GetJsepTransceiver().mSendTrack.GetVideoPreferredCodec().empty()) {
+    mozilla::glean::codec_stats::video_preferred_codec
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetVideoPreferredCodec().c_str()))
+        .Add(1);
+    mHaveLoggedVideoPreferredCodec = true;
   }
 
   newConfig.mVideoRtpRtcpConfig = Some(details.GetRtpRtcpConfig());
@@ -1624,6 +1735,15 @@ Maybe<RTCRtpSender::AudioConfig> RTCRtpSender::GetNewAudioConfig() {
     }
 
     newConfig.mAudioCodec = Some(sendCodec);
+  }
+
+  if (!mHaveLoggedAudioPreferredCodec &&
+      !GetJsepTransceiver().mSendTrack.GetAudioPreferredCodec().empty()) {
+    mozilla::glean::codec_stats::audio_preferred_codec
+        .Get(nsDependentCString(
+            GetJsepTransceiver().mSendTrack.GetAudioPreferredCodec().c_str()))
+        .Add(1);
+    mHaveLoggedAudioPreferredCodec = true;
   }
 
   if (newConfig == oldConfig) {

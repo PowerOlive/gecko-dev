@@ -173,8 +173,6 @@ class WindowRenderer : public FrameRecorder {
    */
   virtual void WaitOnTransactionProcessed() {}
 
-  virtual bool IsCompositingCheap() { return true; }
-
   /**
    * returns the maximum texture size on this layer backend, or INT32_MAX
    * if there is no maximum
@@ -220,8 +218,6 @@ class WindowRenderer : public FrameRecorder {
   void UpdatePartialPrerenderedAnimations(
       const nsTArray<uint64_t>& aJankedAnimations);
 
-  const TimeStamp& GetAnimationReadyTime() const { return mAnimationReadyTime; }
-
  protected:
   virtual ~WindowRenderer() = default;
 
@@ -231,10 +227,6 @@ class WindowRenderer : public FrameRecorder {
   // compositor.
   nsRefPtrHashtable<nsUint64HashKey, dom::Animation>
       mPartialPrerenderedAnimations;
-
-  // The time when painting most recently finished. This is recorded so that
-  // we can time any play-pending animations from this point.
-  TimeStamp mAnimationReadyTime;
 };
 
 /**
@@ -266,8 +258,6 @@ class FallbackRenderer : public WindowRenderer {
   virtual void GetBackendName(nsAString& name) override {
     name.AssignLiteral("Fallback");
   }
-
-  bool IsCompositingCheap() override { return false; }
 
   void EndTransactionWithColor(const nsIntRect& aRect,
                                const gfx::DeviceColor& aColor);

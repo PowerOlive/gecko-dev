@@ -43,6 +43,42 @@ impl super::Instruction {
         instruction
     }
 
+    pub(super) fn source_continued(source: &[u8]) -> Self {
+        let mut instruction = Self::new(Op::SourceContinued);
+        instruction.add_operands(helpers::str_bytes_to_words(source));
+        instruction
+    }
+
+    pub(super) fn source_auto_continued(
+        source_language: spirv::SourceLanguage,
+        version: u32,
+        source: &Option<DebugInfoInner>,
+    ) -> Vec<Self> {
+        let mut instructions = vec![];
+
+        let with_continue = source.as_ref().and_then(|debug_info| {
+            (debug_info.source_code.len() > u16::MAX as usize).then_some(debug_info)
+        });
+        if let Some(debug_info) = with_continue {
+            let mut instruction = Self::new(Op::Source);
+            instruction.add_operand(source_language as u32);
+            instruction.add_operands(helpers::bytes_to_words(&version.to_le_bytes()));
+
+            let words = helpers::string_to_byte_chunks(debug_info.source_code, u16::MAX as usize);
+            instruction.add_operand(debug_info.source_file_id);
+            instruction.add_operands(helpers::str_bytes_to_words(words[0]));
+            instructions.push(instruction);
+            for word_bytes in words[1..].iter() {
+                let instruction_continue = Self::source_continued(word_bytes);
+                instructions.push(instruction_continue);
+            }
+        } else {
+            let instruction = Self::source(source_language, version, source);
+            instructions.push(instruction);
+        }
+        instructions
+    }
+
     pub(super) fn name(target_id: Word, name: &str) -> Self {
         let mut instruction = Self::new(Op::Name);
         instruction.add_operand(target_id);
@@ -666,6 +702,41 @@ impl super::Instruction {
         instruction
     }
 
+    pub(super) fn image_texel_pointer(
+        result_type_id: Word,
+        id: Word,
+        image: Word,
+        coordinates: Word,
+        sample: Word,
+    ) -> Self {
+        let mut instruction = Self::new(Op::ImageTexelPointer);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(image);
+        instruction.add_operand(coordinates);
+        instruction.add_operand(sample);
+        instruction
+    }
+
+    pub(super) fn image_atomic(
+        op: Op,
+        result_type_id: Word,
+        id: Word,
+        pointer: Word,
+        scope_id: Word,
+        semantics_id: Word,
+        value: Word,
+    ) -> Self {
+        let mut instruction = Self::new(op);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(pointer);
+        instruction.add_operand(scope_id);
+        instruction.add_operand(semantics_id);
+        instruction.add_operand(value);
+        instruction
+    }
+
     pub(super) fn image_query(op: Op, result_type_id: Word, id: Word, image: Word) -> Self {
         let mut instruction = Self::new(op);
         instruction.set_type(result_type_id);
@@ -704,6 +775,19 @@ impl super::Instruction {
         let mut instruction = Self::new(Op::RayQueryProceedKHR);
         instruction.set_type(result_type_id);
         instruction.set_result(id);
+        instruction.add_operand(query);
+        instruction
+    }
+
+    pub(super) fn ray_query_generate_intersection(query: Word, hit: Word) -> Self {
+        let mut instruction = Self::new(Op::RayQueryGenerateIntersectionKHR);
+        instruction.add_operand(query);
+        instruction.add_operand(hit);
+        instruction
+    }
+
+    pub(super) fn ray_query_confirm_intersection(query: Word) -> Self {
+        let mut instruction = Self::new(Op::RayQueryConfirmIntersectionKHR);
         instruction.add_operand(query);
         instruction
     }
@@ -1037,6 +1121,73 @@ impl super::Instruction {
         instruction.add_operand(semantics_id);
         instruction
     }
+
+    // Group Instructions
+
+    pub(super) fn group_non_uniform_ballot(
+        result_type_id: Word,
+        id: Word,
+        exec_scope_id: Word,
+        predicate: Word,
+    ) -> Self {
+        let mut instruction = Self::new(Op::GroupNonUniformBallot);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(exec_scope_id);
+        instruction.add_operand(predicate);
+
+        instruction
+    }
+    pub(super) fn group_non_uniform_broadcast_first(
+        result_type_id: Word,
+        id: Word,
+        exec_scope_id: Word,
+        value: Word,
+    ) -> Self {
+        let mut instruction = Self::new(Op::GroupNonUniformBroadcastFirst);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(exec_scope_id);
+        instruction.add_operand(value);
+
+        instruction
+    }
+    pub(super) fn group_non_uniform_gather(
+        op: Op,
+        result_type_id: Word,
+        id: Word,
+        exec_scope_id: Word,
+        value: Word,
+        index: Word,
+    ) -> Self {
+        let mut instruction = Self::new(op);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(exec_scope_id);
+        instruction.add_operand(value);
+        instruction.add_operand(index);
+
+        instruction
+    }
+    pub(super) fn group_non_uniform_arithmetic(
+        op: Op,
+        result_type_id: Word,
+        id: Word,
+        exec_scope_id: Word,
+        group_op: Option<spirv::GroupOperation>,
+        value: Word,
+    ) -> Self {
+        let mut instruction = Self::new(op);
+        instruction.set_type(result_type_id);
+        instruction.set_result(id);
+        instruction.add_operand(exec_scope_id);
+        if let Some(group_op) = group_op {
+            instruction.add_operand(group_op as u32);
+        }
+        instruction.add_operand(value);
+
+        instruction
+    }
 }
 
 impl From<crate::StorageFormat> for spirv::ImageFormat {
@@ -1064,8 +1215,11 @@ impl From<crate::StorageFormat> for spirv::ImageFormat {
             Sf::Rgba8Snorm => Self::Rgba8Snorm,
             Sf::Rgba8Uint => Self::Rgba8ui,
             Sf::Rgba8Sint => Self::Rgba8i,
-            Sf::Rgb10a2Unorm => Self::Rgb10a2ui,
-            Sf::Rg11b10Float => Self::R11fG11fB10f,
+            Sf::Bgra8Unorm => Self::Unknown,
+            Sf::Rgb10a2Uint => Self::Rgb10a2ui,
+            Sf::Rgb10a2Unorm => Self::Rgb10A2,
+            Sf::Rg11b10Ufloat => Self::R11fG11fB10f,
+            Sf::R64Uint => Self::R64ui,
             Sf::Rg32Uint => Self::Rg32ui,
             Sf::Rg32Sint => Self::Rg32i,
             Sf::Rg32Float => Self::Rg32f,

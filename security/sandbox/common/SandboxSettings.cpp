@@ -11,6 +11,7 @@
 #include "mozilla/Components.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_media.h"
+#include "mozilla/StaticPrefs_network.h"
 #include "mozilla/StaticPrefs_security.h"
 #include "mozilla/StaticPrefs_webgl.h"
 
@@ -19,7 +20,9 @@
 #ifdef XP_WIN
 #  include "mozilla/gfx/gfxVars.h"
 #  include "mozilla/WindowsVersion.h"
+#  include "nsAppRunner.h"
 #  include "nsExceptionHandler.h"
+#  include "PDMFactory.h"
 #endif  // XP_WIN
 
 using namespace mozilla;
@@ -104,10 +107,9 @@ nsIXULRuntime::ContentWin32kLockdownState GetContentWin32kLockdownState() {
   static auto getLockdownState = [] {
     auto state = GetWin32kLockdownState();
 
-    const char* stateStr = ContentWin32kLockdownStateToString(state);
-    CrashReporter::AnnotateCrashReport(
+    CrashReporter::RecordAnnotationCString(
         CrashReporter::Annotation::ContentSandboxWin32kState,
-        nsDependentCString(stateStr));
+        ContentWin32kLockdownStateToString(state));
 
     return state;
   };
@@ -121,6 +123,23 @@ nsIXULRuntime::ContentWin32kLockdownState GetContentWin32kLockdownState() {
 
 #endif  // XP_WIN
 }
+
+#if defined(XP_WIN)
+static bool IsWebglOutOfProcessEnabled() {
+  if (StaticPrefs::webgl_out_of_process_force()) {
+    return true;
+  }
+
+  // We have to check initialization state for gfxVars, because of early use in
+  // child processes. In rare cases this could lead to the incorrect sandbox
+  // level being reported, but not the incorrect one being set.
+  if (gfx::gfxVars::IsInitialized() && !gfx::gfxVars::AllowWebglOop()) {
+    return false;
+  }
+
+  return StaticPrefs::webgl_out_of_process();
+}
+#endif
 
 int GetEffectiveContentSandboxLevel() {
   if (PR_GetEnv("MOZ_DISABLE_CONTENT_SANDBOX")) {
@@ -152,6 +171,18 @@ int GetEffectiveContentSandboxLevel() {
     level = 3;
   }
 #endif
+#if defined(XP_WIN)
+  // Sandbox level 8, which uses a USER_RESTRICTED access token level, breaks if
+  // prefs moving processing out of the content process are not the default.
+  // We are also disabling for safe mode initially.
+  if (level >= 8 &&
+      (gSafeMode || !IsWebglOutOfProcessEnabled() ||
+       !PDMFactory::AllDecodersAreRemote() ||
+       !StaticPrefs::network_process_enabled() ||
+       !Preferences::GetBool("media.peerconnection.mtransport_process"))) {
+    level = 7;
+  }
+#endif
 
   return level;
 }
@@ -172,6 +203,39 @@ int GetEffectiveSocketProcessSandboxLevel() {
 int GetEffectiveGpuSandboxLevel() {
   return StaticPrefs::security_sandbox_gpu_level();
 }
+
+#if defined(MOZ_PROFILE_GENERATE)
+// It should only be allowed on instrumented builds, never on production
+// builds.
+#  if defined(XP_WIN)
+bool GetLlvmProfileDir(std::wstring& parentPath) {
+  bool rv = false;
+  if (const wchar_t* llvmProfileFileEnv = _wgetenv(L"LLVM_PROFILE_FILE")) {
+    std::wstring llvmProfileDir(llvmProfileFileEnv);
+    const size_t found = llvmProfileDir.find_last_of(L"/\\");
+    if (found != std::string::npos) {
+      parentPath = llvmProfileDir.substr(0, found);
+      parentPath.append(L"\\*");
+      rv = true;
+    }
+  }
+  return rv;
+}
+#  else   // defined(XP_WIN)
+bool GetLlvmProfileDir(std::string& parentPath) {
+  bool rv = false;
+  if (const char* llvmProfileFileEnv = getenv("LLVM_PROFILE_FILE")) {
+    std::string llvmProfileDir(llvmProfileFileEnv);
+    const size_t found = llvmProfileDir.find_last_of("/\\");
+    if (found != std::string::npos) {
+      parentPath = llvmProfileDir.substr(0, found);
+      rv = true;
+    }
+  }
+  return rv;
+}
+#  endif  // defined(XP_WIN)
+#endif    // defined(MOZ_PROFILE_GENERATE
 
 #if defined(XP_MACOSX)
 int ClampFlashSandboxLevel(const int aLevel) {

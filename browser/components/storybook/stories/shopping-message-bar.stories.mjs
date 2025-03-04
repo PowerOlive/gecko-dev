@@ -4,39 +4,48 @@
 
 // eslint-disable-next-line import/no-unresolved
 import { html, ifDefined } from "lit.all.mjs";
-// eslint-disable-next-line import/no-unassigned-import
 import "browser/components/shopping/content/shopping-message-bar.mjs";
+
+window.MozXULElement.insertFTLIfNeeded("browser/shopping.ftl");
+window.MozXULElement.insertFTLIfNeeded("toolkit/branding/brandings.ftl");
 
 export default {
   title: "Domain-specific UI Widgets/Shopping/Shopping Message Bar",
   component: "shopping-message-bar",
   argTypes: {
     type: {
-      control: {
-        type: "select",
-        options: ["stale", "generic-error", "not-enough-reviews"],
-      },
+      control: { type: "select" },
+      options: [
+        "stale",
+        "generic-error",
+        "not-enough-reviews",
+        "product-not-available",
+        "product-not-available-reported",
+        "thanks-for-reporting",
+        "analysis-in-progress",
+        "reanalysis-in-progress",
+        "page-not-supported",
+        "thank-you-for-feedback",
+      ],
     },
   },
   parameters: {
     status: "in-development",
-    fluent: `
-shopping-message-bar-warning-stale-analysis-title = Updates available
-shopping-message-bar-warning-stale-analysis-message = Re-analyze the reviews for this product, so you have the latest info.
-shopping-message-bar-warning-stale-analysis-link = Re-analyze reviews
-shopping-message-bar-generic-error-title = Something went wrong
-shopping-message-bar-generic-error-message = Couldn't load information. Please try again later.
-shopping-message-bar-warning-not-enough-reviews-title = Not enough reviews yet
-shopping-message-bar-warning-not-enough-reviews-message = When this product has more reviews, we’ll be able to analyze them.
-    `,
+    actions: {
+      handles: ["click"],
+    },
   },
 };
 
-const Template = ({ type }) => html`
-  <shopping-message-bar type=${ifDefined(type)}></shopping-message-bar>
+const Template = ({ type, progress }) => html`
+  <shopping-message-bar
+    type=${ifDefined(type)}
+    progress=${ifDefined(progress)}
+  ></shopping-message-bar>
 `;
 
 export const DefaultShoppingMessageBar = Template.bind({});
 DefaultShoppingMessageBar.args = {
   type: "stale",
+  progress: 0,
 };

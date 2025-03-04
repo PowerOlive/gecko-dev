@@ -15,6 +15,7 @@
 #include "ipc/EnumSerializer.h"
 #include "mozilla/EnumSet.h"
 #include "mozilla/GfxMessageUtils.h"
+#include "mozilla/ParamTraits_TiedFields.h"
 #include "mozilla/gfx/Rect.h"
 #include "mozilla/dom/MFCDMSerializers.h"
 
@@ -77,10 +78,10 @@ struct ParamTraits<mozilla::TrackInfo::TrackType>
           mozilla::TrackInfo::TrackType::kTextTrack> {};
 
 template <>
-struct ParamTraits<mozilla::VideoInfo::Rotation>
+struct ParamTraits<mozilla::VideoRotation>
     : public ContiguousEnumSerializerInclusive<
-          mozilla::VideoInfo::Rotation, mozilla::VideoInfo::Rotation::kDegree_0,
-          mozilla::VideoInfo::Rotation::kDegree_270> {};
+          mozilla::VideoRotation, mozilla::VideoRotation::kDegree_0,
+          mozilla::VideoRotation::kDegree_270> {};
 
 template <>
 struct ParamTraits<mozilla::MediaByteBuffer>
@@ -139,7 +140,7 @@ struct ParamTraits<mozilla::FlacCodecSpecificData> {
 
 template <>
 struct ParamTraits<mozilla::Mp3CodecSpecificData>
-    : public PlainOldDataSerializer<mozilla::Mp3CodecSpecificData> {};
+    : public ParamTraits_TiedFields<mozilla::Mp3CodecSpecificData> {};
 
 template <>
 struct ParamTraits<mozilla::OpusCodecSpecificData> {
@@ -214,7 +215,7 @@ struct ParamTraits<mozilla::MediaDataDecoder::ConversionRequired>
           mozilla::MediaDataDecoder::ConversionRequired,
           mozilla::MediaDataDecoder::ConversionRequired(0),
           mozilla::MediaDataDecoder::ConversionRequired(
-              mozilla::MediaDataDecoder::ConversionRequired::kNeedAnnexB)> {};
+              mozilla::MediaDataDecoder::ConversionRequired::kNeedHVCC)> {};
 
 template <>
 struct ParamTraits<mozilla::media::TimeUnit> {

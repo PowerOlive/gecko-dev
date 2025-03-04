@@ -43,7 +43,8 @@ class HTMLFieldSetElement final : public nsGenericHTMLFormControlElement,
 
   void InsertChildBefore(nsIContent* aChild, nsIContent* aBeforeThis,
                          bool aNotify, ErrorResult& aRv) override;
-  void RemoveChildNode(nsIContent* aKid, bool aNotify) override;
+  void RemoveChildNode(nsIContent* aKid, bool aNotify,
+                       const BatchRemovalState*) override;
 
   // nsGenericHTMLElement
   bool IsDisabledForEvents(WidgetEvent* aEvent) override;
@@ -90,8 +91,6 @@ class HTMLFieldSetElement final : public nsGenericHTMLFormControlElement,
 
   // XPCOM SetCustomValidity is OK for us
 
-  ElementState IntrinsicState() const override;
-
   /*
    * This method will update the fieldset's validity.  This method has to be
    * called by fieldset elements whenever their validity state or status
@@ -133,7 +132,7 @@ class HTMLFieldSetElement final : public nsGenericHTMLFormControlElement,
    * Number of invalid and candidate for constraint validation
    * elements in the fieldSet the last time UpdateValidity has been called.
    *
-   * @note Should only be used by UpdateValidity() and IntrinsicState()!
+   * @note Should only be used by UpdateValidity()
    */
   int32_t mInvalidElementsCount;
 };

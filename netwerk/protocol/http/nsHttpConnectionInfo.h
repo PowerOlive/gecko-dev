@@ -127,6 +127,13 @@ class nsHttpConnectionInfo final : public ARefBase {
   const char* ProxyPassword() const {
     return mProxyInfo ? mProxyInfo->Password().get() : nullptr;
   }
+  uint32_t ProxyFlag() const {
+    uint32_t flags = 0;
+    if (mProxyInfo) {
+      mProxyInfo->GetFlags(&flags);
+    }
+    return flags;
+  }
 
   const nsCString& ProxyAuthorizationHeader() const {
     return mProxyInfo ? mProxyInfo->ProxyAuthorizationHeader() : EmptyCString();
@@ -222,6 +229,9 @@ class nsHttpConnectionInfo final : public ARefBase {
   void SetWebTransport(bool aWebTransport);
   bool GetWebTransport() const { return mWebTransport; }
 
+  void SetWebTransportId(uint64_t id);
+  uint32_t GetWebTransportId() const { return mWebTransportId; };
+
   const nsCString& GetNPNToken() { return mNPNToken; }
   const nsCString& GetUsername() { return mUsername; }
 
@@ -232,6 +242,9 @@ class nsHttpConnectionInfo final : public ARefBase {
 
   // Returns true when proxying over HTTP or HTTPS
   bool UsingHttpProxy() const { return mUsingHttpProxy || mUsingHttpsProxy; }
+
+  // Returns true when only proxying over HTTP
+  bool UsingOnlyHttpProxy() const { return mUsingHttpProxy; }
 
   // Returns true when proxying over HTTPS
   bool UsingHttpsProxy() const { return mUsingHttpsProxy; }
@@ -260,8 +273,9 @@ class nsHttpConnectionInfo final : public ARefBase {
   void SetHasIPHintAddress(bool aHasIPHint) { mHasIPHintAddress = aHasIPHint; }
   bool HasIPHintAddress() const { return mHasIPHintAddress; }
 
-  void SetEchConfig(const nsACString& aEchConfig) { mEchConfig = aEchConfig; }
+  void SetEchConfig(const nsACString& aEchConfig);
   const nsCString& GetEchConfig() const { return mEchConfig; }
+  bool HasEchConfig() const { return !mEchConfig.IsEmpty(); }
 
  private:
   void Init(const nsACString& host, int32_t port, const nsACString& npnToken,
@@ -306,6 +320,9 @@ class nsHttpConnectionInfo final : public ARefBase {
 
   bool mHasIPHintAddress = false;
   nsCString mEchConfig;
+
+  uint64_t mWebTransportId = 0;  // current dedicated Id only used for
+                                 // Webtransport, zero means not dedicated
 
   // for RefPtr
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(nsHttpConnectionInfo, override)

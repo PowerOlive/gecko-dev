@@ -7,12 +7,10 @@
 #include "nsCertOverrideService.h"
 
 #include "NSSCertDBTrustDomain.h"
-#include "ScopedNSSTypes.h"
-#include "SharedSSLState.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/TaskQueue.h"
-#include "mozilla/Telemetry.h"
+#include "mozilla/glean/SecurityManagerSslMetrics.h"
 #include "mozilla/TextUtils.h"
 #include "mozilla/Tokenizer.h"
 #include "mozilla/Unused.h"
@@ -35,7 +33,6 @@
 #include "nsNSSComponent.h"
 #include "nsNetUtil.h"
 #include "nsStreamUtils.h"
-#include "nsStringBuffer.h"
 #include "nsThreadUtils.h"
 
 using namespace mozilla;
@@ -174,12 +171,12 @@ nsresult nsCertOverrideService::Init() {
   // attempt to read/write any settings file. Otherwise, we would end up
   // reading/writing the wrong settings file after a profile change.
   if (observerService) {
+    observerService->AddObserver(this, "last-pb-context-exited", false);
     observerService->AddObserver(this, "profile-do-change", true);
     // simulate a profile change so we read the current profile's settings file
     Observe(nullptr, "profile-do-change", nullptr);
   }
 
-  SharedSSLState::NoteCertOverrideServiceInstantiated();
   return NS_OK;
 }
 
@@ -202,6 +199,9 @@ nsCertOverrideService::Observe(nsISupports*, const char* aTopic,
     }
     Read(lock);
     CountPermanentOverrideTelemetry(lock);
+  } else if (!nsCRT::strcmp(aTopic, "last-pb-context-exited")) {
+    ClearValidityOverride("all:temporary-certificates"_ns, 0,
+                          OriginAttributes());
   }
 
   return NS_OK;
@@ -392,11 +392,6 @@ nsCertOverrideService::RememberValidityOverride(
   }
   if (!NS_IsMainThread()) {
     return NS_ERROR_NOT_SAME_THREAD;
-  }
-
-  UniqueCERTCertificate nsscert(aCert->GetCert());
-  if (!nsscert) {
-    return NS_ERROR_FAILURE;
   }
 
   nsAutoCString fpStr;
@@ -620,8 +615,8 @@ void nsCertOverrideService::CountPermanentOverrideTelemetry(
       overrideCount++;
     }
   }
-  Telemetry::Accumulate(Telemetry::SSL_PERMANENT_CERT_ERROR_OVERRIDES,
-                        overrideCount);
+  glean::ssl::permanent_cert_error_overrides.AccumulateSingleSample(
+      overrideCount);
 }
 
 static bool IsDebugger() {

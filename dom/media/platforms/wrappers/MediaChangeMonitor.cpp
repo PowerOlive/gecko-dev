@@ -6,8 +6,10 @@
 
 #include "MediaChangeMonitor.h"
 
+#include "Adts.h"
 #include "AnnexB.h"
 #include "H264.h"
+#include "H265.h"
 #include "GeckoProfiler.h"
 #include "ImageContainer.h"
 #include "MP4Decoder.h"
@@ -28,6 +30,32 @@ extern LazyLogModule gMediaDecoderLog;
 
 #define LOG(x, ...) \
   MOZ_LOG(gMediaDecoderLog, LogLevel::Debug, (x, ##__VA_ARGS__))
+
+// Gets the pixel aspect ratio from the decoded video size and the rendered
+// size.
+inline double GetPixelAspectRatio(const gfx::IntSize& aImage,
+                                  const gfx::IntSize& aDisplay) {
+  if (MOZ_UNLIKELY(aImage.IsEmpty() || aDisplay.IsEmpty())) {
+    return 0.0;
+  }
+  return (static_cast<double>(aDisplay.Width()) / aImage.Width()) /
+         (static_cast<double>(aDisplay.Height()) / aImage.Height());
+}
+
+// Returns the render size based on the PAR and the new image size.
+inline gfx::IntSize ApplyPixelAspectRatio(double aPixelAspectRatio,
+                                          const gfx::IntSize& aImage) {
+  // No need to apply PAR, or an invalid PAR.
+  if (aPixelAspectRatio == 1.0 || MOZ_UNLIKELY(aPixelAspectRatio <= 0)) {
+    return aImage;
+  }
+  double width = aImage.Width() * aPixelAspectRatio;
+  // Ignore values that would cause overflow.
+  if (MOZ_UNLIKELY(width > std::numeric_limits<int32_t>::max())) {
+    return aImage;
+  }
+  return gfx::IntSize(static_cast<int32_t>(width), aImage.Height());
+}
 
 // H264ChangeMonitor is used to ensure that only AVCC or AnnexB is fed to the
 // underlying MediaDataDecoder. The H264ChangeMonitor allows playback of content
@@ -120,7 +148,7 @@ class H264ChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
     aSample->mTrackInfo = mTrackInfo;
 
     if (aConversion == MediaDataDecoder::ConversionRequired::kNeedAnnexB) {
-      auto res = AnnexB::ConvertSampleToAnnexB(aSample, aNeedKeyFrame);
+      auto res = AnnexB::ConvertAVCCSampleToAnnexB(aSample, aNeedKeyFrame);
       if (res.isErr()) {
         return MediaResult(res.unwrapErr(),
                            RESULT_DETAIL("ConvertSampleToAnnexB"));
@@ -168,20 +196,197 @@ class H264ChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
   RefPtr<MediaByteBuffer> mPreviousExtraData;
 };
 
-// Gets the pixel aspect ratio from the decoded video size and the rendered
-// size.
-inline double GetPixelAspectRatio(const gfx::IntSize& aImage,
-                                  const gfx::IntSize& aDisplay) {
-  return (static_cast<double>(aDisplay.Width()) / aImage.Width()) /
-         (static_cast<double>(aDisplay.Height()) / aImage.Height());
-}
+class HEVCChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
+ public:
+  explicit HEVCChangeMonitor(const VideoInfo& aInfo) : mCurrentConfig(aInfo) {
+    const bool canBeInstantiated = CanBeInstantiated();
+    if (canBeInstantiated) {
+      UpdateConfigFromExtraData(aInfo.mExtraData);
+    }
+    LOG("created HEVCChangeMonitor, CanBeInstantiated=%d", canBeInstantiated);
+  }
 
-// Returns the render size based on the PAR and the new image size.
-inline gfx::IntSize ApplyPixelAspectRatio(double aPixelAspectRatio,
-                                          const gfx::IntSize& aImage) {
-  return gfx::IntSize(static_cast<int32_t>(aImage.Width() * aPixelAspectRatio),
-                      aImage.Height());
-}
+  bool CanBeInstantiated() const override {
+    auto rv = HVCCConfig::Parse(mCurrentConfig.mExtraData);
+    if (rv.isErr()) {
+      return false;
+    }
+    return rv.unwrap().HasSPS();
+  }
+
+  MediaResult CheckForChange(MediaRawData* aSample) override {
+    // To be usable we need to convert the sample to 4 bytes NAL size HVCC.
+    if (auto rv = AnnexB::ConvertSampleToHVCC(aSample); rv.isErr()) {
+      // We need HVCC content to be able to later parse the SPS.
+      // This is a no-op if the data is already HVCC.
+      nsPrintfCString msg("Failed to convert to HVCC");
+      LOG("%s", msg.get());
+      return MediaResult(rv.unwrapErr(), msg);
+    }
+
+    if (!AnnexB::IsHVCC(aSample)) {
+      nsPrintfCString msg("Invalid HVCC content");
+      LOG("%s", msg.get());
+      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR, msg);
+    }
+
+    RefPtr<MediaByteBuffer> extraData =
+        aSample->mKeyframe || !mSPS.IsEmpty()
+            ? H265::ExtractHVCCExtraData(aSample)
+            : nullptr;
+    // Sample doesn't contain any SPS and we already have SPS, do nothing.
+    auto curConfig = HVCCConfig::Parse(mCurrentConfig.mExtraData);
+    LOG("current config: %s",
+        curConfig.isOk() ? curConfig.inspect().ToString().get() : "invalid");
+    if ((!extraData || extraData->IsEmpty()) && curConfig.unwrap().HasSPS()) {
+      return NS_OK;
+    }
+
+    auto rv = HVCCConfig::Parse(extraData);
+    // Ignore a corrupted extradata.
+    if (rv.isErr()) {
+      LOG("Ignore corrupted extradata");
+      return NS_OK;
+    }
+    const HVCCConfig newConfig = rv.unwrap();
+    LOG("new config: %s", newConfig.ToString().get());
+
+    if (!newConfig.HasSPS() && !curConfig.unwrap().HasSPS()) {
+      // We don't have inband data and the original config didn't contain a SPS.
+      // We can't decode this content.
+      LOG("No sps found, waiting for initialization");
+      return NS_ERROR_NOT_INITIALIZED;
+    }
+
+    if (H265::CompareExtraData(extraData, mCurrentConfig.mExtraData)) {
+      LOG("No config changed");
+      return NS_OK;
+    }
+    UpdateConfigFromExtraData(extraData);
+
+    nsPrintfCString msg(
+        "HEVCChangeMonitor::CheckForChange has detected a change in the stream "
+        "and will request a new decoder");
+    LOG("%s", msg.get());
+    PROFILER_MARKER_TEXT("HEVC Stream Change", MEDIA_PLAYBACK, {}, msg);
+    return NS_ERROR_DOM_MEDIA_NEED_NEW_DECODER;
+  }
+
+  const TrackInfo& Config() const override { return mCurrentConfig; }
+
+  MediaResult PrepareSample(MediaDataDecoder::ConversionRequired aConversion,
+                            MediaRawData* aSample,
+                            bool aNeedKeyFrame) override {
+    MOZ_DIAGNOSTIC_ASSERT(
+        aConversion == MediaDataDecoder::ConversionRequired::kNeedAnnexB ||
+        aConversion == MediaDataDecoder::ConversionRequired::kNeedHVCC);
+    MOZ_DIAGNOSTIC_ASSERT(AnnexB::IsHVCC(aSample));
+
+    aSample->mExtraData = mCurrentConfig.mExtraData;
+    aSample->mTrackInfo = mTrackInfo;
+
+    if (aConversion == MediaDataDecoder::ConversionRequired::kNeedAnnexB) {
+      auto res = AnnexB::ConvertHVCCSampleToAnnexB(aSample, aNeedKeyFrame);
+      if (res.isErr()) {
+        return MediaResult(res.unwrapErr(),
+                           RESULT_DETAIL("ConvertSampleToAnnexB"));
+      }
+    }
+    return NS_OK;
+  }
+
+  bool IsHardwareAccelerated(nsACString& aFailureReason) const override {
+    // We only support HEVC via hardware decoding.
+    return true;
+  }
+
+ private:
+  void UpdateConfigFromExtraData(MediaByteBuffer* aExtraData) {
+    auto rv = HVCCConfig::Parse(aExtraData);
+    MOZ_ASSERT(rv.isOk());
+    const auto hvcc = rv.unwrap();
+
+    // If there are any new SPS/PPS/VPS, update the current stored ones.
+    if (auto nalu = hvcc.GetFirstAvaiableNALU(H265NALU::NAL_TYPES::SPS_NUT)) {
+      mSPS.Clear();
+      mSPS.AppendElements(nalu->mNALU);
+      if (auto rv = H265::DecodeSPSFromSPSNALU(*nalu); rv.isOk()) {
+        const auto sps = rv.unwrap();
+        mCurrentConfig.mImage.width = sps.GetImageSize().Width();
+        mCurrentConfig.mImage.height = sps.GetImageSize().Height();
+        if (const auto& vui = sps.vui_parameters;
+            vui && vui->HasValidAspectRatio()) {
+          mCurrentConfig.mDisplay = ApplyPixelAspectRatio(
+              vui->GetPixelAspectRatio(), mCurrentConfig.mImage);
+        } else {
+          mCurrentConfig.mDisplay.width = sps.GetDisplaySize().Width();
+          mCurrentConfig.mDisplay.height = sps.GetDisplaySize().Height();
+        }
+        mCurrentConfig.mColorDepth = sps.ColorDepth();
+        mCurrentConfig.mColorSpace = Some(sps.ColorSpace());
+        mCurrentConfig.mColorPrimaries = gfxUtils::CicpToColorPrimaries(
+            static_cast<gfx::CICP::ColourPrimaries>(sps.ColorPrimaries()),
+            gMediaDecoderLog);
+        mCurrentConfig.mTransferFunction = gfxUtils::CicpToTransferFunction(
+            static_cast<gfx::CICP::TransferCharacteristics>(
+                sps.TransferFunction()));
+        mCurrentConfig.mColorRange = sps.IsFullColorRange()
+                                         ? gfx::ColorRange::FULL
+                                         : gfx::ColorRange::LIMITED;
+      }
+    }
+    if (auto nalu = hvcc.GetFirstAvaiableNALU(H265NALU::NAL_TYPES::PPS_NUT)) {
+      mPPS.Clear();
+      mPPS.AppendElements(nalu->mNALU);
+    }
+    if (auto nalu = hvcc.GetFirstAvaiableNALU(H265NALU::NAL_TYPES::VPS_NUT)) {
+      mVPS.Clear();
+      mVPS.AppendElements(nalu->mNALU);
+    }
+    if (auto nalu =
+            hvcc.GetFirstAvaiableNALU(H265NALU::NAL_TYPES::PREFIX_SEI_NUT)) {
+      mSEI.Clear();
+      mSEI.AppendElements(nalu->mNALU);
+    }
+
+    // Construct a new extradata. A situation we encountered previously involved
+    // the initial extradata containing all required NALUs, while the inband
+    // extradata included only an SPS without the PPS or VPS. If we replace the
+    // extradata with the inband version alone, we risk losing the VPS and PPS,
+    // leading to decoder initialization failure on macOS. To avoid this, we
+    // should update only the differing NALUs, ensuring all essential
+    // information remains in the extradata.
+    MOZ_ASSERT(!mSPS.IsEmpty());  // SPS is something MUST to have
+    nsTArray<H265NALU> nalus;
+    // Append NALU by the order of NALU type. If we don't do so, it would cause
+    // an error on the FFmpeg decoder on Linux.
+    if (!mVPS.IsEmpty()) {
+      nalus.AppendElement(H265NALU(mVPS.Elements(), mVPS.Length()));
+    }
+    nalus.AppendElement(H265NALU(mSPS.Elements(), mSPS.Length()));
+    if (!mPPS.IsEmpty()) {
+      nalus.AppendElement(H265NALU(mPPS.Elements(), mPPS.Length()));
+    }
+    if (!mSEI.IsEmpty()) {
+      nalus.AppendElement(H265NALU(mSEI.Elements(), mSEI.Length()));
+    }
+    mCurrentConfig.mExtraData = H265::CreateNewExtraData(hvcc, nalus);
+    mTrackInfo = new TrackInfoSharedPtr(mCurrentConfig, mStreamID++);
+    LOG("Updated extradata, hasSPS=%d, hasPPS=%d, hasVPS=%d, hasSEI=%d",
+        !mSPS.IsEmpty(), !mPPS.IsEmpty(), !mVPS.IsEmpty(), !mSEI.IsEmpty());
+  }
+
+  VideoInfo mCurrentConfig;
+
+  // Full bytes content for nalu.
+  nsTArray<uint8_t> mSPS;
+  nsTArray<uint8_t> mPPS;
+  nsTArray<uint8_t> mVPS;
+  nsTArray<uint8_t> mSEI;
+
+  uint32_t mStreamID = 0;
+  RefPtr<TrackInfoSharedPtr> mTrackInfo;
+};
 
 class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
  public:
@@ -200,14 +405,23 @@ class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
       vpxInfo.mDisplay = mCurrentConfig.mDisplay;
       VPXDecoder::ReadVPCCBox(vpxInfo, mCurrentConfig.mExtraData);
       mInfo = Some(vpxInfo);
+
+      mCurrentConfig.mTransferFunction = Some(vpxInfo.TransferFunction());
+      mCurrentConfig.mColorPrimaries = Some(vpxInfo.ColorPrimaries());
+      mCurrentConfig.mColorSpace = Some(vpxInfo.ColorSpace());
     }
   }
 
   bool CanBeInstantiated() const override {
+    if (mCodec == VPXDecoder::Codec::VP8 && mCurrentConfig.mImage.IsEmpty()) {
+      // libvpx VP8 decoder via FFmpeg requires the image size to be set when
+      // initializing.
+      return false;
+    }
+
     // We want to see at least one sample before we create a decoder so that we
     // can create the vpcC content on mCurrentConfig.mExtraData.
-    return mCodec == VPXDecoder::Codec::VP8 || mInfo ||
-           mCurrentConfig.mCrypto.IsEncrypted();
+    return mInfo || mCurrentConfig.mCrypto.IsEncrypted();
   }
 
   MediaResult CheckForChange(MediaRawData* aSample) override {
@@ -222,6 +436,7 @@ class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
     if (!VPXDecoder::GetStreamInfo(dataSpan, info, mCodec)) {
       return NS_ERROR_DOM_MEDIA_DECODE_ERR;
     }
+
     // For both VP8 and VP9, we only look for resolution changes
     // on keyframes. Other resolution changes are invalid.
     if (!info.mKeyFrame) {
@@ -233,6 +448,12 @@ class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
       if (mInfo.ref().IsCompatible(info)) {
         return rv;
       }
+
+      // The VPX bitstream does not contain color primary or transfer function
+      // info, so copy over the old values (in case they are used).
+      info.mColorPrimaries = mInfo.ref().mColorPrimaries;
+      info.mTransferFunction = mInfo.ref().mTransferFunction;
+
       // We can't properly determine the image rect once we've had a resolution
       // change.
       mCurrentConfig.ResetImageRect();
@@ -263,9 +484,10 @@ class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
         info.mDisplay.Width(), info.mDisplay.Height(),
         info.mDisplayAndImageDifferent ? "specified" : "unspecified");
 
+    bool imageSizeEmpty = mCurrentConfig.mImage.IsEmpty();
     mInfo = Some(info);
     mCurrentConfig.mImage = info.mImage;
-    if (info.mDisplayAndImageDifferent) {
+    if (imageSizeEmpty || info.mDisplayAndImageDifferent) {
       // If the flag to change the display size is set in the sequence, we
       // set our original values to begin rescaling according to the new values.
       mCurrentConfig.mDisplay = info.mDisplay;
@@ -277,11 +499,10 @@ class VPXChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
 
     mCurrentConfig.mColorDepth = gfx::ColorDepthForBitDepth(info.mBitDepth);
     mCurrentConfig.mColorSpace = Some(info.ColorSpace());
-    // VPX bitstream doesn't specify color primaries.
 
-    // We don't update the transfer function here, because VPX bitstream
-    // doesn't specify the transfer function. Instead, we keep the transfer
-    // function (if any) that was set in mCurrentConfig when we were created.
+    // VPX bitstream doesn't specify color primaries, transfer function, or
+    // level. Keep the values that were set upon class construction.
+    //
     // If a video changes colorspaces away from BT2020, we won't clear
     // mTransferFunction, in case the video changes back to BT2020 and we
     // need the value again.
@@ -448,32 +669,107 @@ class AV1ChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
 };
 #endif
 
+class AACCodecChangeMonitor : public MediaChangeMonitor::CodecChangeMonitor {
+ public:
+  explicit AACCodecChangeMonitor(const AudioInfo& aInfo)
+      : mCurrentConfig(aInfo), mIsADTS(IsADTS(aInfo)) {}
+
+  bool CanBeInstantiated() const override { return true; }
+
+  MediaResult CheckForChange(MediaRawData* aSample) override {
+    bool isADTS =
+        ADTS::FrameHeader::MatchesSync(Span{aSample->Data(), aSample->Size()});
+    if (isADTS != mIsADTS) {
+      if (mIsADTS) {
+        if (!MakeAACSpecificConfig()) {
+          LOG("Failed to make AAC specific config");
+          return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR);
+        }
+        LOG("Reconfiguring decoder adts -> raw aac, with maked AAC specific "
+            "config: %zu bytes",
+            mCurrentConfig.mCodecSpecificConfig
+                .as<AudioCodecSpecificBinaryBlob>()
+                .mBinaryBlob->Length());
+      } else {
+        LOG("Reconfiguring decoder raw aac -> adts");
+        // Remove AAC specific config to configure a ADTS decoder.
+        mCurrentConfig.mCodecSpecificConfig =
+            AudioCodecSpecificVariant{NoCodecSpecificData{}};
+      }
+
+      mIsADTS = isADTS;
+      return MediaResult(NS_ERROR_DOM_MEDIA_NEED_NEW_DECODER);
+    }
+    return NS_OK;
+  }
+
+  const TrackInfo& Config() const override { return mCurrentConfig; }
+
+  MediaResult PrepareSample(MediaDataDecoder::ConversionRequired aConversion,
+                            MediaRawData* aSample,
+                            bool aNeedKeyFrame) override {
+    return NS_OK;
+  }
+
+ private:
+  static bool IsADTS(const AudioInfo& aInfo) {
+    return !aInfo.mCodecSpecificConfig.is<AacCodecSpecificData>() &&
+           !aInfo.mCodecSpecificConfig.is<AudioCodecSpecificBinaryBlob>();
+  }
+
+  bool MakeAACSpecificConfig() {
+    MOZ_ASSERT(IsADTS(mCurrentConfig));
+    // If profile is not set, default to AAC-LC
+    const uint8_t aacObjectType =
+        mCurrentConfig.mProfile ? mCurrentConfig.mProfile : 2;
+    auto r = ADTS::MakeSpecificConfig(aacObjectType, mCurrentConfig.mRate,
+                                      mCurrentConfig.mChannels);
+    if (r.isErr()) {
+      return false;
+    }
+    mCurrentConfig.mCodecSpecificConfig =
+        AudioCodecSpecificVariant{AudioCodecSpecificBinaryBlob{r.unwrap()}};
+    return true;
+  }
+
+  AudioInfo mCurrentConfig;
+  bool mIsADTS;
+};
+
 MediaChangeMonitor::MediaChangeMonitor(
     PDMFactory* aPDMFactory,
     UniquePtr<CodecChangeMonitor>&& aCodecChangeMonitor,
     MediaDataDecoder* aDecoder, const CreateDecoderParams& aParams)
     : mChangeMonitor(std::move(aCodecChangeMonitor)),
       mPDMFactory(aPDMFactory),
-      mCurrentConfig(aParams.VideoConfig()),
+      mCurrentConfig(aParams.mConfig.Clone()),
       mDecoder(aDecoder),
       mParams(aParams) {}
 
 /* static */
 RefPtr<PlatformDecoderModule::CreateDecoderPromise> MediaChangeMonitor::Create(
     PDMFactory* aPDMFactory, const CreateDecoderParams& aParams) {
+  LOG("MediaChangeMonitor::Create, params = %s", aParams.ToString().get());
   UniquePtr<CodecChangeMonitor> changeMonitor;
-  const VideoInfo& currentConfig = aParams.VideoConfig();
-  if (VPXDecoder::IsVPX(currentConfig.mMimeType)) {
-    changeMonitor = MakeUnique<VPXChangeMonitor>(currentConfig);
+  if (aParams.IsVideo()) {
+    const VideoInfo& config = aParams.VideoConfig();
+    if (VPXDecoder::IsVPX(config.mMimeType)) {
+      changeMonitor = MakeUnique<VPXChangeMonitor>(config);
 #ifdef MOZ_AV1
-  } else if (AOMDecoder::IsAV1(currentConfig.mMimeType)) {
-    changeMonitor = MakeUnique<AV1ChangeMonitor>(currentConfig);
+    } else if (AOMDecoder::IsAV1(config.mMimeType)) {
+      changeMonitor = MakeUnique<AV1ChangeMonitor>(config);
 #endif
+    } else if (MP4Decoder::IsHEVC(config.mMimeType)) {
+      changeMonitor = MakeUnique<HEVCChangeMonitor>(config);
+    } else {
+      MOZ_ASSERT(MP4Decoder::IsH264(config.mMimeType));
+      changeMonitor = MakeUnique<H264ChangeMonitor>(
+          config, aParams.mOptions.contains(
+                      CreateDecoderParams::Option::FullH264Parsing));
+    }
   } else {
-    MOZ_ASSERT(MP4Decoder::IsH264(currentConfig.mMimeType));
-    changeMonitor = MakeUnique<H264ChangeMonitor>(
-        currentConfig, aParams.mOptions.contains(
-                           CreateDecoderParams::Option::FullH264Parsing));
+    MOZ_ASSERT(MP4Decoder::IsAAC(aParams.AudioConfig().mMimeType));
+    changeMonitor = MakeUnique<AACCodecChangeMonitor>(aParams.AudioConfig());
   }
 
   // The change monitor may have an updated track config. E.g. the h264 monitor
@@ -481,6 +777,7 @@ RefPtr<PlatformDecoderModule::CreateDecoderPromise> MediaChangeMonitor::Create(
   // new set of params with the updated track info from our monitor and the
   // other params for aParams and use that going forward.
   const CreateDecoderParams updatedParams{changeMonitor->Config(), aParams};
+  LOG("updated params = %s", updatedParams.ToString().get());
 
   RefPtr<MediaChangeMonitor> instance = new MediaChangeMonitor(
       aPDMFactory, std::move(changeMonitor), nullptr, updatedParams);
@@ -519,6 +816,10 @@ RefPtr<MediaDataDecoder::InitPromise> MediaChangeMonitor::Init() {
                    mDecoderInitialized = true;
                    mConversionRequired = Some(mDecoder->NeedsConversion());
                    mCanRecycleDecoder = Some(CanRecycleDecoder());
+                   if (mPendingSeekThreshold) {
+                     mDecoder->SetSeekThreshold(*mPendingSeekThreshold);
+                     mPendingSeekThreshold.reset();
+                   }
                  }
                  return mInitPromise.ResolveOrRejectIfExists(std::move(aValue),
                                                              __func__);
@@ -664,6 +965,7 @@ RefPtr<ShutdownPromise> MediaChangeMonitor::ShutdownDecoder() {
   AssertOnThread();
   mConversionRequired.reset();
   if (mDecoder) {
+    MutexAutoLock lock(mMutex);
     RefPtr<MediaDataDecoder> decoder = std::move(mDecoder);
     return decoder->Shutdown();
   }
@@ -681,28 +983,39 @@ bool MediaChangeMonitor::IsHardwareAccelerated(
   // Which will always be.
   return true;
 #else
-  return MediaDataDecoder::IsHardwareAccelerated(aFailureReason);
+  return mChangeMonitor->IsHardwareAccelerated(aFailureReason);
 #endif
 }
 
 void MediaChangeMonitor::SetSeekThreshold(const media::TimeUnit& aTime) {
-  if (mDecoder) {
-    mDecoder->SetSeekThreshold(aTime);
-  } else {
-    MediaDataDecoder::SetSeekThreshold(aTime);
-  }
+  GetCurrentSerialEventTarget()->Dispatch(NS_NewRunnableFunction(
+      "MediaChangeMonitor::SetSeekThreshold",
+      [self = RefPtr<MediaChangeMonitor>(this), time = aTime, this] {
+        // During the shutdown.
+        if (mShutdownPromise) {
+          return;
+        }
+        if (mDecoder && mDecoderInitialized) {
+          mDecoder->SetSeekThreshold(time);
+        } else {
+          mPendingSeekThreshold = Some(time);
+        }
+      }));
 }
 
 RefPtr<MediaChangeMonitor::CreateDecoderPromise>
 MediaChangeMonitor::CreateDecoder() {
-  mCurrentConfig = *mChangeMonitor->Config().GetAsVideoInfo();
+  mCurrentConfig = mChangeMonitor->Config().Clone();
+  CreateDecoderParams currentParams = {*mCurrentConfig, mParams};
+  currentParams.mWrappers -= media::Wrapper::MediaChangeMonitor;
+  LOG("MediaChangeMonitor::CreateDecoder, current params = %s",
+      currentParams.ToString().get());
   RefPtr<CreateDecoderPromise> p =
-      mPDMFactory
-          ->CreateDecoder(
-              {mCurrentConfig, mParams, CreateDecoderParams::NoWrapper(true)})
+      mPDMFactory->CreateDecoder(currentParams)
           ->Then(
               GetCurrentSerialEventTarget(), __func__,
               [self = RefPtr{this}, this](RefPtr<MediaDataDecoder>&& aDecoder) {
+                MutexAutoLock lock(mMutex);
                 mDecoder = std::move(aDecoder);
                 DDLINKCHILD("decoder", mDecoder.get());
                 return CreateDecoderPromise::CreateAndResolve(true, __func__);
@@ -743,6 +1056,11 @@ MediaResult MediaChangeMonitor::CreateDecoderAndInit(MediaRawData* aSample) {
                       mDecoderInitialized = true;
                       mConversionRequired = Some(mDecoder->NeedsConversion());
                       mCanRecycleDecoder = Some(CanRecycleDecoder());
+
+                      if (mPendingSeekThreshold) {
+                        mDecoder->SetSeekThreshold(*mPendingSeekThreshold);
+                        mPendingSeekThreshold.reset();
+                      }
 
                       if (!mFlushPromise.IsEmpty()) {
                         // A Flush is pending, abort the current operation.
@@ -944,6 +1262,11 @@ void MediaChangeMonitor::FlushThenShutdownDecoder(
             mDecodePromise.Reject(aError, __func__);
           })
       ->Track(mFlushRequest);
+}
+
+MediaDataDecoder* MediaChangeMonitor::GetDecoderOnNonOwnerThread() const {
+  MutexAutoLock lock(mMutex);
+  return mDecoder;
 }
 
 #undef LOG

@@ -162,12 +162,12 @@ If the referent is an error created with an engine internal message template
 this is a string which is the name of the template; `undefined` otherwise.
 
 ### `errorLineNumber`
-If the referent is an Error object, this is the line number at which the
-referent was created; `undefined`  otherwise.
+If the referent is an Error object, this is the 1-origin line number at which
+the referent was created; `undefined`  otherwise.
 
 ### `errorColumnNumber`
-If the referent is an Error object, this is the column number at which the
-referent was created; `undefined`  otherwise.
+If the referent is an Error object, this is the 1-origin column number in
+UTF-16 code units at which the referent was created; `undefined`  otherwise.
 
 ### `isBoundFunction`
 If the referent is a debuggee function, returns `true` if the referent is a
@@ -465,16 +465,18 @@ referent as viewed from a particular compartment. Given a
 `Debugger.Object` instance that presents <i>o</i> as it would be seen
 by code in <i>d</i>'s compartment.
 
-### `makeDebuggeeNativeFunction(value)`
-If <i>value</i> is a native function in the debugger's compartment, create
-an equivalent function for the same native in the debuggee's realm, and
-return a `Debugger.Object` instance for the new function.  The new function
-can be accessed by code in the debuggee without going through a cross
-compartment wrapper.
-
 ### `isSameNative(value)`
 If <i>value</i> is a native function in the debugger's compartment, return
 whether the referent is a native function for the same C++ native.
+
+### `isSameNativeWithJitInfo(value)`
+If <i>value</i> is a native function in the debugger's compartment, return
+whether the referent is a native function for the same C++ native with the
+same JSJitInfo pointer value.
+
+This can be used to distinguish functions with shared native function
+implementation with different JSJitInfo pointer to define the underlying
+functionality.
 
 ### `isNativeGetterWithJitInfo()`
 Return whether the referent is a native getter function with JSJitInfo.
@@ -600,6 +602,12 @@ exception.  The `options` object can have the following properties:
   * `isScriptElement`: Optional boolean which will set the source's
     `introductionType` to `"inlineScript"` if specified.  Otherwise, the
     source's `introductionType` will be `undefined`.
+  * `forceEnableAsmJS`: Optional boolean to force enable the asm.js feature.
+    Unless specified, asm.js is disabled by default in the debuggee global.
+    This option can be used when the createSource is used for recompiling the
+    top-level script, where the script contains asm.js functions and the asm.js
+    was enabled at the first compilation, and the consumer doesn't want the
+    asm.js functions being compiled as regular JS functions.
 
 ### `asEnvironment()`
 If the referent is a global object, return the [`Debugger.Environment`][environment]

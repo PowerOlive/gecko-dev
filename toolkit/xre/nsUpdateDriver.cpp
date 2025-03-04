@@ -71,46 +71,6 @@ static LazyLogModule sUpdateLog("updatedriver");
 #endif
 #define LOG(args) MOZ_LOG(sUpdateLog, mozilla::LogLevel::Debug, args)
 
-#ifdef XP_MACOSX
-static void UpdateDriverSetupMacCommandLine(int& argc, char**& argv,
-                                            bool restart) {
-  if (NS_IsMainThread()) {
-    CommandLineServiceMac::SetupMacCommandLine(argc, argv, restart);
-    return;
-  }
-  // Bug 1335916: SetupMacCommandLine calls a CoreFoundation function that
-  // asserts that it was called from the main thread, so if we are not the main
-  // thread, we have to dispatch that call to there. But we also have to get the
-  // result from it, so we can't just dispatch and return, we have to wait
-  // until the dispatched operation actually completes. So we also set up a
-  // monitor to signal us when that happens, and block until then.
-  Monitor monitor MOZ_UNANNOTATED("nsUpdateDriver SetupMacCommandLine");
-
-  nsresult rv = NS_DispatchToMainThread(NS_NewRunnableFunction(
-      "UpdateDriverSetupMacCommandLine",
-      [&argc, &argv, restart, &monitor]() -> void {
-        CommandLineServiceMac::SetupMacCommandLine(argc, argv, restart);
-        MonitorAutoLock(monitor).Notify();
-      }));
-
-  if (NS_FAILED(rv)) {
-    LOG(
-        ("Update driver error dispatching SetupMacCommandLine to main thread: "
-         "%d\n",
-         uint32_t(rv)));
-    return;
-  }
-
-  // The length of this wait is arbitrary, but should be long enough that having
-  // it expire means something is seriously wrong.
-  CVStatus status =
-      MonitorAutoLock(monitor).Wait(TimeDuration::FromSeconds(60));
-  if (status == CVStatus::Timeout) {
-    LOG(("Update driver timed out waiting for SetupMacCommandLine\n"));
-  }
-}
-#endif
-
 static nsresult GetCurrentWorkingDir(nsACString& aOutPath) {
   // Cannot use NS_GetSpecialDirectory because XPCOM is not yet initialized.
   // This code is duplicated from xpcom/io/SpecialSystemDirectory.cpp:
@@ -119,13 +79,13 @@ static nsresult GetCurrentWorkingDir(nsACString& aOutPath) {
 
 #if defined(XP_WIN)
   wchar_t wpath[MAX_PATH];
-  if (!_wgetcwd(wpath, ArrayLength(wpath))) {
+  if (!_wgetcwd(wpath, std::size(wpath))) {
     return NS_ERROR_FAILURE;
   }
   CopyUTF16toUTF8(nsDependentString(wpath), aOutPath);
 #else
   char path[MAXPATHLEN];
-  if (!getcwd(path, ArrayLength(path))) {
+  if (!getcwd(path, std::size(path))) {
     return NS_ERROR_FAILURE;
   }
   aOutPath = path;
@@ -186,33 +146,49 @@ static bool GetStatusFile(nsIFile* dir, nsCOMPtr<nsIFile>& result) {
   return GetFile(dir, "update.status"_ns, result);
 }
 
+static void GetPidString(nsACString& output) {
+  output.Truncate(0);
+  output.AppendInt((int32_t)getpid());
+}
+
 /**
- * Get the contents of the update.status file when the update.status file can
- * be opened with read and write access. The reason it is opened for both read
- * and write is to prevent trying to update when the user doesn't have write
- * access to the update directory.
+ * Get the contents of the file when it can be opened with read and write
+ * access. The reason it is opened for both read and write is to prevent trying
+ * to update when the user doesn't have write access to the update directory.
+ * Otherwise we will loop infinitely and try to install it over and over.
  *
- * @param statusFile the status file object.
- * @param buf        the buffer holding the file contents
+ * @param  file
+ *         The file object.
+ * @param  buf
+ *         The buffer holding the file contents.
  *
- * @return true if successful, false otherwise.
+ * @return The result of `PR_Read`: number of characters read or -1 on error.
  */
 template <size_t Size>
-static bool GetStatusFileContents(nsIFile* statusFile, char (&buf)[Size]) {
-  static_assert(
-      Size > 16,
-      "Buffer needs to be large enough to hold the known status codes");
-
+static int32_t ReadWritableFile(nsIFile* file, char (&buf)[Size]) {
   PRFileDesc* fd = nullptr;
-  nsresult rv = statusFile->OpenNSPRFileDesc(PR_RDWR, 0660, &fd);
+  nsresult rv = file->OpenNSPRFileDesc(PR_RDWR, 0660, &fd);
   if (NS_FAILED(rv)) {
-    return false;
+    return 0;
   }
 
   const int32_t n = PR_Read(fd, buf, Size);
   PR_Close(fd);
 
-  return (n >= 0);
+  return n;
+}
+
+static nsresult WriteFile(nsIFile* file, nsACString& toWrite) {
+  PRFileDesc* fd = nullptr;
+  nsresult rv = file->OpenNSPRFileDesc(PR_WRONLY | PR_CREATE_FILE | PR_TRUNCATE,
+                                       0660, &fd);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  const int32_t n =
+      PR_Write(fd, PromiseFlatCString(toWrite).get(), toWrite.Length());
+  PR_Close(fd);
+
+  return (unsigned long)n == toWrite.Length() ? NS_OK : NS_ERROR_FAILURE;
 }
 
 enum UpdateStatus {
@@ -236,8 +212,9 @@ enum UpdateStatus {
 static UpdateStatus GetUpdateStatus(nsIFile* dir,
                                     nsCOMPtr<nsIFile>& statusFile) {
   if (GetStatusFile(dir, statusFile)) {
+    // This buffer must be big enough to hold all valid status codes
     char buf[32];
-    if (GetStatusFileContents(statusFile, buf)) {
+    if (ReadWritableFile(statusFile, buf) >= 0) {
       const char kPending[] = "pending";
       const char kPendingService[] = "pending-service";
       const char kPendingElevate[] = "pending-elevate";
@@ -299,6 +276,73 @@ static bool IsOlderVersion(nsIFile* versionFile, const char* appVersion) {
   return mozilla::Version(appVersion) > buf;
 }
 
+nsresult GetUpdatePatchDir(nsIFile* updRootDir, nsIFile** updatesDirOut) {
+  nsresult rv;
+  nsCOMPtr<nsIFile> updatesDir;
+  rv = updRootDir->Clone(getter_AddRefs(updatesDir));
+  rv = updatesDir->AppendNative("updates"_ns);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = updatesDir->AppendNative("0"_ns);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  updatesDir.forget(updatesDirOut);
+  return NS_OK;
+}
+
+nsresult IsMultiSessionInstallLockoutActive(nsIFile* updRootDir,
+                                            bool& isActive) {
+  nsresult rv;
+
+  nsCOMPtr<nsIFile> timestampFile;
+  rv = GetUpdatePatchDir(updRootDir, getter_AddRefs(timestampFile));
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = timestampFile->AppendNative("update.timestamp"_ns);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Let's make sure we can hold any valid, unsigned 64 bit integer plus a null.
+  // Maximum 64 bit integer: 18446744073709551615 (20 characters)
+  const size_t bufferSize = 21;
+  char buffer[bufferSize];
+  int32_t readLen = ReadWritableFile(timestampFile, buffer);
+  NS_ENSURE_TRUE(readLen >= 0 && readLen < static_cast<int32_t>(bufferSize),
+                 NS_ERROR_FAILURE);
+  buffer[readLen] = '\0';
+
+  // If we couldn't read anything from the file, the lockout is not active.
+  if (readLen == 0) {
+    isActive = false;
+    return NS_OK;
+  }
+
+  nsDependentCString timestampString(buffer);
+  // This timestamp represents the end of the Multi Session Install Lockout.
+  uint64_t msilEnd = timestampString.ToInteger64(&rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  uint64_t now = PR_Now() / PR_USEC_PER_MSEC;
+
+  isActive = now < msilEnd;
+
+#ifdef DEBUG
+  printf_stderr("Multi Session Install Lockout %s active\n",
+                isActive ? "is" : "is not");
+#endif
+
+  return NS_OK;
+}
+
+nsresult WriteUpdateCompleteTestFile(nsIFile* updRootDir) {
+  nsCOMPtr<nsIFile> outputFile;
+  nsresult rv = updRootDir->Clone(getter_AddRefs(outputFile));
+  NS_ENSURE_SUCCESS(rv, rv);
+  outputFile->AppendNative("test_process_updates.txt"_ns);
+
+  nsAutoCString pid;
+  GetPidString(pid);
+
+  return WriteFile(outputFile, pid);
+}
+
 /**
  * Applies, switches, or stages an update.
  *
@@ -316,6 +360,9 @@ static bool IsOlderVersion(nsIFile* versionFile, const char* appVersion) {
 static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
                         int appArgc, char** appArgv, bool restart,
                         bool isStaged, ProcessType* outpid) {
+  MOZ_DIAGNOSTIC_ASSERT(
+      !restart || NS_IsMainThread(),
+      "restart may only be set when called on the main thread");
   // The following determines the update operation to perform.
   // 1. When restart is false the update will be staged.
   // 2. When restart is true and isStaged is false the update will apply the mar
@@ -399,7 +446,9 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
 
   // appFilePath and workingDirPath are only used when the application will be
   // restarted.
+#ifndef XP_MACOSX
   nsAutoCString appFilePath;
+#endif
   nsAutoCString workingDirPath;
   if (restart) {
     // Get the path to the current working directory.
@@ -409,7 +458,9 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     }
 
     // Get the application file path used by the updater to restart the
-    // application after the update has finished.
+    // application after the update has finished. Note that macOS uses the
+    // path to the application bundle, i.e. installDirPath, to relaunch the
+    // application.
     nsCOMPtr<nsIFile> appFile;
     XRE_GetBinaryPath(getter_AddRefs(appFile));
     if (!appFile) {
@@ -423,7 +474,7 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
       return;
     }
     CopyUTF16toUTF8(appFilePathW, appFilePath);
-#else
+#elif !defined(XP_MACOSX)
     rv = appFile->GetNativePath(appFilePath);
     if (NS_FAILED(rv)) {
       return;
@@ -532,7 +583,7 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     // which is ignored by the updater.
     pid.AssignLiteral("0");
 #else
-    pid.AppendInt((int32_t)getpid());
+    GetPidString(pid);
 #endif
     if (isStaged) {
       // Append a special token to the PID in order to inform the updater that
@@ -544,9 +595,10 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     pid.AssignLiteral("-1");
   }
 
-  int argc = 5;
+  int argc = 7;
   if (restart) {
-    argc = appArgc + 6;
+    argc += 1;  // callback working directory
+    argc += appArgc;
     if (gRestartedByOS) {
       argc += 1;
     }
@@ -556,20 +608,26 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     return;
   }
   argv[0] = (char*)updaterPath.get();
-  argv[1] = (char*)updateDirPath.get();
-  argv[2] = (char*)installDirPath.get();
-  argv[3] = (char*)applyToDirPath.get();
-  argv[4] = (char*)pid.get();
+  argv[1] = const_cast<char*>("3");
+  argv[2] = (char*)updateDirPath.get();
+  argv[3] = (char*)installDirPath.get();
+  argv[4] = (char*)applyToDirPath.get();
+  argv[5] = const_cast<char*>("first");
+  argv[6] = (char*)pid.get();
   if (restart && appArgc) {
-    argv[5] = (char*)workingDirPath.get();
-    argv[6] = (char*)appFilePath.get();
+    argv[7] = (char*)workingDirPath.get();
+#if defined(XP_MACOSX)
+    argv[8] = (char*)installDirPath.get();
+#else
+    argv[8] = (char*)appFilePath.get();
+#endif
     for (int i = 1; i < appArgc; ++i) {
-      argv[6 + i] = appArgv[i];
+      argv[8 + i] = appArgv[i];
     }
     if (gRestartedByOS) {
       // We haven't truly started up, restore this argument so that we will have
       // it upon restart.
-      argv[6 + appArgc] = const_cast<char*>("-os-restarted");
+      argv[8 + appArgc] = const_cast<char*>("-os-restarted");
     }
   }
   argv[argc] = nullptr;
@@ -616,15 +674,20 @@ static void ApplyUpdate(nsIFile* greDir, nsIFile* updateDir, nsIFile* appDir,
     }
   }
 #elif defined(XP_MACOSX)
-UpdateDriverSetupMacCommandLine(argc, argv, restart);
-if (restart && needElevation) {
-  bool hasLaunched = LaunchElevatedUpdate(argc, argv, outpid);
-  free(argv);
-  if (!hasLaunched) {
-    LOG(("Failed to launch elevated update!"));
-    exit(1);
+if (restart) {
+  // Ensure we've added URLs to load into the app command line if we're
+  // restarting.
+  CommandLineServiceMac::SetupMacCommandLine(argc, argv, restart);
+
+  if (needElevation) {
+    bool hasLaunched = LaunchElevatedUpdate(argc, argv, outpid);
+    free(argv);
+    if (!hasLaunched) {
+      LOG(("Failed to launch elevated update!"));
+      exit(1);
+    }
+    exit(0);
   }
-  exit(0);
 }
 
 if (isStaged) {
@@ -704,11 +767,7 @@ nsresult ProcessUpdates(nsIFile* greDir, nsIFile* appDir, nsIFile* updRootDir,
 #endif
 
   nsCOMPtr<nsIFile> updatesDir;
-  rv = updRootDir->Clone(getter_AddRefs(updatesDir));
-  NS_ENSURE_SUCCESS(rv, rv);
-  rv = updatesDir->AppendNative("updates"_ns);
-  NS_ENSURE_SUCCESS(rv, rv);
-  rv = updatesDir->AppendNative("0"_ns);
+  rv = GetUpdatePatchDir(updRootDir, getter_AddRefs(updatesDir));
   NS_ENSURE_SUCCESS(rv, rv);
 
   // Return early since there isn't a valid update when the update application
@@ -957,8 +1016,8 @@ nsUpdateProcessor::GetServiceRegKeyExists(bool* aResult) {
 }
 
 NS_IMETHODIMP
-nsUpdateProcessor::RegisterApplicationRestartWithLaunchArgs(
-    const nsTArray<nsString>& argvExtra) {
+nsUpdateProcessor::AttemptAutomaticApplicationRestartWithLaunchArgs(
+    const nsTArray<nsString>& argvExtra, int32_t* pidRet) {
 #ifndef XP_WIN
   return NS_ERROR_NOT_IMPLEMENTED;
 #else
@@ -967,29 +1026,46 @@ nsUpdateProcessor::RegisterApplicationRestartWithLaunchArgs(
   // the arguments the process was launched with.
   LPWSTR currentCommandLine = GetCommandLineW();
 
-  // Register a restart flag for the application based on the current
-  // command line. The program will then automatically restart
-  // upon termination.
-  // The application must have been running for a minimum of 60
-  // seconds for a restart to be correctly registered.
+  // Spawn a new process for the application based on the current
+  // command line with the -restart-pid <pid> flag. This flag
+  // can be used with MaybeWaitForProcessExit() to have
+  // the process wait until the parent process has exited.
   if (currentCommandLine) {
     // Append additional command line arguments to current command line for
-    // restart
-    nsTArray<const wchar_t*> additionalArgv(argvExtra.Length());
-    for (const nsString& arg : argvExtra) {
-      additionalArgv.AppendElement(static_cast<const wchar_t*>(arg.get()));
-    }
-
+    // restart.
     int currentArgc = 0;
-    LPWSTR* currentCommandLineArgv =
-        CommandLineToArgvW(currentCommandLine, &currentArgc);
-    UniquePtr<LPWSTR, LocalFreeDeleter> uniqueCurrentArgv(
-        currentCommandLineArgv);
-    mozilla::UniquePtr<wchar_t[]> restartCommandLine = mozilla::MakeCommandLine(
-        currentArgc, uniqueCurrentArgv.get(), additionalArgv.Length(),
-        additionalArgv.Elements());
-    ::RegisterApplicationRestart(restartCommandLine.get(),
-                                 RESTART_NO_CRASH | RESTART_NO_HANG);
+    UniquePtr<LPWSTR, LocalFreeDeleter> currentArgv(
+        CommandLineToArgvW(currentCommandLine, &currentArgc));
+    nsTArray<wchar_t*> restartCommandLineArgv(currentArgc + argvExtra.Length() +
+                                              2);
+    for (int i = 0; i < currentArgc; i++) {
+      restartCommandLineArgv.AppendElement(currentArgv.get()[i]);
+    }
+    for (const nsString& arg : argvExtra) {
+      restartCommandLineArgv.AppendElement(static_cast<wchar_t*>(arg.get()));
+    }
+    // Append -restart-pid flag and pid to restart command line.
+    DWORD pidCurrent = GetCurrentProcessId();
+    nsString pid;
+    pid.AppendInt(static_cast<uint32_t>(pidCurrent));
+    nsString pidFlag = u"-restart-pid"_ns;
+    restartCommandLineArgv.AppendElement(pidFlag.get());
+    restartCommandLineArgv.AppendElement(pid.get());
+
+    // Create new process that interacts with MaybeWaitForProcessExit()
+    // and sleeps until the original process is killed.
+    wchar_t exeName[MAX_PATH];
+    GetModuleFileNameW(NULL, exeName, MAX_PATH);
+    HANDLE childHandle;
+    WinLaunchChild(exeName, restartCommandLineArgv.Length(),
+                   restartCommandLineArgv.Elements(), nullptr, &childHandle);
+    *pidRet = GetProcessId(childHandle);
+    CloseHandle(childHandle);
+    if (!*pidRet) {
+      printf_stderr("*** ApplyUpdate: !pidRet ***\n");
+      return NS_ERROR_ABORT;
+    }
+    printf_stderr("*** ApplyUpdate: launched pidRet = %d ***\n", *pidRet);
 
     MOZ_LOG(sUpdateLog, mozilla::LogLevel::Debug,
             ("register application restart succeeded"));
@@ -1000,4 +1076,41 @@ nsUpdateProcessor::RegisterApplicationRestartWithLaunchArgs(
   }
   return NS_OK;
 #endif  // #ifndef XP_WIN
+}
+
+NS_IMETHODIMP
+nsUpdateProcessor::WaitForProcessExit(uint32_t pid, uint32_t timeoutMS) {
+#ifndef XP_WIN
+  return NS_ERROR_NOT_IMPLEMENTED;
+#else
+
+  nsAutoHandle hProcess(OpenProcess(SYNCHRONIZE, FALSE, pid));
+  if (!hProcess) {
+    // It's possible the pid is incorrect, or the process has exited.
+    // This isn't necessarily a failure state as if the process has
+    // already exited then that is the desired behavior.
+    MOZ_LOG(sUpdateLog, mozilla::LogLevel::Warning,
+            ("WaitForProcessExit(%d): failed to OpenProcess", pid));
+    return NS_OK;
+  }
+
+  // Wait up to timeoutMS milliseconds for termination.
+  DWORD waitRv = WaitForSingleObjectEx(hProcess, timeoutMS, FALSE);
+  if (waitRv != WAIT_OBJECT_0) {
+    if (waitRv == WAIT_TIMEOUT) {
+      MOZ_LOG(
+          sUpdateLog, mozilla::LogLevel::Debug,
+          ("WaitForProcessExit(%d): timed out after %d MS", pid, timeoutMS));
+      return NS_ERROR_ABORT;
+    }
+
+    MOZ_LOG(sUpdateLog, mozilla::LogLevel::Warning,
+            ("WaitForProcessExit(%d): unexpected error %lx", pid, waitRv));
+    return NS_ERROR_FAILURE;
+  }
+
+  MOZ_LOG(sUpdateLog, mozilla::LogLevel::Debug,
+          ("WaitForProcessExit(%d): success", pid));
+  return NS_OK;
+#endif  // XP_WIN
 }

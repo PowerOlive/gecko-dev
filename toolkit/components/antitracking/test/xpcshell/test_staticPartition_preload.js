@@ -28,7 +28,7 @@ async function checkCache(originAttributes) {
   const data = await new Promise(resolve => {
     let cacheEntries = [];
     let cacheVisitor = {
-      onCacheStorageInfo(num, consumption) {},
+      onCacheStorageInfo() {},
       onCacheEntryInfo(uri, idEnhance) {
         cacheEntries.push({ uri, idEnhance });
       },
@@ -48,8 +48,9 @@ async function checkCache(originAttributes) {
     "example.org",
     "style.css"
   );
-  ok(
-    foundEntryCount > 0,
+  Assert.greater(
+    foundEntryCount,
+    0,
     `Cache entries expected for style.css and OA=${originAttributes}`
   );
 }
@@ -57,7 +58,6 @@ async function checkCache(originAttributes) {
 add_task(async () => {
   do_get_profile();
 
-  Services.prefs.setBoolPref("network.preload", true);
   Services.prefs.setIntPref("network.cookie.cookieBehavior", 0);
 
   const server = CookieXPCShellUtils.createServer({
@@ -122,10 +122,12 @@ add_task(async () => {
       "http://example.org/empty"
     );
 
-    await contentPage.spawn([], () =>
+    await contentPage.spawn([], () => {
       // eslint-disable-next-line no-undef
-      content.windowUtils.clearSharedStyleSheetCache()
-    );
+      content.windowUtils.clearStyleSheetCache();
+      // eslint-disable-next-line no-undef
+      content.windowUtils.clearScriptCache();
+    });
 
     await contentPage.close();
 

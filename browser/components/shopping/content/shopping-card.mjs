@@ -5,7 +5,10 @@
 
 import { html, ifDefined } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
+// eslint-disable-next-line import/no-unassigned-import
+import "chrome://global/content/elements/moz-card.mjs";
 
+const MIN_SHOW_MORE_HEIGHT = 200;
 /**
  * A card container to be used in the shopping sidebar. There are three card types.
  * The default type where no type attribute is required and the card will have no extra functionality.
@@ -14,62 +17,145 @@ import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
  *
  * @property {string} label - The label text that will be used for the card header
  * @property {string} type - (optional) The type of card. No type specified
- *   will be the default card. The other available type is "accordion".
+ *   will be the default card. The other available types are "accordion" and "show-more".
  */
 class ShoppingCard extends MozLitElement {
   static properties = {
     label: { type: String },
     type: { type: String },
+    rating: { type: String },
+    _isExpanded: { type: Boolean },
   };
 
   static get queries() {
     return {
-      detailsEl: "#shopping-details",
+      contentEl: "#content",
     };
   }
 
-  labelTemplate() {
-    if (this.label) {
-      if (this.type === "accordion") {
-        return html`
-          <div id="label-wrapper">
-            <span id="header">${this.label}</span>
-            <button
-              tabindex="-1"
-              class="icon chevron-icon ghost-button"
-              @click=${this.handleChevronButtonClick}
-            ></button>
-          </div>
-        `;
-      }
-      return html`
-        <div id="label-wrapper">
-          <span id="header">${this.label}</span><slot name="rating"></slot>
-        </div>
-      `;
-    }
-    return "";
-  }
-
   cardTemplate() {
-    if (this.type === "accordion") {
+    if (this.type === "show-more") {
       return html`
-        <details id="shopping-details">
-          <summary>${this.labelTemplate()}</summary>
-          <div id="content"><slot name="content"></slot></div>
-        </details>
+        <article
+          id="content"
+          class="show-more"
+          aria-describedby="content"
+          expanded="false"
+        >
+          <slot name="content"></slot>
+
+          <footer>
+            <moz-button
+              size="small"
+              aria-controls="content"
+              data-l10n-id="shopping-show-more-button"
+              @click=${this.handleShowMoreButtonClick}
+            ></moz-button>
+          </footer>
+        </article>
       `;
     }
     return html`
-      ${this.labelTemplate()}
       <div id="content" aria-describedby="content">
+        ${this.headingTemplate()}
         <slot name="content"></slot>
       </div>
     `;
   }
 
-  handleChevronButtonClick() {
-    this.detailsEl.open = !this.detailsEl.open;
+  headingTemplate() {
+    if (this.rating) {
+      return html`<div id="label-wrapper">
+        <span id="heading">${this.label}</span>
+        <moz-five-star
+          rating=${this.rating === 0 ? 0.5 : this.rating}
+        </moz-five-star>
+      </div>`;
+    }
+    return "";
+  }
+
+  onCardToggle(e) {
+    const action = e.newState == "open" ? "expanded" : "collapsed";
+    let cardId = this.getAttribute("id");
+    switch (cardId) {
+      case "shopping-settings-label":
+        Glean.shopping.surfaceSettingsExpandClicked.record({ action });
+        break;
+      case "shopping-analysis-explainer-label":
+        Glean.shopping.surfaceShowQualityExplainerClicked.record({
+          action,
+        });
+        break;
+    }
+  }
+
+  handleShowMoreButtonClick(e) {
+    this._isExpanded = !this._isExpanded;
+    // toggle show more/show less text
+    e.target.setAttribute(
+      "data-l10n-id",
+      this._isExpanded
+        ? "shopping-show-less-button"
+        : "shopping-show-more-button"
+    );
+    // toggle content expanded attribute
+    this.contentEl.attributes.expanded.value = this._isExpanded;
+
+    let action = this._isExpanded ? "expanded" : "collapsed";
+    Glean.shopping.surfaceShowMoreReviewsButtonClicked.record({
+      action,
+    });
+  }
+
+  enableShowMoreButton() {
+    this._isExpanded = false;
+    this.toggleAttribute("showMoreButtonDisabled", false);
+    this.contentEl.attributes.expanded.value = false;
+  }
+
+  disableShowMoreButton() {
+    this._isExpanded = true;
+    this.toggleAttribute("showMoreButtonDisabled", true);
+    this.contentEl.attributes.expanded.value = true;
+  }
+
+  firstUpdated() {
+    if (this.type !== "show-more") {
+      return;
+    }
+
+    let contentSlot = this.shadowRoot.querySelector("slot[name='content']");
+    let contentSlotEls = contentSlot.assignedElements();
+    if (!contentSlotEls.length) {
+      return;
+    }
+
+    let slottedDiv = contentSlotEls[0];
+
+    this.handleContentSlotResize = this.handleContentSlotResize.bind(this);
+    this.contentResizeObserver = new ResizeObserver(
+      this.handleContentSlotResize
+    );
+    this.contentResizeObserver.observe(slottedDiv);
+  }
+
+  disconnectedCallback() {
+    this.contentResizeObserver?.disconnect();
+  }
+
+  handleContentSlotResize(entries) {
+    for (let entry of entries) {
+      if (entry.contentRect.height === 0) {
+        return;
+      }
+
+      if (entry.contentRect.height < MIN_SHOW_MORE_HEIGHT) {
+        this.disableShowMoreButton();
+      } else if (this.hasAttribute("showMoreButtonDisabled")) {
+        this.enableShowMoreButton();
+      }
+    }
   }
 
   render() {
@@ -78,13 +164,16 @@ class ShoppingCard extends MozLitElement {
         rel="stylesheet"
         href="chrome://browser/content/shopping/shopping-card.css"
       />
-      <article
+      <moz-card
         class="shopping-card"
-        aria-labelledby="header"
-        aria-label=${ifDefined(this.label)}
+        type=${this.type}
+        heading=${ifDefined(
+          this.label && !this.rating ? this.label : undefined
+        )}
+        @toggle=${this.onCardToggle}
       >
         ${this.cardTemplate()}
-      </article>
+      </moz-card>
     `;
   }
 }

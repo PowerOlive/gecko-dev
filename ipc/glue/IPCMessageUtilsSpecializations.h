@@ -34,6 +34,8 @@
 #include "mozilla/Unused.h"
 #include "mozilla/Vector.h"
 #include "mozilla/dom/ipc/StructuredCloneData.h"
+#include "mozilla/dom/UserActivation.h"
+#include "gfxPlatform.h"
 #include "nsCSSPropertyID.h"
 #include "nsDebug.h"
 #include "nsIContentPolicy.h"
@@ -350,7 +352,7 @@ struct ParamTraits<nsID> {
     WriteParam(aWriter, aParam.m0);
     WriteParam(aWriter, aParam.m1);
     WriteParam(aWriter, aParam.m2);
-    for (unsigned int i = 0; i < mozilla::ArrayLength(aParam.m3); i++) {
+    for (unsigned int i = 0; i < std::size(aParam.m3); i++) {
       WriteParam(aWriter, aParam.m3[i]);
     }
   }
@@ -361,7 +363,7 @@ struct ParamTraits<nsID> {
         !ReadParam(aReader, &(aResult->m2)))
       return false;
 
-    for (unsigned int i = 0; i < mozilla::ArrayLength(aResult->m3); i++)
+    for (unsigned int i = 0; i < std::size(aResult->m3); i++)
       if (!ReadParam(aReader, &(aResult->m3[i]))) return false;
 
     return true;
@@ -493,14 +495,21 @@ struct ParamTraits<mozilla::EnumSet<T, U>> {
     return false;
   }
 
+  static constexpr size_t kUnderlyingWidth = [] {
+    if constexpr (std::numeric_limits<serializedType>::is_specialized) {
+      return std::numeric_limits<serializedType>::digits;
+    } else {
+      return serializedType().size();  // for std::bitset<N>
+    }
+  }();
+
   static constexpr serializedType AllEnumBits() {
-    return ~serializedType(0) >> (std::numeric_limits<serializedType>::digits -
-                                  (mozilla::MaxEnumValue<T>::value + 1));
+    return ~serializedType(0) >>
+           (kUnderlyingWidth - (mozilla::MaxEnumValue<T>::value + 1));
   }
 
   static constexpr bool IsLegalValue(const serializedType value) {
-    static_assert(mozilla::MaxEnumValue<T>::value <
-                      std::numeric_limits<serializedType>::digits,
+    static_assert(mozilla::MaxEnumValue<T>::value < kUnderlyingWidth,
                   "Enum max value is not in the range!");
     static_assert(
         std::is_unsigned<decltype(mozilla::MaxEnumValue<T>::value)>::value,
@@ -755,7 +764,16 @@ struct ParamTraits<std::tuple<Ts...>> {
 template <>
 struct ParamTraits<mozilla::net::LinkHeader> {
   typedef mozilla::net::LinkHeader paramType;
+  constexpr static int kNumberOfMembers = 14;
+  constexpr static int kSizeOfEachMember = sizeof(nsString);
+  constexpr static int kExpectedSizeOfParamType =
+      kNumberOfMembers * kSizeOfEachMember;
+
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be written below.");
+    // Bug 1860565: `aParam.mAnchor` is not written.
+
     WriteParam(aWriter, aParam.mHref);
     WriteParam(aWriter, aParam.mRel);
     WriteParam(aWriter, aParam.mTitle);
@@ -765,11 +783,17 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     WriteParam(aWriter, aParam.mSizes);
     WriteParam(aWriter, aParam.mType);
     WriteParam(aWriter, aParam.mMedia);
+    WriteParam(aWriter, aParam.mAnchor);
     WriteParam(aWriter, aParam.mCrossOrigin);
     WriteParam(aWriter, aParam.mReferrerPolicy);
     WriteParam(aWriter, aParam.mAs);
+    WriteParam(aWriter, aParam.mFetchPriority);
   }
   static bool Read(MessageReader* aReader, paramType* aResult) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be handled below.");
+    // Bug 1860565: `aParam.mAnchor` is not handled.
+
     if (!ReadParam(aReader, &aResult->mHref)) {
       return false;
     }
@@ -797,14 +821,60 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     if (!ReadParam(aReader, &aResult->mMedia)) {
       return false;
     }
+    if (!ReadParam(aReader, &aResult->mAnchor)) {
+      return false;
+    }
     if (!ReadParam(aReader, &aResult->mCrossOrigin)) {
       return false;
     }
     if (!ReadParam(aReader, &aResult->mReferrerPolicy)) {
       return false;
     }
-    return ReadParam(aReader, &aResult->mAs);
+    if (!ReadParam(aReader, &aResult->mAs)) {
+      return false;
+    }
+    return ReadParam(aReader, &aResult->mFetchPriority);
   };
+};
+
+template <>
+struct ParamTraits<mozilla::dom::UserActivation::Modifiers> {
+  typedef mozilla::dom::UserActivation::Modifiers paramType;
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    WriteParam(aWriter, aParam.mModifiers);
+  }
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    return ReadParam(aReader, &aResult->mModifiers);
+  };
+};
+
+template <>
+struct ParamTraits<gfxPlatform::GlobalReflowFlags>
+    : public BitFlagsEnumSerializer<gfxPlatform::GlobalReflowFlags,
+                                    gfxPlatform::GlobalReflowFlags::ALL_BITS> {
+};
+
+template <size_t N>
+struct ParamTraits<std::bitset<N>> {
+  typedef std::bitset<N> paramType;
+  static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    paramType mask(UINT64_MAX);
+    for (size_t i = 0; i < N; i += 64) {
+      uint64_t value = ((aParam >> i) & mask).to_ullong();
+      WriteParam(aWriter, value);
+    }
+  }
+
+  static bool Read(MessageReader* aReader, paramType* aResult) {
+    for (size_t i = 0; i < N; i += 64) {
+      uint64_t value = 0;
+      if (!ReadParam(aReader, &value)) {
+        return false;
+      }
+      *aResult |= std::bitset<N>(value) << i;
+    }
+    return true;
+  }
 };
 
 } /* namespace IPC */

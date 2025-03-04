@@ -16,7 +16,18 @@ add_task(async function () {
       variables: {
         pagesNumSampledVisits:
           "places.frecency.pages.alternative.numSampledVisits",
+        pagesNumInteractions:
+          "places.frecency.pages.alternative.interactions.numInteractions",
+        pagesMaxVisitGap:
+          "places.frecency.pages.alternative.interactions.maxVisitGapSeconds",
+        pagesViewTimeSeconds:
+          "places.frecency.pages.alternative.interactions.viewTimeSeconds",
+        pageViewTimeIfManyKeypressesSeconds:
+          "places.frecency.pages.alternative.interactions.viewTimeIfManyKeypressesSeconds",
+        manyKeypresses:
+          "places.frecency.pages.alternative.interactions.manyKeypresses",
         pagesHalfLifeDays: "places.frecency.pages.alternative.halfLifeDays",
+        pagesVeryHighWeight: "places.frecency.pages.alternative.veryHighWeight",
         pagesHighWeight: "places.frecency.pages.alternative.highWeight",
         pagesMediumWeight: "places.frecency.pages.alternative.mediumWeight",
         pagesLowWeight: "places.frecency.pages.alternative.lowWeight",
@@ -34,7 +45,7 @@ async function doTest(enableVariable, enablePref, otherVariables) {
     {
       // Empty for sanity check.
     },
-    "frecency",
+    "urlbar",
     "config"
   );
   Assert.ok(!Services.prefs.prefHasUserValue(enablePref));
@@ -48,7 +59,7 @@ async function doTest(enableVariable, enablePref, otherVariables) {
     {
       [enableVariable]: true,
     },
-    "frecency",
+    "urlbar",
     "config"
   );
   Assert.ok(Services.prefs.prefHasUserValue(enablePref));
@@ -65,7 +76,7 @@ async function doTest(enableVariable, enablePref, otherVariables) {
   for (let variable of Object.keys(otherVariables)) {
     config[variable] = FAKE_VALUE;
   }
-  reset = await UrlbarTestUtils.initNimbusFeature(config, "frecency", "config");
+  reset = await UrlbarTestUtils.initNimbusFeature(config, "urlbar", "config");
   Assert.ok(Services.prefs.prefHasUserValue(enablePref));
   Assert.equal(Services.prefs.getBoolPref(enablePref), true);
   for (let pref of Object.values(otherVariables)) {
